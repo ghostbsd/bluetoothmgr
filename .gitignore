@@ -53,3 +53,11 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# IDE
+.idea/
+
+# Built probe binaries (tools/probe)
+tools/probe/probe1-enum
+tools/probe/probe2-privilege
+tools/probe/probe3-adapter
