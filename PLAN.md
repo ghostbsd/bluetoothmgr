@@ -367,21 +367,26 @@ JSON over a Unix socket. What changes is the daemon's internals.
 
 ```
 bluetoothmgr/
+├── lib/libbtmgr/            # NEW: the HCI layer, INTERNALLIB (static, not installed)
+│   ├── btmgr.h              # the one public header
+│   ├── adapter.c            # enumerate adapters, read name/scan/class
+│   ├── conn.c               # connection list
+│   ├── scan.c               # inquiry and remote name resolution
+│   └── class.c              # class-of-device decode
 ├── common/                  # NEW: shared by daemon and all clients
 │   ├── proto.c/.h           # JSON encode/decode of the IPC messages
 │   └── ipc_client.c/.h      # connect, send, recv, reconnect. One copy.
 ├── daemon/src/
 │   ├── main.c               # signals, event loop setup, privilege notes
-│   ├── adapter.c/.h         # libbluetooth wrappers: enum, info, scan state
-│   ├── conn.c/.h            # connection list, create/disconnect
 │   ├── listen.c/.h          # NEW: passive HCI event listener (F3)
-│   ├── scan.c/.h            # inquiry, driven async, not bt_devinquiry
+│   ├── ops.c/.h             # privileged: connect, disconnect, scan enable
 │   ├── devices.c/.h         # the merged device model
 │   ├── store.c/.h           # NEW: our own device database
 │   ├── hosts.c/.h           # /etc/bluetooth/hosts read/write, aliases
 │   ├── hcsecd.c/.h          # NEW: hcsecd.conf parse + regenerate
 │   ├── keys.c/.h            # /var/db/hcsecd.keys read + delete
 │   └── ipc.c/.h             # Unix socket server
+├── tools/btmgr-probe/       # NEW: read-only CLI, M1. Links libbtmgr only.
 ├── applet-mate/src/
 ├── settings/src/
 └── applet-indicator/src/    # later
@@ -389,6 +394,15 @@ bluetoothmgr/
 
 New pieces relative to the brief, and why:
 
+- **`lib/libbtmgr/`.** The brief put the HCI wrappers under `daemon/src/`, but
+  they have two consumers with different privilege levels: `btmgr-probe`, which
+  is unprivileged and daemon-free, and `bluetoothmgrd`. Per F2 the read-only
+  half needs no root at all, so making it a separate static library keeps that
+  boundary explicit rather than implicit. Built as `INTERNALLIB`, meaning a
+  `.a` linked into each binary, never installed, no public ABI to maintain.
+  Note this is a *build* boundary only. It does not replace the daemon, which
+  still exists to hold the root privilege, serialise config writes, own the
+  single event listener, and give all clients one consistent view of state.
 - **`common/`.** The brief had `ipc_client.c` duplicated under each frontend.
   Three copies of a protocol parser will drift. One directory, built once,
   linked by everyone.
@@ -615,16 +629,32 @@ everything around it.
 Each milestone ends with something runnable and testable.
 
 ### M0. Repo scaffolding
-Directory tree, BSD `Makefile`s using `bsd.prog.mk`, `.gitignore`, and
-`tools/probe/` committed with the three probe programs from today so the
-datapoint is reproducible on other hardware.
+Directory tree, BSD `Makefile`s using `bsd.prog.mk` and `bsd.lib.mk`,
+`.gitignore`, and `tools/probe/` committed with the three probe programs from
+today so the datapoint is reproducible on other hardware. Folded into M1, since
+on its own it produces nothing runnable.
 
-### M1. `btmgr-probe`, a read-only CLI
-Not in the brief, but it is the right first step. A single binary that prints
-adapter state, the connection list, and a scan, using `adapter.c`, `conn.c` and
-`scan.c`. It needs no root, no event loop and no IPC, so it isolates the
-libbluetooth layer completely. When this is clean, the hardest unknowns are
-gone. This is also where the C fundamentals in 5.1 land.
+### M1. `libbtmgr` plus `btmgr-probe`, a read-only CLI
+Not in the brief, but it is the right first step. Build `lib/libbtmgr`
+(`adapter.c`, `conn.c`, `scan.c`, `class.c`) and a single binary that prints
+adapter state, the connection list, and a scan. It needs no root, no event loop,
+no IPC and no config files, so it isolates the libbluetooth layer completely.
+When this is clean, the hardest unknowns are gone. This is also where the C
+fundamentals in 5.1 land.
+
+API conventions fixed here and followed by every module after:
+
+- **Caller provides the array.** Every list has a hard kernel-side bound
+  (`HCI_DEVMAX`, `NG_HCI_MAX_CON_NUM`, our own scan cap), so functions take
+  `(struct T *out, int *n)` where `*n` is capacity in and count out. This is the
+  same in/out convention the kernel ioctls use. M1 therefore performs no heap
+  allocation at all, which makes heap ownership a deliberate topic in M2 rather
+  than an accident in M1.
+- **Our structs, not libbluetooth's.** `struct btmgr_adapter` and
+  `struct btmgr_device` mirror `SPEC.md` B5, not `struct bt_devinfo`. The copy
+  buys a boundary so the wire protocol is not hostage to a kernel header.
+- **Return `int`, 0 on success, -1 with `errno` on failure.** Matches
+  `libbluetooth` exactly, so our code composes with it without translation.
 
 ### M2. Daemon core
 `main.c` with a `kqueue` loop, `EVFILT_SIGNAL` for `SIGTERM`/`SIGHUP`,
