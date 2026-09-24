@@ -1,0 +1,7 @@
+# tools/probe is deliberately not listed here. Those three programs are the
+# archived planning datapoint and carry their own hand-written Makefile, which
+# does not implement the bsd.subdir.mk target set.
+
+SUBDIR=		btmgr-probe
+
+.include <bsd.subdir.mk>

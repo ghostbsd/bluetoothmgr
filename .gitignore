@@ -61,3 +61,13 @@ dkms.conf
 tools/probe/probe1-enum
 tools/probe/probe2-privilege
 tools/probe/probe3-adapter
+
+# BSD make build products
+*.pieo
+*.po
+*.pico
+.depend
+.depend.*
+*.debug
+*.full
+tools/btmgr-probe/btmgr-probe

@@ -1,6 +1,6 @@
 # BluetoothMgr — Implementation Plan
 
-Status: planning. Nothing implemented yet.
+Status: M1 in progress. `lib/libbtmgr` and `tools/btmgr-probe` build and run.
 
 See `SPEC.md` for the normative contract. This document holds the research
 and the reasoning; the spec holds the rules.
@@ -15,7 +15,9 @@ against the source tree in `../ghostbsd-src` or executed on this machine
 ## 0. How to read this document
 
 Sections 1 to 3 are the research result: what FreeBSD actually gives us. Read
-them first, because three of the findings invalidate assumptions in the brief.
+them first, because several of the findings invalidate assumptions that look
+reasonable from the outside. F7 and F8 in particular were only found by
+reading the base system's source and then hitting them in practice.
 
 Section 4 is the revised architecture. Section 5 is a C learning track, since
 this project is also the vehicle for getting comfortable in C. Sections 6 to 8
@@ -25,7 +27,8 @@ are the build order, the resolved decisions, and the risks.
 
 ## 1. Ground truth: measured on this machine
 
-I compiled and ran three small probe programs against the live stack. Results:
+I compiled and ran three small probe programs against the live stack, all as an
+ordinary user. Results:
 
 | Fact | Value | How |
 |---|---|---|
@@ -45,8 +48,9 @@ Toolchain and libraries, all present: clang 19.1.7, `gtk+-3.0`,
 `libmatepanelapplet-4.0`, `glib-2.0`, `json-glib-1.0`, `jansson`, `libbluetooth`,
 `libsdp`, `virtual_oss`, `pactl`.
 
-The probe sources are in the scratchpad and should be committed as
-`tools/probe/` so the datapoint is reproducible.
+The probe sources are committed as `tools/probe/` so the datapoint is
+reproducible on other hardware. `tools/btmgr-probe` supersedes them for day to
+day use; the three originals are kept as the record of what was measured when.
 
 ---
 
@@ -354,6 +358,40 @@ Also worth noting for robustness: `dump_keys_file()` runs only on clean shutdown
 and on `SIGHUP`. A `kill -9` or a panic loses every key learned since the last
 reload. After a successful pairing, the daemon should issue a reload to force a
 flush rather than trusting shutdown to happen cleanly.
+
+### F8. The socket `bt_devenum()` hands its callback cannot be written to. **[verified]**
+
+Found the hard way in M1: any `bt_devreq()` on that socket fails with `EPIPE`,
+which raises `SIGPIPE` and kills the process by default. Reading and `ioctl()`
+work normally, which is why it went unnoticed until the first HCI *command*.
+
+The chain, all in base:
+
+1. `bt_devenum()` binds and connects its socket to a dummy node `"x"` before
+   the enumeration loop, so `soisconnected()` sets `SS_ISCONNECTED`.
+2. Inside the loop it re-binds and re-**connects** that same socket to each
+   real node.
+3. `soconnectat()` sees `SS_ISCONNECTED`. Raw HCI is not `PR_CONNREQUIRED`, so
+   rather than returning `EISCONN` it calls `sodisconnect()` first.
+4. `ng_btsocket_hci_raw_disconnect()` calls `soisdisconnected()`, which runs
+   `socantsendmore_locked()` and sets `SS_CANTSENDMORE`.
+5. `pr_connect` then calls `soisconnected()`, which restores `SS_ISCONNECTED`
+   but never clears `SS_CANTSENDMORE`.
+
+The socket is therefore "connected" and permanently unwritable. This is a real
+defect in the FreeBSD stack, not in `libbluetooth`'s caller.
+
+**Consequences:**
+
+- Any code in a `bt_devenum()` callback that needs to send an HCI command must
+  open its own socket with `bt_devopen()`. `lib/libbtmgr/adapter.c` does this
+  and carries a comment pointing here.
+- The daemon MUST install `signal(SIGPIPE, SIG_IGN)` at startup regardless. A
+  long-lived root daemon that dies on an unexpected `EPIPE` is unacceptable,
+  and this is not the only socket it will hold.
+- Worth an upstream bug report. The fix is presumably for
+  `ng_btsocket_hci_raw_connect()` to clear the can't-send state, or for the
+  raw HCI protocol to reject a second `connect()` outright.
 
 ---
 
@@ -740,6 +778,7 @@ Still open:
 | Firmware clearing pairing on disconnect | medium. Monster headphones do this | detect the reconnect failure, offer one-click key delete plus re-pair |
 | Two pairing agents if a user starts `hcsecd` during M6 | high. Both reply, controller errors | M6 setting must stop and disable `hcsecd`, and the daemon should refuse to arm SSP while `hcsecd` is running |
 | MATE applet API churn | low | pinned by the `libmatepanelapplet-4.0` package already installed |
+| Daemon dies on SIGPIPE (F8) | medium. A raw HCI write can return EPIPE unexpectedly | `signal(SIGPIPE, SIG_IGN)` at daemon startup, and check every write's return |
 | Root daemon attack surface | medium | line-oriented JSON with hard length caps, `getpeereid()` check, no shell interpolation of any device-supplied string |
 
 The last one deserves emphasis. Remote device names arrive from untrusted
