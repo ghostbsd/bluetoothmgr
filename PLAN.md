@@ -760,8 +760,10 @@ Decisions made while building it:
 - [x] Verified on hardware: `Connection_Complete` and `Disconnection_Complete`
       each drive an immediate `state` event, fields cross-checked against
       `hccontrol`, and no spurious broadcast across several timer ticks
-- [ ] Leak check still outstanding. LeakSanitizer is unavailable on FreeBSD,
-      so this needs valgrind or manual review
+- [x] Leak check: `make analyze` (clang static analyzer) plus
+      `make memcheck` (allocation tracker). 117 allocations across every
+      path, 0 live at exit. Tracker validated by introducing a deliberate
+      leak, which it caught and clang did not
 
 ### M3a. Privileged HCI operations
 `connect`, `disconnect`, `set_discoverable`. Root required, but no file is

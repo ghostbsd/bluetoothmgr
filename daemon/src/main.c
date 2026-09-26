@@ -35,6 +35,9 @@
 #include "proto.h"
 #include "state.h"
 
+/* Must come after the system headers: it redefines malloc and friends. */
+#include "memcheck.h"
+
 #define	DEFAULT_SOCKET	"/var/run/bluetoothmgr.sock"
 #define	SOCKET_MODE	0660
 #define	RECONCILE_MS	5000		/* PLAN.md 4.4: the safety net */
