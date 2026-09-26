@@ -1,6 +1,6 @@
 # BluetoothMgr — Implementation Plan
 
-Status: M1 and M2 done. `lib/libbtmgr`, `tools/btmgr-probe` and
+Status: M1, M2 done and M3a written. `lib/libbtmgr`, `tools/btmgr-probe` and
 `bluetoothmgrd` build and run, verified on hardware. M3a, the privileged
 operations, is next. Section 6 tracks progress per milestone.
 
@@ -760,8 +760,10 @@ Decisions made while building it:
 - [x] Verified on hardware: `Connection_Complete` and `Disconnection_Complete`
       each drive an immediate `state` event, fields cross-checked against
       `hccontrol`, and no spurious broadcast across several timer ticks
-- [ ] Leak check still outstanding. LeakSanitizer is unavailable on FreeBSD,
-      so this needs valgrind or manual review
+- [x] Leak check: `make analyze` (clang static analyzer) plus
+      `make memcheck` (allocation tracker). 117 allocations across every
+      path, 0 live at exit. Tracker validated by introducing a deliberate
+      leak, which it caught and clang did not
 
 ### M3a. Privileged HCI operations
 `connect`, `disconnect`, `set_discoverable`. Root required, but no file is
@@ -779,20 +781,32 @@ channel for asynchronous commands.
 
 **Checklist**
 
-- [ ] `btmgr_connect`, `btmgr_disconnect`, `btmgr_set_scan` in `lib/libbtmgr`,
-      not `daemon/src/ops.c`: the library boundary is "talks HCI", not
-      "is unprivileged", and keeping them together allows CLI testing
-- [ ] `btmgr-probe` subcommands exercising all three with no daemon involved
-- [ ] `listen.c` parses the `Connection_Complete` payload for bdaddr and status
-- [ ] In-flight operation table: bounded, per-entry deadline checked on the
-      existing tick, `busy` when full, `timeout` on expiry
-- [ ] Async `connect`: the reply arrives on completion, not on send
-- [ ] `set_discoverable` reverts via a one-shot `EVFILT_TIMER`
-- [ ] `SPEC.md` A5.3 privilege check enforced on state-changing commands
+- [x] `btmgr_connect_start`, `btmgr_disconnect_start`, `btmgr_set_scan` in
+      `lib/libbtmgr`, not `daemon/src/ops.c`: the library boundary is "talks
+      HCI", not "is unprivileged", and keeping them together allows CLI testing
+- [x] `btmgr-probe connect|disconnect|discoverable`, exercising all three with
+      no daemon involved
+- [x] `listen.c` parses the `Connection_Complete` payload for bdaddr and status
+- [x] In-flight operation table: bounded at 8, per-entry deadline checked on
+      the existing tick, `busy` when full, `timeout` on expiry, and entries
+      dropped when their client disconnects
+- [x] Async `connect`: the reply arrives on completion, not on send
+- [x] `set_discoverable` reverts via a one-shot `EVFILT_TIMER`
+- [x] `SPEC.md` A5.3 privilege check, **including supplementary groups**.
+      `getpeereid()` reports only the peer's primary gid while the kernel
+      admits a connection on any of its groups, so a primary-gid-only check
+      refuses precisely the intended deployment (socket group `operator`,
+      users added to `operator` supplementarily)
+- [x] Verified unprivileged: every state-changing verb reaches the HCI layer
+      and fails with `EPERM`, rather than being refused by our own check
+- [x] Clean under the strict warning set, the static analyzer, and `memcheck`
+      (86 allocations, 0 live)
 - [ ] Verified on hardware: a **failed** connect reports a usable status and
-      the right bdaddr. If a failed page reports zeroes, the correlation table
-      needs a different key, so check this before building it
+      the right bdaddr. The struct says it carries bdaddr regardless of
+      status, but that is source reading, not measurement
 - [ ] Verified on hardware: connect and disconnect driven through IPC as root
+- [ ] Verified on hardware: the in-flight timeout fires when a device never
+      answers
 
 Deliberately excluded: `write_authentication_enable`. The audio journey shows
 it is required before `virtual_oss` can open A2DP, but it belongs with the

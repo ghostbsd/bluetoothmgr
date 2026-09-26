@@ -322,13 +322,17 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
 | `pair` | `addr`, `pin` | yes | Executes A6 in full |
 | `remove` | `addr` | yes | Drops the `hcsecd.conf` block, the key, and the store entry |
 | `set_power` | `on` | yes | See A8.5 |
-| `set_discoverable` | `timeout` | yes | `Write_Scan_Enable`. `timeout` 0 means off |
+| `set_discoverable` | `timeout` or `on` | yes | `Write_Scan_Enable`. `timeout` 0 means off. At least one field MUST be present: a request carrying neither is `bad_json`, not "off". `timeout` MUST be 0..3600, checked before the millisecond conversion |
 | `set_alias` | `addr`, `alias` | yes | Subject to A2.3 |
 | `set_trusted` | `addr`, `trusted` | yes | Store only, no HCI effect |
 
 - **B4.1** Commands marked privileged MUST be refused per A5.3 with error
   `not_permitted`.
 - **B4.2** `scan` while a scan is running MUST be idempotent, not an error.
+- **B4.3** Several requests MAY be outstanding for the same device. One
+  completion event is the answer to all of them, so the daemon MUST fan the
+  result out to every waiting request rather than answering the first and
+  letting the rest time out.
 
 ## B5. State object *(provisional, expect churn)*
 

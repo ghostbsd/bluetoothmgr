@@ -14,6 +14,8 @@
 #ifndef BTMGRD_LISTEN_H_
 #define	BTMGRD_LISTEN_H_
 
+#include "btmgr.h"
+
 /*
  * Open a listening socket on the given netgraph node, for example "ubt0hci".
  * Returns a file descriptor, or -1 with errno set.
@@ -21,13 +23,33 @@
 int	listen_open(const char *node);
 
 /*
+ * What a completion event told us. The daemon uses these to answer requests
+ * parked in the in-flight table.
+ */
+enum listen_event {
+	LISTEN_CON_COMPL = 1,		/* Connection_Complete */
+	LISTEN_DISCON_COMPL		/* Disconnection_Complete */
+};
+
+struct listen_report {
+	enum listen_event	kind;
+	uint8_t			status;		/* 0 = success */
+	bdaddr_t		addr;		/* valid for CON_COMPL */
+	uint16_t		handle;
+};
+
+/*
  * Drain whatever has arrived and interpret it.
+ *
+ * Completion events are passed to cb as they are parsed, so the caller can
+ * match them against pending requests. cb may be NULL.
  *
  * Returns 1 if something happened that could have changed the world, so the
  * caller should rebuild its snapshot. Returns 0 if nothing relevant arrived,
  * and -1 if the socket died and should be closed and reopened.
  */
-int	listen_drain(int fd);
+int	listen_drain(int fd,
+	    void (*cb)(const struct listen_report *, void *), void *arg);
 
 void	listen_close(int fd);
 

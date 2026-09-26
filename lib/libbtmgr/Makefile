@@ -10,6 +10,7 @@ INTERNALLIB=
 SRCS=		adapter.c \
 		class.c \
 		conn.c \
+		ops.c \
 		scan.c
 
 CFLAGS+=	-I${.CURDIR}

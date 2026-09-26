@@ -23,6 +23,9 @@
 
 #include "proto.h"
 
+/* Must come after the system headers: it redefines malloc and friends. */
+#include "memcheck.h"
+
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
@@ -254,6 +257,45 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 		strlcpy(code, "not_found", codelen);
 		json_decref(root);
 		return (-1);
+	}
+
+	/*
+	 * Optional fields. A malformed one is an error rather than something
+	 * to ignore: silently treating {"addr": 42} as absent would connect
+	 * to whatever the caller last mentioned, or to nothing, with no
+	 * explanation.
+	 */
+	v = json_object_get(root, "addr");
+	if (v != NULL) {
+		if (!json_is_string(v) ||
+		    !bt_aton(json_string_value(v), &out->addr)) {
+			strlcpy(code, "bad_addr", codelen);
+			json_decref(root);
+			return (-1);
+		}
+		out->has_addr = 1;
+	}
+
+	v = json_object_get(root, "timeout");
+	if (v != NULL) {
+		if (!json_is_integer(v)) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+		out->timeout = (int)json_integer_value(v);
+		out->has_timeout = 1;
+	}
+
+	v = json_object_get(root, "on");
+	if (v != NULL) {
+		if (!json_is_boolean(v)) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+		out->on = json_is_true(v) ? 1 : 0;
+		out->has_on = 1;
 	}
 
 	json_decref(root);

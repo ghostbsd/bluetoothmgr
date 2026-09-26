@@ -25,10 +25,18 @@
 
 #define	BTMGR_CMD_NAME_MAX	32
 
-/* A parsed command. SPEC.md B3. */
+/* A parsed command. SPEC.md B3 and B4. */
 struct proto_cmd {
-	int	id;
-	char	name[BTMGR_CMD_NAME_MAX];
+	int		id;
+	char		name[BTMGR_CMD_NAME_MAX];
+
+	/* Optional fields. has_* says whether the client supplied them. */
+	int		has_addr;
+	bdaddr_t	addr;
+	int		has_timeout;
+	int		timeout;
+	int		has_on;
+	int		on;
 };
 
 /*

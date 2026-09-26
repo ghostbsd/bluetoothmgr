@@ -11,6 +11,9 @@
 
 #include "state.h"
 
+/* Must come after the system headers: it redefines malloc and friends. */
+#include "memcheck.h"
+
 /*
  * Rebuild a snapshot.
  *
