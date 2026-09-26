@@ -6,6 +6,7 @@
 # lib must come before tools, since btmgr-probe links libbtmgr.a.
 
 SUBDIR=		lib \
+		daemon \
 		tools
 
 SUBDIR_PARALLEL=

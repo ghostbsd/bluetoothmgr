@@ -1,6 +1,7 @@
 # BluetoothMgr — Implementation Plan
 
-Status: M1 in progress. `lib/libbtmgr` and `tools/btmgr-probe` build and run.
+Status: M2 done. `lib/libbtmgr`, `tools/btmgr-probe` and `bluetoothmgrd` build
+and run. M3, the privileged half, is next.
 
 See `SPEC.md` for the normative contract. This document holds the research
 and the reasoning; the spec holds the rules.
@@ -694,11 +695,43 @@ API conventions fixed here and followed by every module after:
 - **Return `int`, 0 on success, -1 with `errno` on failure.** Matches
   `libbluetooth` exactly, so our code composes with it without translation.
 
-### M2. Daemon core
+### M2. Daemon core **[done]**
 `main.c` with a `kqueue` loop, `EVFILT_SIGNAL` for `SIGTERM`/`SIGHUP`,
 `EVFILT_TIMER` for the 5 second reconcile, and `listen.c` on `EVFILT_READ`.
-Add `ipc.c` serving `get_state` and pushing `state` events. Add the rc.d script.
+`ipc.c` serves `get_state` and pushes `state` events. rc.d script included.
 Test with `nc -U /var/run/bluetoothmgr.sock`.
+
+Deliberately unprivileged, so it runs as an ordinary user during development:
+
+```sh
+./daemon/bluetoothmgrd -f -s /tmp/btmgr.sock
+nc -U /tmp/btmgr.sock
+```
+
+Decisions made while building it:
+
+- **Non-blocking writes with `EVFILT_WRITE` and drop-on-overflow**, rather than
+  blocking writes. A blocking write to a client that stopped reading would hang
+  the daemon, which for a root daemon means Bluetooth stops working
+  machine-wide because somebody suspended an applet. Output over
+  `IPC_OUT_MAX` drops that client.
+- **Input framing via an explicit `in_taken` offset.** The line handed to the
+  caller points into the input buffer with no copy, so the buffer cannot be
+  compacted until the caller is done with it. Compacting at the start of the
+  *next* call is what makes "valid until the next call" literally true.
+- **Coalescing by snapshot comparison.** `state_equal()` compares field by
+  field rather than `memcmp()`, because struct padding bytes nobody set would
+  otherwise make every tick look like a change.
+- **`scan` is not an IPC command yet.** Driving inquiry from the event loop
+  means an asynchronous inquiry rather than the blocking `bt_devinquiry()` that
+  `libbtmgr` uses today. That is real work and belongs in its own step.
+
+Verified: protocol flow, malformed input, two commands in one write, one
+command split across two writes, coalescing across several timer ticks,
+multiple simultaneous clients, `SIGHUP` reload, `SIGTERM` clean shutdown with
+socket removal, a 70 KiB oversized line dropping just that client, and 40 rapid
+reconnects. Run under AddressSanitizer throughout with no memory errors.
+LeakSanitizer is unavailable on FreeBSD, so leaks are unverified by tooling.
 
 Deliberately no privileged operations yet. The whole thing can run as a normal
 user at this stage, which makes it much easier to debug.
