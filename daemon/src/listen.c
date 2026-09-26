@@ -24,6 +24,9 @@
 #include "btmgr.h"
 #include "listen.h"
 
+/* Must come after the system headers: it redefines malloc and friends. */
+#include "memcheck.h"
+
 /*
  * Events we care about. Every one of these can change what a client should be
  * seeing, except PIN_Code_Request, which is there so the settings window can
