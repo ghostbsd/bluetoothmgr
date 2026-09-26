@@ -1,7 +1,8 @@
 # BluetoothMgr — Implementation Plan
 
-Status: M2 done. `lib/libbtmgr`, `tools/btmgr-probe` and `bluetoothmgrd` build
-and run. M3, the privileged half, is next.
+Status: M1 and M2 done. `lib/libbtmgr`, `tools/btmgr-probe` and
+`bluetoothmgrd` build and run, verified on hardware. M3a, the privileged
+operations, is next. Section 6 tracks progress per milestone.
 
 See `SPEC.md` for the normative contract. This document holds the research
 and the reasoning; the spec holds the rules.
@@ -667,13 +668,19 @@ everything around it.
 
 Each milestone ends with something runnable and testable.
 
+Checklists distinguish **written** from **verified**, and verified on hardware
+from verified synthetically. That distinction has already earned its keep
+twice: `listen.c` passed every synthetic test while never having seen a real
+HCI event, and F7 is asserted in three documents on the strength of source
+reading alone.
+
 ### M0. Repo scaffolding
 Directory tree, BSD `Makefile`s using `bsd.prog.mk` and `bsd.lib.mk`,
-`.gitignore`, and `tools/probe/` committed with the three probe programs from
-today so the datapoint is reproducible on other hardware. Folded into M1, since
-on its own it produces nothing runnable.
+`.gitignore`, and `tools/probe/` committed with the three probe programs so the
+datapoint is reproducible on other hardware. Folded into M1, since on its own
+it produces nothing runnable.
 
-### M1. `libbtmgr` plus `btmgr-probe`, a read-only CLI
+### M1. `libbtmgr` plus `btmgr-probe`, a read-only CLI **[done]**
 Not in the brief, but it is the right first step. Build `lib/libbtmgr`
 (`adapter.c`, `conn.c`, `scan.c`, `class.c`) and a single binary that prints
 adapter state, the connection list, and a scan. It needs no root, no event loop,
@@ -694,6 +701,18 @@ API conventions fixed here and followed by every module after:
   buys a boundary so the wire protocol is not hostage to a kernel header.
 - **Return `int`, 0 on success, -1 with `errno` on failure.** Matches
   `libbluetooth` exactly, so our code composes with it without translation.
+
+**Checklist**
+
+- [x] `lib/libbtmgr` as `INTERNALLIB`, built `-fPIC` so it links into PIE
+- [x] `adapter.c`, `conn.c`, `scan.c`, `class.c`
+- [x] `btmgr-probe` with `adapter` / `conn` / `scan` views
+- [x] Clean under `-Wall -Wextra -Wshadow -Wstrict-prototypes`
+      `-Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings`
+- [x] Verified on hardware: adapter state, connection list, live scan
+- [x] Verified on hardware: class decode on two devices, covering both a
+      specific mapping (Z337 `24:04:14`, Loudspeaker) and the fallback
+      (TV `28:04:3c`)
 
 ### M2. Daemon core **[done]**
 `main.c` with a `kqueue` loop, `EVFILT_SIGNAL` for `SIGTERM`/`SIGHUP`,
@@ -726,68 +745,142 @@ Decisions made while building it:
   means an asynchronous inquiry rather than the blocking `bt_devinquiry()` that
   `libbtmgr` uses today. That is real work and belongs in its own step.
 
-Verified synthetically: protocol flow, malformed input, two commands in one
-write, one command split across two writes, coalescing across several timer
-ticks, multiple simultaneous clients, `SIGHUP` reload, `SIGTERM` clean shutdown
-with socket removal, a 70 KiB oversized line dropping just that client, and 40
-rapid reconnects. Run under AddressSanitizer throughout with no memory errors.
-LeakSanitizer is unavailable on FreeBSD, so leaks are unverified by tooling.
+**Checklist**
 
-**Verified on hardware**, connecting and disconnecting a Logitech Z337:
+- [x] `kqueue` loop over `EVFILT_READ`, `WRITE`, `SIGNAL`, `TIMER`
+- [x] `listen.c`, passive HCI listener that never replies (F3)
+- [x] `ipc.c`, line framing, non-blocking both directions, drop-on-overflow
+- [x] `proto.c` over jansson, shared by daemon and future clients
+- [x] `state.c`, snapshot plus field-wise diff for coalescing
+- [x] rc.d script, and `-f` / `-s` flags for unprivileged development
+- [x] `SIGPIPE` ignored at startup (F8)
+- [x] Verified synthetically: split lines, batched lines, 70 KiB oversized
+      line, 40 rapid reconnects, `SIGHUP`, `SIGTERM`, multiple clients
+- [x] Verified under AddressSanitizer: no memory errors
+- [x] Verified on hardware: `Connection_Complete` and `Disconnection_Complete`
+      each drive an immediate `state` event, fields cross-checked against
+      `hccontrol`, and no spurious broadcast across several timer ticks
+- [ ] Leak check still outstanding. LeakSanitizer is unavailable on FreeBSD,
+      so this needs valgrind or manual review
 
-- `Connection_Complete` produced a `state` event immediately rather than on the
-  next timer tick, and every field cross-checked against what `hccontrol`
-  independently reported: handle 71, encryption disabled, role master.
-- `Disconnection_Complete`, a different branch in `listen_drain()`, cleared the
-  connection list just as promptly.
-- Exactly three `state` events across the whole session: initial, connect,
-  disconnect. Several timer ticks passed in between and produced no spurious
-  broadcast, which is the coalescing logic confirmed against real events.
+### M3a. Privileged HCI operations
+`connect`, `disconnect`, `set_discoverable`. Root required, but no file is
+written, so the blast radius is a device that fails to connect. Doing this
+before M3b means the root-related bugs surface while nothing can be damaged.
 
-This is what turns F3 from a reading of `ng_btsocket_hci_raw.c` into a measured
-fact: the kernel really does broadcast HCI events to our passive socket while
-`hcsecd` holds its own. The entire event-driven design rests on that.
+The central problem is that `Create_Connection` returns `Command_Status`
+immediately and `Connection_Complete` seconds later, up to the full page
+timeout when a device is off. Blocking in `bt_devreq()` would stall the entire
+event loop, so one unreachable speaker would freeze Bluetooth machine-wide.
+Instead the command is sent without waiting, the request is recorded in a small
+in-flight table, and the reply is delivered when the passive listener sees the
+completion. The listener built in M2 for state updates becomes the completion
+channel for asynchronous commands.
 
-Two smaller findings from the same session:
+**Checklist**
 
-- `hccontrol create_connection` on FreeBSD 15 requires all six arguments. The
-  audio journey document records it as `create_connection headphones`, which
-  does not work as written. The full form is
-  `create_connection <addr> 0xcc18 0 0 0 1`, where `0xcc18` is the sum of the
-  six ACL packet type bits.
-- `class.c` was confirmed against a second device. The Z337 reports
-  `24:04:14`, decoding to major `0x04` Audio/Video and minor `0x05`
-  Loudspeaker, which exercises a specific mapping rather than the TV's
-  default-to-`av` fallback.
+- [ ] `btmgr_connect`, `btmgr_disconnect`, `btmgr_set_scan` in `lib/libbtmgr`,
+      not `daemon/src/ops.c`: the library boundary is "talks HCI", not
+      "is unprivileged", and keeping them together allows CLI testing
+- [ ] `btmgr-probe` subcommands exercising all three with no daemon involved
+- [ ] `listen.c` parses the `Connection_Complete` payload for bdaddr and status
+- [ ] In-flight operation table: bounded, per-entry deadline checked on the
+      existing tick, `busy` when full, `timeout` on expiry
+- [ ] Async `connect`: the reply arrives on completion, not on send
+- [ ] `set_discoverable` reverts via a one-shot `EVFILT_TIMER`
+- [ ] `SPEC.md` A5.3 privilege check enforced on state-changing commands
+- [ ] Verified on hardware: a **failed** connect reports a usable status and
+      the right bdaddr. If a failed page reports zeroes, the correlation table
+      needs a different key, so check this before building it
+- [ ] Verified on hardware: connect and disconnect driven through IPC as root
 
-Deliberately no privileged operations yet. The whole thing can run as a normal
-user at this stage, which makes it much easier to debug.
+Deliberately excluded: `write_authentication_enable`. The audio journey shows
+it is required before `virtual_oss` can open A2DP, but it belongs with the
+audio work in M7 rather than shipping as a toggle nobody can test.
 
-### M3. Daemon ops, the privileged half
-`connect`, `disconnect`, `set_discoverable`. Then `hosts.c` with automatic alias
-generation, respecting the 32 character `virtual_oss` path budget. Then
-`hcsecd.c` generate-and-restart, and `keys.c` including the stale key recovery
-path. Then `store.c`. Now it needs root, so this is where the rc.d script and
-the socket permissions get exercised properly.
+### M3b. Config ownership
+`hosts.c`, `hcsecd.c`, `keys.c`, `store.c`. This is the half that can damage a
+working setup, which is why `SPEC.md` Part A was written before any of it.
+
+**Checklist**
+
+- [ ] `hosts.c`: parse, generate aliases, 16 character budget (A2.3),
+      collision suffixes, preserve records we did not write
+- [ ] `hcsecd.c`: parse the lex/yacc grammar, regenerate whole, preserve the
+      mandatory default entry and every block we did not author (A1)
+- [ ] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
+      never log or transmit key material (A3)
+- [ ] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
+- [ ] A0 write discipline: atomic rename, one `.bak` per boot, never edit in
+      place, never write when the content is unchanged
+- [ ] A6 pairing order enforced: write the block, reload, *then* pair
+- [ ] A7 sanitisation of every device-supplied string
+- [ ] `--dry-run` and a config-directory override, so the whole thing can be
+      exercised against copies in `/tmp` before it touches `/etc`
+- [ ] Verified on hardware: **F7 reproduced.** Pairing a device with no block
+      in `hcsecd.conf` logs "Could not find entry for remote bdaddr" and the
+      key is discarded. This is the claim the README rests on and it is still
+      source reading only
+- [ ] Verified on hardware: a device paired through the daemon survives a
+      reboot without re-pairing
 
 ### M4. MATE panel applet
 `libmatepanelapplet-4.0` skeleton, popup with a toggle and device list,
 show/hide bound to `adapter_present`, and a "Preferences…" item. Uses
 `common/ipc_client.c` unchanged.
 
+**Checklist**
+
+- [ ] `common/ipc_client.c`, the client half of the protocol, shared by every
+      frontend
+- [ ] Applet skeleton, popup, icon states: absent, off, on, connected
+- [ ] Show and hide driven by `adapter_present`
+- [ ] Reconnect when the daemon restarts under it
+- [ ] Verified: hotplug the dongle and watch the applet appear and disappear
+
 ### M5. Settings window
 `bluetoothmgr-settings`, the pairing wizard, device management, alias editing,
 `hcsecd` key management, and the `.desktop` file for the Administration menu.
 
+**Checklist**
+
+- [ ] Pairing wizard driving the A6 sequence
+- [ ] Device list: rename, remove, trust
+- [ ] Alias editing bounded by A2.3
+- [ ] One-click stale key recovery, the `stale_link_key` path from B6.1
+- [ ] `.desktop` entry for the Administration menu
+
 ### M6. SSP, experimental
 Per F4. Behind a setting, mutually exclusive with `hcsecd`. Treat as research.
+
+**Checklist**
+
+- [ ] Refuse to arm while `hcsecd` is running
+- [ ] `Write_Simple_Pairing_Mode` to enable SSP
+- [ ] Answer `IO_Capability_Request` and `User_Confirmation_Request`
+- [ ] Persist the key from `Link_Key_Notification`
+- [ ] Verified: pair a device that has no PIN at all
 
 ### M7. Audio integration
 `virtual_oss` supervision, `pactl` module loading, and the null-sink plus
 loopback volume workaround. Everything from the audio journey document.
 
+**Checklist**
+
+- [ ] `write_authentication_enable` as part of the audio connect flow
+- [ ] `virtual_oss` supervision
+- [ ] `pactl` module loading, since PulseAudio does not detect CUSE devices
+- [ ] Volume via null-sink plus loopback
+- [ ] Verified: the whole audio journey reproduced with no manual steps
+
 ### M8. AppIndicator/SNI frontend
 XFCE, KDE and Cinnamon, reusing `common/`.
+
+**Checklist**
+
+- [ ] SNI frontend against the same daemon and protocol
+- [ ] `ACTIVE`/`PASSIVE` on adapter presence
+- [ ] Verified on at least one non-MATE desktop
 
 ---
 
