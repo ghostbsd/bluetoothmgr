@@ -26,6 +26,7 @@
 #include <grp.h>
 #include <pwd.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,13 @@
 #define	DEFAULT_SOCKET	"/var/run/bluetoothmgr.sock"
 #define	SOCKET_MODE	0660
 #define	RECONCILE_MS	5000		/* PLAN.md 4.4: the safety net */
+
+/*
+ * Upper bound on a discoverability timeout, one hour. Bluetooth UIs offer
+ * minutes, so this is generous; its job is to keep a client from reaching
+ * integer overflow in the millisecond conversion.
+ */
+#define	BTMGR_DISCOVER_MAX_SEC	3600
 #define	MAX_EVENTS	32
 
 /*
@@ -256,28 +264,39 @@ on_completion(const struct listen_report *r, void *arg)
 {
 	struct daemon	*d = arg;
 	struct inflight	*f;
+	char		 detail[64];
 
-	if (r->kind == LISTEN_CON_COMPL)
-		f = inflight_take(&d->pending, INFLIGHT_CONNECT, &r->addr);
-	else
-		f = inflight_take_handle(&d->pending, INFLIGHT_DISCONNECT,
-		    r->handle);
-
-	if (f == NULL)
-		return;		/* nobody asked; it happened by other means */
-
-	/* The client may have disconnected while we waited. */
-	if (!client_alive(d, f->client))
-		return;
-
-	if (r->status == 0) {
-		reply(d, f->client, proto_ok(f->id));
-	} else {
-		char	detail[64];
-
+	if (r->status != 0)
 		snprintf(detail, sizeof(detail),
 		    "controller reported status 0x%02x", r->status);
-		reply(d, f->client, proto_error(f->id, "io_error", detail));
+
+	/*
+	 * Loop, because more than one request can be waiting on the same
+	 * device: two clients, or one client retrying. A single
+	 * Connection_Complete is the answer to all of them, so fan it out.
+	 * Answering only the first would leave the rest to time out twenty
+	 * seconds later with "timeout" even though the connection succeeded.
+	 */
+	for (;;) {
+		if (r->kind == LISTEN_CON_COMPL)
+			f = inflight_take(&d->pending, INFLIGHT_CONNECT,
+			    &r->addr);
+		else
+			f = inflight_take_handle(&d->pending,
+			    INFLIGHT_DISCONNECT, r->handle);
+
+		if (f == NULL)
+			break;	/* nobody left waiting on this one */
+
+		/* A client may have disconnected while we waited. */
+		if (!client_alive(d, f->client))
+			continue;
+
+		if (r->status == 0)
+			reply(d, f->client, proto_ok(f->id));
+		else
+			reply(d, f->client,
+			    proto_error(f->id, "io_error", detail));
 	}
 }
 
@@ -406,7 +425,36 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 	}
 
 	if (strcmp(cmd.name, "set_discoverable") == 0) {
-		int	on = cmd.has_timeout ? (cmd.timeout > 0) : cmd.on;
+		int	on;
+
+		/*
+		 * The parser treats both fields as optional because other
+		 * commands use them, so the handler has to insist. Without
+		 * this, a request carrying neither silently turned
+		 * discoverability OFF and reported success, changing adapter
+		 * state on a malformed message.
+		 */
+		if (!cmd.has_timeout && !cmd.has_on) {
+			reply(d, c, proto_error(cmd.id, "bad_json",
+			    "set_discoverable requires timeout or on"));
+			return;
+		}
+
+		/*
+		 * Range check before any arithmetic. cmd.timeout * 1000 in an
+		 * int overflows for values above about 2.1 million, which is
+		 * undefined behaviour reached from a single client message.
+		 * A negative timeout is equally a protocol error rather than
+		 * something to reinterpret.
+		 */
+		if (cmd.has_timeout &&
+		    (cmd.timeout < 0 || cmd.timeout > BTMGR_DISCOVER_MAX_SEC)) {
+			reply(d, c, proto_error(cmd.id, "bad_json",
+			    "timeout out of range"));
+			return;
+		}
+
+		on = cmd.has_timeout ? (cmd.timeout > 0) : cmd.on;
 
 		/*
 		 * Page scan stays on. Turning it off would make us
@@ -426,10 +474,19 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		 */
 		if (on && cmd.has_timeout && cmd.timeout > 0) {
 			struct kevent	kev;
+			int64_t		ms;
+
+			/*
+			 * Widen before multiplying. The range check above
+			 * already bounds this, but doing the arithmetic in
+			 * int64_t means the safety does not depend on
+			 * remembering that.
+			 */
+			ms = (int64_t)cmd.timeout * 1000;
 
 			EV_SET(&kev, 2, EVFILT_TIMER,
-			    EV_ADD | EV_ENABLE | EV_ONESHOT, 0,
-			    cmd.timeout * 1000, &tag_discoverable);
+			    EV_ADD | EV_ENABLE | EV_ONESHOT, 0, ms,
+			    &tag_discoverable);
 			(void)kevent(d->kq, &kev, 1, NULL, 0, NULL);
 		}
 

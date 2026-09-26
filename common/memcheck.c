@@ -30,8 +30,18 @@ static void	 (*real_free)(void *) = free;
 
 #define	MC_SLOTS	8192
 
+/*
+ * Open addressing needs three slot states, not two. A deleted slot must stay
+ * distinguishable from a never-used one, because mc_find() treats a truly
+ * empty slot as proof the key is absent and stops probing there. Writing NULL
+ * on deletion would cut the probe chain, so a later entry that collided with
+ * the deleted one becomes unfindable and gets reported as a false leak.
+ */
+#define	MC_EMPTY	((void *)0)
+#define	MC_TOMBSTONE	((void *)-1)
+
 struct mc_entry {
-	void		*ptr;		/* NULL means the slot is empty */
+	void		*ptr;		/* MC_EMPTY, MC_TOMBSTONE, or live */
 	size_t		 size;
 	const char	*file;
 	int		 line;
@@ -83,7 +93,9 @@ mc_insert(void *p, size_t size, const char *file, int line)
 	for (i = 0; i < MC_SLOTS; i++) {
 		size_t slot = (start + i) % MC_SLOTS;
 
-		if (mc_table[slot].ptr == NULL) {
+		/* A tombstone is reusable; a live entry is not. */
+		if (mc_table[slot].ptr == MC_EMPTY ||
+		    mc_table[slot].ptr == MC_TOMBSTONE) {
 			mc_table[slot].ptr = p;
 			mc_table[slot].size = size;
 			mc_table[slot].file = file;
@@ -111,8 +123,9 @@ mc_find(const void *p)
 
 		if (mc_table[slot].ptr == p)
 			return ((long)slot);
-		if (mc_table[slot].ptr == NULL)
-			return (-1);	/* empty slot ends the probe chain */
+		if (mc_table[slot].ptr == MC_EMPTY)
+			return (-1);	/* never used: the key cannot be here */
+		/* A tombstone means keep probing. */
 	}
 
 	return (-1);
@@ -159,7 +172,7 @@ btmgr_mc_realloc(void *old, size_t n, const char *file, int line)
 	if (old != NULL) {
 		slot = mc_find(old);
 		if (slot >= 0) {
-			mc_table[slot].ptr = NULL;
+			mc_table[slot].ptr = MC_TOMBSTONE;
 			mc_live--;
 		}
 	}
@@ -202,7 +215,7 @@ btmgr_mc_free(void *p, const char *file, int line)
 
 	slot = mc_find(p);
 	if (slot >= 0) {
-		mc_table[slot].ptr = NULL;
+		mc_table[slot].ptr = MC_TOMBSTONE;
 		mc_live--;
 	}
 
@@ -228,7 +241,8 @@ btmgr_mc_report(void)
 		    "lower bound\n");
 
 	for (i = 0; i < MC_SLOTS; i++) {
-		if (mc_table[i].ptr == NULL)
+		if (mc_table[i].ptr == MC_EMPTY ||
+		    mc_table[i].ptr == MC_TOMBSTONE)
 			continue;
 
 		if (shown++ < 32)
