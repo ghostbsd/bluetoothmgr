@@ -28,7 +28,7 @@
 
 #define	DEFAULT_SCAN_SECS	5
 
-static void	usage(void);
+static void	usage(void) __dead2;
 static int	show_adapters(struct btmgr_adapter *, int *);
 static void	show_conns(const char *);
 static void	show_scan(const char *, int);
