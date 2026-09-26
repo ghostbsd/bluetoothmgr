@@ -1,0 +1,38 @@
+#!/bin/sh
+#
+# PROVIDE: bluetoothmgrd
+# REQUIRE: DAEMON hcsecd
+# KEYWORD: nojail shutdown
+#
+# bluetoothmgrd_enable="YES"
+# bluetoothmgrd_socket="/var/run/bluetoothmgr.sock"
+# bluetoothmgrd_flags=""
+
+. /etc/rc.subr
+
+name="bluetoothmgrd"
+desc="BluetoothMgr Bluetooth connection manager"
+rcvar="bluetoothmgrd_enable"
+
+command="/usr/local/sbin/${name}"
+pidfile="/var/run/${name}.pid"
+
+# The daemon backgrounds itself, so let rc.subr supervise it with a pidfile
+# rather than expecting it to stay in the foreground.
+command_args=""
+procname="${command}"
+
+required_modules="ng_btsocket"
+
+load_rc_config $name
+
+: ${bluetoothmgrd_enable:="NO"}
+: ${bluetoothmgrd_socket:="/var/run/bluetoothmgr.sock"}
+
+command_args="-s ${bluetoothmgrd_socket}"
+
+# SIGHUP makes the daemon re-read state and push it to clients. It does not
+# re-exec, so reload is cheap and never drops a connection.
+extra_commands="reload"
+
+run_rc_command "$1"

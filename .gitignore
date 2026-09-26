@@ -1,5 +1,7 @@
 # Prerequisites
 *.d
+# ...but *.d also matches the rc.d directory, which hides the rc scripts.
+!rc.d/
 
 # Object files
 *.o
@@ -71,3 +73,5 @@ tools/probe/probe3-adapter
 *.debug
 *.full
 tools/btmgr-probe/btmgr-probe
+
+daemon/bluetoothmgrd
