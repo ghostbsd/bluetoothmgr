@@ -726,12 +726,39 @@ Decisions made while building it:
   means an asynchronous inquiry rather than the blocking `bt_devinquiry()` that
   `libbtmgr` uses today. That is real work and belongs in its own step.
 
-Verified: protocol flow, malformed input, two commands in one write, one
-command split across two writes, coalescing across several timer ticks,
-multiple simultaneous clients, `SIGHUP` reload, `SIGTERM` clean shutdown with
-socket removal, a 70 KiB oversized line dropping just that client, and 40 rapid
-reconnects. Run under AddressSanitizer throughout with no memory errors.
+Verified synthetically: protocol flow, malformed input, two commands in one
+write, one command split across two writes, coalescing across several timer
+ticks, multiple simultaneous clients, `SIGHUP` reload, `SIGTERM` clean shutdown
+with socket removal, a 70 KiB oversized line dropping just that client, and 40
+rapid reconnects. Run under AddressSanitizer throughout with no memory errors.
 LeakSanitizer is unavailable on FreeBSD, so leaks are unverified by tooling.
+
+**Verified on hardware**, connecting and disconnecting a Logitech Z337:
+
+- `Connection_Complete` produced a `state` event immediately rather than on the
+  next timer tick, and every field cross-checked against what `hccontrol`
+  independently reported: handle 71, encryption disabled, role master.
+- `Disconnection_Complete`, a different branch in `listen_drain()`, cleared the
+  connection list just as promptly.
+- Exactly three `state` events across the whole session: initial, connect,
+  disconnect. Several timer ticks passed in between and produced no spurious
+  broadcast, which is the coalescing logic confirmed against real events.
+
+This is what turns F3 from a reading of `ng_btsocket_hci_raw.c` into a measured
+fact: the kernel really does broadcast HCI events to our passive socket while
+`hcsecd` holds its own. The entire event-driven design rests on that.
+
+Two smaller findings from the same session:
+
+- `hccontrol create_connection` on FreeBSD 15 requires all six arguments. The
+  audio journey document records it as `create_connection headphones`, which
+  does not work as written. The full form is
+  `create_connection <addr> 0xcc18 0 0 0 1`, where `0xcc18` is the sum of the
+  six ACL packet type bits.
+- `class.c` was confirmed against a second device. The Z337 reports
+  `24:04:14`, decoding to major `0x04` Audio/Video and minor `0x05`
+  Loudspeaker, which exercises a specific mapping rather than the TV's
+  default-to-`av` fallback.
 
 Deliberately no privileged operations yet. The whole thing can run as a normal
 user at this stage, which makes it much easier to debug.
