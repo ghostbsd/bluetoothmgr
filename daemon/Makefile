@@ -6,6 +6,7 @@ MAN=
 .PATH:		${.CURDIR}/src ${.CURDIR}/../common
 
 SRCS=		main.c \
+		inflight.c \
 		ipc.c \
 		listen.c \
 		state.c \

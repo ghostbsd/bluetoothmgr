@@ -102,10 +102,12 @@ listen_close(int fd)
  * leaving data unread risks not being woken again for it.
  */
 int
-listen_drain(int fd)
+listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
+    void *arg)
 {
-	uint8_t				buf[512];
+	uint8_t				 buf[512];
 	ng_hci_event_pkt_t		*e;
+	struct listen_report		 rep;
 	ssize_t				 n;
 	int				 changed = 0;
 
@@ -129,8 +131,62 @@ listen_drain(int fd)
 			continue;
 
 		switch (e->event) {
-		case NG_HCI_EVENT_CON_COMPL:
-		case NG_HCI_EVENT_DISCON_COMPL:
+		/*
+		 * The two completions the daemon correlates against pending
+		 * requests. Both carry their payload straight after the event
+		 * header, which is what the (e + 1) cast reaches: adding 1 to
+		 * a typed pointer advances by sizeof(*e), landing on the first
+		 * payload byte.
+		 *
+		 * Connection_Complete carries the bdaddr even when status is
+		 * non-zero, which is what lets a failed page be reported to
+		 * whoever asked for it.
+		 */
+		case NG_HCI_EVENT_CON_COMPL: {
+			ng_hci_con_compl_ep	*ep;
+
+			changed = 1;
+			if ((size_t)n < sizeof(*e) + sizeof(*ep))
+				break;		/* truncated, ignore */
+
+			ep = (ng_hci_con_compl_ep *)(e + 1);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.kind = LISTEN_CON_COMPL;
+			rep.status = ep->status;
+			bdaddr_copy(&rep.addr, &ep->bdaddr);
+			rep.handle = le16toh(ep->con_handle);
+
+			syslog(LOG_DEBUG, "connection complete, status %u",
+			    ep->status);
+
+			if (cb != NULL)
+				cb(&rep, arg);
+			break;
+		}
+
+		case NG_HCI_EVENT_DISCON_COMPL: {
+			ng_hci_discon_compl_ep	*ep;
+
+			changed = 1;
+			if ((size_t)n < sizeof(*e) + sizeof(*ep))
+				break;
+
+			ep = (ng_hci_discon_compl_ep *)(e + 1);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.kind = LISTEN_DISCON_COMPL;
+			rep.status = ep->status;
+			rep.handle = le16toh(ep->con_handle);
+
+			syslog(LOG_DEBUG, "disconnection complete, status %u",
+			    ep->status);
+
+			if (cb != NULL)
+				cb(&rep, arg);
+			break;
+		}
+
 		case NG_HCI_EVENT_ENCRYPTION_CHANGE:
 			changed = 1;
 			break;
