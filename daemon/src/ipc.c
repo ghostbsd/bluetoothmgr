@@ -30,6 +30,9 @@
 #include "ipc.h"
 #include "proto.h"
 
+/* Must come after the system headers: it redefines malloc and friends. */
+#include "memcheck.h"
+
 static int	set_nonblock(int fd);
 static int	buf_append(char **buf, size_t *len, size_t *cap,
 		    const char *data, size_t n, size_t limit);

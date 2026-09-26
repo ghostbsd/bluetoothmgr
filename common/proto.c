@@ -23,6 +23,9 @@
 
 #include "proto.h"
 
+/* Must come after the system headers: it redefines malloc and friends. */
+#include "memcheck.h"
+
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
