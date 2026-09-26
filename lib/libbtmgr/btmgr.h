@@ -112,6 +112,21 @@ int		 btmgr_scan(const char *, int, struct btmgr_device *, int *);
 enum btmgr_type	 btmgr_class_type(const uint8_t *);
 const char	*btmgr_type_name(enum btmgr_type);
 
+/*
+ * ops.c - privileged. Every one of these needs root; the kernel's security
+ * filter refuses them to an ordinary user. See PLAN.md F2.
+ *
+ * The two _start() calls hand the command to the controller and return
+ * without waiting for it to finish, because Create_Connection can take the
+ * full page timeout when a device is off and a daemon that blocked would
+ * stall its event loop. Watch for the completion event instead.
+ */
+#define	BTMGR_REASON_USER	0x13	/* remote user terminated */
+
+int		 btmgr_connect_start(const char *, const bdaddr_t *);
+int		 btmgr_disconnect_start(const char *, uint16_t, uint8_t);
+int		 btmgr_set_scan(const char *, int, int);
+
 __END_DECLS
 
 #endif /* !BTMGR_H_ */
