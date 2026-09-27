@@ -73,5 +73,6 @@ tools/probe/probe3-adapter
 *.debug
 *.full
 tools/btmgr-probe/btmgr-probe
+tools/btmgr-filetest/btmgr-filetest
 
 daemon/bluetoothmgrd

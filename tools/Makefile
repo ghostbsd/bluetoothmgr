@@ -2,6 +2,7 @@
 # archived planning datapoint and carry their own hand-written Makefile, which
 # does not implement the bsd.subdir.mk target set.
 
-SUBDIR=		btmgr-probe
+SUBDIR=		btmgr-filetest \
+		btmgr-probe
 
 .include <bsd.subdir.mk>

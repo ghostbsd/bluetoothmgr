@@ -835,8 +835,11 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
 - [ ] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
       never log or transmit key material (A3)
 - [ ] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
-- [ ] A0 write discipline: atomic rename, one `.bak` per boot, never edit in
-      place, never write when the content is unchanged
+- [x] A0 write discipline: atomic rename, one `.bak` per boot, never edit in
+      place, never write when the content is unchanged. `common/safefile.c`,
+      verified by `tools/btmgr-filetest`: 30 checks, no root or hardware
+      needed. A0.3 and A0.4 stay with the callers, since this layer only ever
+      sees a finished buffer
 - [ ] A6 pairing order enforced: write the block, reload, *then* pair
 - [ ] A7 sanitisation of every device-supplied string
 - [ ] `--dry-run` and a config-directory override, so the whole thing can be
