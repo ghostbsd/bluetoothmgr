@@ -30,9 +30,19 @@
 #define	INFLIGHT_MAX		8
 
 /*
- * Slightly longer than the controller's page timeout, so the controller gets
- * to report its own failure before we give up on it. A page timeout is around
- * 10 seconds by default.
+ * Longer than the controller's page timeout, so the controller gets to report
+ * its own failure before we give up on it.
+ *
+ * The default page timeout is 5.12 seconds: 0x2000 baseband slots at 0.625ms.
+ * Measured against a CSR8510 A10, a connect to an absent address came back
+ * with status 0x04 (Page timeout) at 5.14s, so the margin here is about 4x
+ * rather than the 2x an earlier comment assumed from reading the source.
+ *
+ * That margin is the point. Because the controller does answer for an absent
+ * device, this deadline is not the ordinary failure path at all: it only
+ * fires when no completion arrives whatsoever, such as a controller reset or
+ * the dongle being unplugged mid-page. Verified at 19.57s by resetting the
+ * controller a second after a connect.
  */
 #define	INFLIGHT_TIMEOUT_SEC	20
 
