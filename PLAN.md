@@ -841,7 +841,15 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       needed. A0.3 and A0.4 stay with the callers, since this layer only ever
       sees a finished buffer
 - [ ] A6 pairing order enforced: write the block, reload, *then* pair
-- [ ] A7 sanitisation of every device-supplied string
+- [x] A7 sanitisation of every device-supplied string. `common/sanitise.c`,
+      verified by `tools/btmgr-strtest`: 66 checks over A7.1, A7.2 and A7.4
+      plus the alias rules A2.2 to A2.5, no root or hardware needed. A7.3 has
+      no code, it is satisfied by never calling `system(3)`. Two readings go
+      beyond the spec text and are deliberate: the A7.4 fallback fires when no
+      letter or digit survives rather than only on the empty string, and runs
+      of `_` are collapsed so the 16 character budget is not spent on
+      separators. `hosts.c` and `hcsecd.c` are the callers that will exercise
+      it in anger
 - [ ] `--dry-run` and a config-directory override, so the whole thing can be
       exercised against copies in `/tmp` before it touches `/etc`
 - [ ] Verified on hardware: **F7 reproduced.** Pairing a device with no block

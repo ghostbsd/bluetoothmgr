@@ -13,7 +13,8 @@ SUBDIR_PARALLEL=
 
 ANALYZE_INCS=	-Ilib/libbtmgr -Icommon -Idaemon/src -I/usr/local/include
 ANALYZE_SRCS!=	echo lib/libbtmgr/*.c common/*.c daemon/src/*.c \
-		tools/btmgr-probe/*.c tools/btmgr-filetest/*.c
+		tools/btmgr-probe/*.c tools/btmgr-filetest/*.c \
+		tools/btmgr-strtest/*.c
 
 # Clang's static analyzer. Catches intra-function leaks, double frees and
 # use-after-free on a pointer it can follow from allocation to scope exit.
