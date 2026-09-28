@@ -801,12 +801,22 @@ channel for asynchronous commands.
       and fails with `EPERM`, rather than being refused by our own check
 - [x] Clean under the strict warning set, the static analyzer, and `memcheck`
       (86 allocations, 0 live)
-- [ ] Verified on hardware: a **failed** connect reports a usable status and
-      the right bdaddr. The struct says it carries bdaddr regardless of
-      status, but that is source reading, not measurement
-- [ ] Verified on hardware: connect and disconnect driven through IPC as root
-- [ ] Verified on hardware: the in-flight timeout fires when a device never
-      answers
+- [x] Verified on hardware: a **failed** connect reports a usable status and
+      the right bdaddr. Measured: connecting to an absent address returned
+      `io_error`, "controller reported status 0x04" (Page timeout), at
+      **5.14s**. The completion carried a usable bdaddr and we correlated it
+      by address, so `inflight.c` stands as written
+- [x] Verified on hardware: connect and disconnect driven through IPC as root.
+      A Logitech Z337 connected in **0.21s** and **0.29s** across two runs,
+      handle 72, ACL, master. The `state` event carried the connection ~0.04s
+      later, and `disconnect` resolved the address against it and replied `ok`
+      in **0.08s**, exercising the handle lookup
+- [x] Verified on hardware: the in-flight timeout fires when a device never
+      answers. Note this needed provoking: the controller *does* answer for an
+      absent device, in 5.12s, so no ordinary connect can reach the 20s
+      deadline. Resetting the controller a second after a connect drops the
+      pending page without reporting it, and the reply was `timeout`, "no
+      completion from the controller", at **19.57s**
 
 Deliberately excluded: `write_authentication_enable`. The audio journey shows
 it is required before `virtual_oss` can open A2DP, but it belongs with the
