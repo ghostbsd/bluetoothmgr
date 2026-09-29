@@ -164,7 +164,8 @@ btmgr_alias_from_name(const char *name, const uint8_t *addr,
 			return (-1);
 		}
 		snprintf(tmp, sizeof(tmp), "bt-%02x%02x%02x",
-		    addr[2], addr[1], addr[0]);
+		    (unsigned int)addr[2], (unsigned int)addr[1],
+		    (unsigned int)addr[0]);
 	}
 
 	strlcpy(out, tmp, outlen);
