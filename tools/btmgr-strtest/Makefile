@@ -10,6 +10,7 @@ MAN=
 .PATH:		${.CURDIR}/../../common
 
 SRCS=		main.c \
+		btaddr.c \
 		sanitise.c \
 		memcheck.c
 

@@ -58,8 +58,8 @@ eq(const char *got, const char *want, const char *what)
 	    same ? "" : got, same ? "" : "\")");
 }
 
-/* The address behind bt-d2d788, in bdaddr_t storage order. */
-static const uint8_t	 addr[6] = { 0x88, 0xd7, 0xd2, 0x33, 0x22, 0x11 };
+/* The address behind bt-112233, in bdaddr_t storage order. */
+static const uint8_t	 addr[6] = { 0x33, 0x22, 0x11, 0xcc, 0xbb, 0xaa };
 
 /*
  * Fill a buffer with a non-NUL pattern, NUL terminated so a comparison on it
@@ -137,7 +137,7 @@ test_quoted(void)
 
 	printf("\nA7.1 hcsecd quoted strings\n");
 
-	quoted_eq("Logitech Z337", "Logitech Z337",
+	quoted_eq("Soundbar X900", "Soundbar X900",
 	    "spaces are kept, a quoted string may hold them");
 	quoted_eq("say \"hi\"", "say _hi_",
 	    "the double quote that would end the token is replaced");
@@ -175,7 +175,7 @@ test_alias(void)
 
 	printf("\nA7.2, A7.4, A2.3 aliases\n");
 
-	alias_eq("Logitech Z337", "Logitech_Z337", "a space becomes an underscore");
+	alias_eq("Soundbar X900", "Soundbar_X900", "a space becomes an underscore");
 	alias_eq("My/Device:1", "My_Device_1",
 	    "slash and colon are outside the charset");
 	alias_eq("a.b-c_d", "a.b-c_d", "dot, dash and underscore are inside it");
@@ -195,13 +195,13 @@ test_alias(void)
 
 	printf("\nA7.4 fallback\n");
 
-	alias_eq("", "bt-d2d788", "an empty name falls back to the address");
-	alias_eq(NULL, "bt-d2d788", "so does a NULL name");
-	alias_eq("___", "bt-d2d788", "so does a name that is only separators");
+	alias_eq("", "bt-112233", "an empty name falls back to the address");
+	alias_eq(NULL, "bt-112233", "so does a NULL name");
+	alias_eq("___", "bt-112233", "so does a name that is only separators");
 
 	/* Not empty after transliteration, but equally useless. */
-	alias_eq("\xf0\x9f\x8e\xa7", "bt-d2d788", "so does a name of only emoji");
-	alias_eq("...", "bt-d2d788", "so does a name of only dots");
+	alias_eq("\xf0\x9f\x8e\xa7", "bt-112233", "so does a name of only emoji");
+	alias_eq("...", "bt-112233", "so does a name of only dots");
 	alias_eq("7", "7", "one digit is usable, so no fallback");
 
 	/*
@@ -238,9 +238,9 @@ test_suffix(void)
 	    "a full stem gives up one character to stay in budget");
 	suffix_eq("0123456789abcdef", 10, "0123456789abcd10",
 	    "a two digit suffix gives up two");
-	suffix_eq("Logitech_Z337abc", 12, "Logitech_Z337a12",
+	suffix_eq("Soundbar_X900abc", 12, "Soundbar_X900a12",
 	    "the cut lands mid-stem");
-	suffix_eq("Logitech_Zxxxxx", 123456, "Logitech_Z123456",
+	suffix_eq("Soundbar_Xxxxxx", 123456, "Soundbar_X123456",
 	    "a trailing separator after the cut is dropped");
 
 	/*

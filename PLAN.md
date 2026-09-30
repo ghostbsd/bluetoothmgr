@@ -36,15 +36,15 @@ ordinary user. Results:
 |---|---|---|
 | Kernel modules loaded | `ng_ubt`, `ng_hci`, `ng_bluetooth`, `ng_l2cap`, `ng_btsocket`, `ng_socket` | `kldstat` |
 | Adapter | CSR dongle at `ugen0.2`, node `ubt0hci` | `usbconfig`, `bt_devenum()` |
-| Adapter BD_ADDR | `00:1a:7d:da:71:13` | `bt_devinfo()` |
+| Adapter BD_ADDR | `aa:bb:cc:11:22:03` | `bt_devinfo()` |
 | Adapter state | `0x00000003`, inited | `bt_devinfo()` |
-| Adapter friendly name | `ericbsd-ghostbsd-pc (ubt0)` | `HCI_Read_Local_Name` |
+| Adapter friendly name | `example-pc (ubt0)` | `HCI_Read_Local_Name` |
 | Scan enable | `0x03`, inquiry scan ON, page scan ON | `HCI_Read_Scan_Enable` |
 | Class of device | `ff:01:0c` | `HCI_Read_Unit_Class` |
 | Running daemons | `hcsecd`, `sdpd`. Not `bthidd` | `pgrep` |
 | Stack brought up by | `devd`, automatically on USB attach | `/etc/devd/bluetooth.conf` |
-| Inquiry as normal user | works, found `bc:5c:17:c6:87:3f` "Basement TV 2" class `28:04:3c` | probe2 |
-| Existing alias | `0f:44:53:d2:d7:88  headphones` | `/etc/bluetooth/hosts` |
+| Inquiry as normal user | works, found `aa:bb:cc:11:22:04` a nearby TV class `28:04:3c` | probe2 |
+| Existing alias | `0a:bb:cc:11:22:01  headphones` | `/etc/bluetooth/hosts` |
 
 Toolchain and libraries, all present: clang 19.1.7, `gtk+-3.0`,
 `libmatepanelapplet-4.0`, `glib-2.0`, `json-glib-1.0`, `jansson`, `libbluetooth`,
@@ -145,7 +145,7 @@ based on `priv_check(td, PRIV_NETBLUETOOTH_RAW)`. Unprivileged sockets are then
 checked against a static allowlist, `ng_btsocket_hci_raw_sec_filter`, built at
 module init around line 810.
 
-Measured as user `ericbsd`, no sudo:
+Measured as an ordinary user, no sudo:
 
 ```
 bt_devopen("ubt0hci")              ok
@@ -452,7 +452,7 @@ New pieces relative to the brief, and why:
 - **`store.c`.** FreeBSD has no device database. `hcsecd.conf` holds pairing
   secrets, `/etc/bluetooth/hosts` holds aliases, `bthidd.conf` holds HID
   descriptors, and none of them holds "this is a headset, the user calls it
-  Monster, last connected Tuesday". We need our own, at
+  My Headset, last connected Tuesday". We need our own, at
   `/var/db/bluetoothmgr/devices.json`. This is the single biggest functional
   gap versus BlueZ.
 - **`hcsecd.c`, `keys.c`, `hosts.c`.** Config ownership, per F6 and F7, plus
@@ -474,7 +474,7 @@ understanding the daemon.
 | live inquiry | who is nearby but unknown, class of device, RSSI | none |
 
 Keyed by BD_ADDR throughout. The `type` field in the IPC protocol comes from
-decoding the class of device. The probe saw `28:04:3c` from "Basement TV 2":
+decoding the class of device. The probe saw `28:04:3c` from a nearby TV:
 major device class bits 8 to 12 give `0x04`, which is Audio/Video, and the
 service class bits give rendering plus audio. That decode belongs in
 `devices.c` as a small lookup table.
@@ -503,7 +503,7 @@ Commands, client to daemon:
 {"id": 6, "cmd": "disconnect", "addr": "00:11:22:33:44:55"}
 {"id": 7, "cmd": "pair", "addr": "00:11:22:33:44:55", "pin": "0000"}
 {"id": 8, "cmd": "remove", "addr": "00:11:22:33:44:55"}
-{"id": 9, "cmd": "set_alias", "addr": "00:11:22:33:44:55", "alias": "z337"}
+{"id": 9, "cmd": "set_alias", "addr": "00:11:22:33:44:55", "alias": "speaker_addr"}
 ```
 
 Every command carries an `id`. Every reply echoes it. Without this, a client
@@ -517,9 +517,9 @@ Replies and events, daemon to client:
 
 {"event": "state", "adapter_present": true, "powered": true,
  "discoverable": false, "scanning": false,
- "adapter": {"addr": "00:1a:7d:da:71:13", "name": "ericbsd-ghostbsd-pc"},
+ "adapter": {"addr": "aa:bb:cc:11:22:03", "name": "example-pc"},
  "devices": [
-   {"addr": "0f:44:53:d2:d7:88", "name": "Monster", "alias": "headphones",
+   {"addr": "0a:bb:cc:11:22:01", "name": "Headset H200", "alias": "headphones",
     "type": "headset", "connected": false, "paired": true, "trusted": true}
  ]}
 
@@ -711,7 +711,7 @@ API conventions fixed here and followed by every module after:
       `-Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings`
 - [x] Verified on hardware: adapter state, connection list, live scan
 - [x] Verified on hardware: class decode on two devices, covering both a
-      specific mapping (Z337 `24:04:14`, Loudspeaker) and the fallback
+      specific mapping (a speaker, `24:04:14`, Loudspeaker) and the fallback
       (TV `28:04:3c`)
 
 ### M2. Daemon core **[done]**
@@ -807,7 +807,7 @@ channel for asynchronous commands.
       **5.14s**. The completion carried a usable bdaddr and we correlated it
       by address, so `inflight.c` stands as written
 - [x] Verified on hardware: connect and disconnect driven through IPC as root.
-      A Logitech Z337 connected in **0.21s** and **0.29s** across two runs,
+      A Bluetooth speaker connected in **0.21s** and **0.29s** across two runs,
       handle 72, ACL, master. The `state` event carried the connection ~0.04s
       later, and `disconnect` resolved the address against it and replied `ok`
       in **0.08s**, exercising the handle lookup
@@ -963,7 +963,7 @@ Still open:
 | SSP absence blocks modern devices | high. Many headsets simply will not pair | scope as M6, be explicit in docs that v1 is legacy pairing |
 | `hcsecd` coexistence is fragile | medium. Restarting it drops in-flight pairing | never edit its config in place, always regenerate plus `.bak`, and use `service hcsecd reload` (SIGHUP), never `restart` |
 | Link key discarded for unlisted device (F7) | high. Silent, and forces re-pairing every session | guarantee the config block exists and reload before pairing is attempted, never after |
-| Firmware clearing pairing on disconnect | medium. Monster headphones do this | detect the reconnect failure, offer one-click key delete plus re-pair |
+| Firmware clearing pairing on disconnect | medium. Some headphones do this | detect the reconnect failure, offer one-click key delete plus re-pair |
 | Two pairing agents if a user starts `hcsecd` during M6 | high. Both reply, controller errors | M6 setting must stop and disable `hcsecd`, and the daemon should refuse to arm SSP while `hcsecd` is running |
 | MATE applet API churn | low | pinned by the `libmatepanelapplet-4.0` package already installed |
 | Daemon dies on SIGPIPE (F8) | medium. A raw HCI write can return EPIPE unexpectedly | `signal(SIGPIPE, SIG_IGN)` at daemon startup, and check every write's return |
