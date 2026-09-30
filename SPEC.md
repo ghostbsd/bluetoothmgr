@@ -226,7 +226,7 @@ strict grammars, plus syslog.
   `posix_spawn()` or `fork()` plus `execve()` with an argument vector, never
   `system()` or `popen()`.
 - **A7.4** A name that sanitises to the empty string MUST fall back to a
-  generated alias derived from the address, for example `bt-d2d788` from the
+  generated alias derived from the address, for example `bt-112233` from the
   last three octets.
 
 ## A8. Service control
@@ -344,14 +344,14 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
   "discoverable": false,
   "scanning": false,
   "adapter": {
-    "addr": "00:1a:7d:da:71:13",
-    "name": "ericbsd-ghostbsd-pc",
+    "addr": "aa:bb:cc:11:22:03",
+    "name": "example-pc",
     "node": "ubt0hci"
   },
   "devices": [
     {
-      "addr": "0f:44:53:d2:d7:88",
-      "name": "Monster",
+      "addr": "0a:bb:cc:11:22:01",
+      "name": "Headset H200",
       "alias": "headphones",
       "type": "headset",
       "class": "28:04:3c",

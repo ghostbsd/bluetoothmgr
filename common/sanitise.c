@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "btaddr.h"
 #include "sanitise.h"
 
 /* Must come after the system headers: it redefines malloc and friends. */
@@ -25,7 +26,6 @@
 static int	 alias_byte_ok(unsigned char c);
 static int	 is_separator(unsigned char c);
 static int	 is_alnum(unsigned char c);
-static int	 hex_digit(unsigned char c);
 static size_t	 trim_separators(char *s, size_t len);
 
 static int
@@ -49,20 +49,6 @@ alias_byte_ok(unsigned char c)
 {
 
 	return (is_alnum(c) || is_separator(c));
-}
-
-static int
-hex_digit(unsigned char c)
-{
-
-	if (c >= '0' && c <= '9')
-		return (c - '0');
-	if (c >= 'a' && c <= 'f')
-		return (c - 'a' + 10);
-	if (c >= 'A' && c <= 'F')
-		return (c - 'A' + 10);
-
-	return (-1);
 }
 
 /* Drop trailing separators in place, returning the new length. */
@@ -232,7 +218,7 @@ btmgr_alias_is_addrlike(const char *s)
 		return (0);
 
 	for (field = 0; field < 6; field++) {
-		for (digits = 0; hex_digit((unsigned char)*s) >= 0; digits++)
+		for (digits = 0; btmgr_hex_digit(*s) >= 0; digits++)
 			s++;
 
 		if (digits < 1 || digits > 2)

@@ -11,7 +11,7 @@
  *   bits  1..0    format type, always 00 for the format we handle
  *
  * The three bytes arrive little endian, so devclass[0] is the low byte.
- * Worked example from a real inquiry, "Basement TV 2" reporting 28:04:3c:
+ * Worked example from a real inquiry, a nearby TV reporting 28:04:3c:
  *
  *   value = 0x28043c
  *   major = (0x28043c >> 8) & 0x1f = 0x04   Audio/Video
