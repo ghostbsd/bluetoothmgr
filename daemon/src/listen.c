@@ -17,15 +17,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <string.h>
 #include <syslog.h>
 #include <unistd.h>
 
 #include "btmgr.h"
 #include "listen.h"
-
-/* Must come after the system headers: it redefines malloc and friends. */
-#include "memcheck.h"
 
 /*
  * Events we care about. Every one of these can change what a client should be

@@ -21,7 +21,7 @@
 #define	BTMGR_PROTO_VERSION	0
 
 /* SPEC.md B1.3. A longer line closes the connection unparsed. */
-#define	BTMGR_LINE_MAX		(64 * 1024)
+#define	BTMGR_LINE_MAX		((size_t)64 * 1024)
 
 #define	BTMGR_CMD_NAME_MAX	32
 

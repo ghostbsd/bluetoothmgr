@@ -19,7 +19,7 @@
  * drain is either wedged or hostile, and either way we would rather lose it
  * than grow without bound. SPEC.md A5 implies this; B1.3 caps the input side.
  */
-#define	IPC_OUT_MAX	(256 * 1024)
+#define	IPC_OUT_MAX	((size_t)256 * 1024)
 
 struct client {
 	int		 fd;

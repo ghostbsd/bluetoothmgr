@@ -21,10 +21,16 @@
 
 #include <jansson.h>
 
+#include "btmgr.h"
 #include "proto.h"
+#include "state.h"
 
-/* Must come after the system headers: it redefines malloc and friends. */
-#include "memcheck.h"
+/*
+ * Must come after the system headers: it redefines malloc and friends. The
+ * pragma says so to clang-include-cleaner, which sees no direct use of this
+ * header because the use is macro replacement of malloc(), not a symbol.
+ */
+#include "memcheck.h"	/* IWYU pragma: keep */
 
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
