@@ -34,7 +34,23 @@
  * libbluetooth's own sources do exactly this.
  */
 #define	L2CAP_SOCKET_CHECKED
-#include <bluetooth.h>
+#include <bluetooth.h>				/* IWYU pragma: export */
+
+/*
+ * The HCI types and opcodes. bluetooth.h pulls this in anyway, but the structs
+ * below use NG_HCI_CLASS_SIZE and NG_HCI_UNIT_NAME_SIZE, so the dependency is
+ * ours and is named here rather than inherited by luck.
+ *
+ * Both are exported: btmgr.h is the single entry point for this layer, so a
+ * caller including it is entitled to the HCI vocabulary it is built from.
+ */
+#include <netgraph/bluetooth/include/ng_hci.h>	/* IWYU pragma: export */
+
+/*
+ * Not standalone: it wants u_char, bitstr_t and the ng_hci types in scope
+ * already, which is why it goes here and not in the files that use it.
+ */
+#include <netgraph/bluetooth/include/ng_btsocket.h>	/* IWYU pragma: export */
 
 /*
  * Array bounds. These are the sizes a caller must allocate.

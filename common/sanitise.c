@@ -8,9 +8,6 @@
  * int a plain char gives for a UTF-8 byte.
  */
 
-#include <sys/cdefs.h>
-#include <sys/types.h>
-
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -19,9 +16,6 @@
 
 #include "btaddr.h"
 #include "sanitise.h"
-
-/* Must come after the system headers: it redefines malloc and friends. */
-#include "memcheck.h"
 
 static int	 alias_byte_ok(unsigned char c);
 static int	 is_separator(unsigned char c);
@@ -123,7 +117,15 @@ btmgr_alias_from_name(const char *name, const uint8_t *addr,
 		unsigned char c = (unsigned char)name[i];
 		char mapped;
 
-		mapped = alias_byte_ok(c) ? (char)c : '_';
+		/*
+		 * Not a ternary: '_' is an int, as every character constant is,
+		 * so "cond ? name[i] : '_'" has type int and assigning it back
+		 * to a char is a narrowing conversion.
+		 */
+		if (alias_byte_ok(c))
+			mapped = name[i];
+		else
+			mapped = '_';
 
 		if (is_separator((unsigned char)mapped)) {
 			/* No leading separator, no runs. */
@@ -149,7 +151,7 @@ btmgr_alias_from_name(const char *name, const uint8_t *addr,
 			errno = EINVAL;
 			return (-1);
 		}
-		snprintf(tmp, sizeof(tmp), "bt-%02x%02x%02x",
+		(void)snprintf(tmp, sizeof(tmp), "bt-%02x%02x%02x",
 		    (unsigned int)addr[2], (unsigned int)addr[1],
 		    (unsigned int)addr[0]);
 	}
@@ -177,7 +179,7 @@ btmgr_alias_with_suffix(const char *stem, unsigned int n,
 		return (-1);
 	}
 
-	snprintf(suffix, sizeof(suffix), "%u", n);
+	(void)snprintf(suffix, sizeof(suffix), "%u", n);
 	sufflen = strlen(suffix);
 
 	/*

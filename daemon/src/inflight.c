@@ -9,8 +9,11 @@
  * more of it here.
  */
 
+#include <stdint.h>
 #include <string.h>
+#include <time.h>
 
+#include "btmgr.h"
 #include "inflight.h"
 
 /*

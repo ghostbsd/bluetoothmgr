@@ -7,9 +7,6 @@
  * stored. That is bt_aton()'s order and bt_ntoa() prints it back the same way.
  */
 
-#include <sys/cdefs.h>
-#include <sys/types.h>
-
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -98,7 +95,7 @@ void
 btmgr_addr_format(const uint8_t *addr, char *out, size_t outlen)
 {
 
-	snprintf(out, outlen, "%02x:%02x:%02x:%02x:%02x:%02x",
+	(void)snprintf(out, outlen, "%02x:%02x:%02x:%02x:%02x:%02x",
 	    (unsigned int)addr[5], (unsigned int)addr[4],
 	    (unsigned int)addr[3], (unsigned int)addr[2],
 	    (unsigned int)addr[1], (unsigned int)addr[0]);

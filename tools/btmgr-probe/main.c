@@ -17,8 +17,13 @@
  * operations can be debugged without the daemon in the way.
  */
 
+#include <sys/cdefs.h>
+
 #include <err.h>
+#include <errno.h>
+#include <limits.h>
 #include <netdb.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +33,39 @@
 
 #define	DEFAULT_SCAN_SECS	5
 
+/*
+ * The verb is resolved once, into an enum, rather than strcmp'd at each use.
+ * Seven repeated comparisons of the same string are easy to get out of step,
+ * and they also defeat the static analyzer: it treats every strcmp() as an
+ * opaque call, so it happily assumes "not discoverable" where the argument is
+ * validated and "is discoverable" where the argument is used, and then reports
+ * a null dereference that cannot happen.
+ */
+enum verb {
+	VERB_ALL,
+	VERB_ADAPTER,
+	VERB_CONN,
+	VERB_SCAN,
+	VERB_CONNECT,
+	VERB_DISCONNECT,
+	VERB_DISCOVERABLE
+};
+
+static const struct {
+	const char	*name;
+	enum verb	 verb;
+} verbs[] = {
+	{ "all",		VERB_ALL },
+	{ "adapter",		VERB_ADAPTER },
+	{ "conn",		VERB_CONN },
+	{ "scan",		VERB_SCAN },
+	{ "connect",		VERB_CONNECT },
+	{ "disconnect",		VERB_DISCONNECT },
+	{ "discoverable",	VERB_DISCOVERABLE }
+};
+
 static void	usage(void) __dead2;
+static int	parse_positive(const char *);
 static int	show_adapters(struct btmgr_adapter *, int *);
 static void	show_conns(const char *);
 static void	show_scan(const char *, int);
@@ -37,12 +74,34 @@ static void	do_connect(const char *, const char *);
 static void
 usage(void)
 {
-	fprintf(stderr,
+	(void)fprintf(stderr,
 	    "usage: btmgr-probe [adapter | conn | scan [seconds]]\n"
 	    "       btmgr-probe connect <addr>        (root)\n"
 	    "       btmgr-probe disconnect <handle>   (root)\n"
 	    "       btmgr-probe discoverable <on|off> (root)\n");
 	exit(1);
+}
+
+/*
+ * A whole positive number, or -1.
+ *
+ * atoi() cannot tell "0" from "not a number", and it stops at the first byte it
+ * does not like without saying so, which made "scan 5x" scan for 5 seconds and
+ * "disconnect 7bogus" disconnect handle 7. Both callers want the input refused.
+ */
+static int
+parse_positive(const char *s)
+{
+	char	*end;
+	long	 v;
+
+	errno = 0;
+	v = strtol(s, &end, 10);
+
+	if (errno != 0 || end == s || *end != '\0' || v <= 0 || v > INT_MAX)
+		return (-1);
+
+	return ((int)v);
 }
 
 /*
@@ -72,7 +131,7 @@ do_connect(const char *node, const char *addrstr)
 		err(1, "btmgr_connect_start (need root?)");
 
 	printf("paging %s...\n", addrstr);
-	fflush(stdout);
+	(void)fflush(stdout);
 
 	for (tries = 0; tries < 20; tries++) {
 		sleep(1);
@@ -157,7 +216,7 @@ show_scan(const char *node, int secs)
 	int			n, i;
 
 	printf("scanning %ds...\n", secs);
-	fflush(stdout);
+	(void)fflush(stdout);
 
 	n = (int)(sizeof(devs) / sizeof(devs[0]));
 	if (btmgr_scan(node, secs, devs, &n) < 0)
@@ -182,6 +241,8 @@ main(int argc, char *argv[])
 {
 	struct btmgr_adapter	 ad[BTMGR_MAX_ADAPTERS];
 	const char		*what, *arg;
+	enum verb		 verb;
+	size_t			 i;
 	int			 n, secs;
 
 	what = (argc > 1) ? argv[1] : "all";
@@ -191,34 +252,44 @@ main(int argc, char *argv[])
 	if (argc > 3)
 		usage();
 
-	/* The three privileged verbs all require their argument. */
-	if ((strcmp(what, "connect") == 0 ||
-	     strcmp(what, "disconnect") == 0 ||
-	     strcmp(what, "discoverable") == 0) && arg == NULL)
+	for (i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++)
+		if (strcmp(what, verbs[i].name) == 0)
+			break;
+	if (i == sizeof(verbs) / sizeof(verbs[0]))
 		usage();
+	verb = verbs[i].verb;
 
-	if (strcmp(what, "scan") == 0 && arg != NULL) {
-		secs = atoi(arg);
-		if (secs <= 0)
+	/*
+	 * Whether the argument is required, optional or refused, in one place.
+	 * usage() does not return, so past this switch an argument is non-NULL
+	 * for exactly the three verbs that need one.
+	 */
+	switch (verb) {
+	case VERB_CONNECT:
+	case VERB_DISCONNECT:
+	case VERB_DISCOVERABLE:
+		if (arg == NULL)
 			usage();
-	} else if (arg != NULL && strcmp(what, "connect") != 0 &&
-	    strcmp(what, "disconnect") != 0 &&
-	    strcmp(what, "discoverable") != 0) {
-		usage();
+		break;
+	case VERB_SCAN:
+		if (arg != NULL) {
+			secs = parse_positive(arg);
+			if (secs < 0)
+				usage();
+		}
+		break;
+	default:
+		if (arg != NULL)
+			usage();
+		break;
 	}
-
-	if (strcmp(what, "all") != 0 && strcmp(what, "adapter") != 0 &&
-	    strcmp(what, "conn") != 0 && strcmp(what, "scan") != 0 &&
-	    strcmp(what, "connect") != 0 && strcmp(what, "disconnect") != 0 &&
-	    strcmp(what, "discoverable") != 0)
-		usage();
 
 	/*
 	 * Every verb needs to know which adapter to talk to, so list them
 	 * first regardless, and print them only when they were asked for.
 	 */
 	n = (int)(sizeof(ad) / sizeof(ad[0]));
-	if (strcmp(what, "adapter") == 0 || strcmp(what, "all") == 0) {
+	if (verb == VERB_ADAPTER || verb == VERB_ALL) {
 		if (show_adapters(ad, &n) == 0)
 			return (1);
 	} else {
@@ -229,15 +300,15 @@ main(int argc, char *argv[])
 	}
 
 	/* Privileged verbs. Each does its thing and exits. */
-	if (strcmp(what, "connect") == 0) {
+	if (verb == VERB_CONNECT) {
 		do_connect(ad[0].node, arg);
 		return (0);
 	}
 
-	if (strcmp(what, "disconnect") == 0) {
-		int handle = atoi(arg);
+	if (verb == VERB_DISCONNECT) {
+		int handle = parse_positive(arg);
 
-		if (handle <= 0)
+		if (handle < 0)
 			errx(1, "handle must be a positive number");
 		if (btmgr_disconnect_start(ad[0].node, (uint16_t)handle,
 		    BTMGR_REASON_USER) < 0)
@@ -246,7 +317,7 @@ main(int argc, char *argv[])
 		return (0);
 	}
 
-	if (strcmp(what, "discoverable") == 0) {
+	if (verb == VERB_DISCOVERABLE) {
 		int on;
 
 		if (strcmp(arg, "on") == 0)
@@ -267,14 +338,14 @@ main(int argc, char *argv[])
 		return (0);
 	}
 
-	if (strcmp(what, "conn") == 0 || strcmp(what, "all") == 0) {
-		if (strcmp(what, "all") == 0)
+	if (verb == VERB_CONN || verb == VERB_ALL) {
+		if (verb == VERB_ALL)
 			printf("\n");
 		show_conns(ad[0].node);
 	}
 
-	if (strcmp(what, "scan") == 0 || strcmp(what, "all") == 0) {
-		if (strcmp(what, "all") == 0)
+	if (verb == VERB_SCAN || verb == VERB_ALL) {
+		if (verb == VERB_ALL)
 			printf("\n");
 		show_scan(ad[0].node, secs);
 	}

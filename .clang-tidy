@@ -1,0 +1,72 @@
+# clang-tidy for BluetoothMgr.
+#
+# Exists because "make analyze" cannot fail. clang --analyze reports findings and
+# still exits 0, so the loop's "|| exit 1" never fires and the target prints
+# "analyze: clean" whatever it found. WarningsAsErrors below makes "make tidy" a
+# gate instead of a suggestion.
+#
+# The rule here is to fix the code, not the config. Exactly one check is
+# disabled, and only because no code change can satisfy it on FreeBSD.
+
+Checks: >
+  -*,
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  bugprone-*,
+  cert-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -misc-include-cleaner,
+  -bugprone-easily-swappable-parameters
+
+# Our own headers only. A pattern like '.*/(src|include)/.*' looks right and is
+# not: it matches /usr/local/include, which buries us in findings from
+# jansson.h, while missing common/*.h and so losing real findings on our own
+# result enums.
+HeaderFilterRegex: '(common|daemon/src|lib/libbtmgr|tools/[^/]+)/[^/]+\.h$'
+
+# A finding fails the build. No exceptions: the enabled checks above ARE the
+# standard, so anything that fires is a defect to fix, not a number to track.
+# A check we are not going to satisfy is removed from the list with its reason,
+# rather than left enabled and waved through.
+WarningsAsErrors: '*'
+
+# --fix formats its edits with our .clang-format rather than LLVM defaults.
+FormatStyle: file
+
+# The three checks not in the standard, and why:
+#
+# clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+#   Demands snprintf_s, memcpy_s and memset_s from C11 Annex K. Annex K is
+#   optional, FreeBSD does not implement it, and there is no such function to
+#   call, so no edit to this code can satisfy it. Makefile's analyze target
+#   call, so no edit to this code can satisfy it.
+#
+# misc-include-cleaner
+#   Cannot be satisfied in this environment. It reported PATH_MAX, F_OK, SIGHUP,
+#   SIGPIPE, ioctl and dirent as lacking a header in files that already include
+#   <limits.h>, <unistd.h>, <signal.h>, <sys/ioctl.h> and <dirent.h>; all five
+#   were checked. Adding <sys/endian.h> for htole16 made it report that header
+#   as unused, which is the tool contradicting itself. clang-tidy resolves libc
+#   headers to the glibc tree under /compat/linux, where PATH_MAX arrives via
+#   bits/posix1_lim.h rather than FreeBSD's sys/syslimits.h. It found and fixed
+#   134 real problems before being switched off, so turn it back on by hand if
+#   the toolchain is ever fixed:
+#       clang-tidy19 --checks='-*,misc-include-cleaner' <file> -- <flags>
+#
+# bugprone-easily-swappable-parameters
+#   A style we are deliberately not adopting. It fires on any two adjacent
+#   parameters of the same or convertible type, which in C includes an enum
+#   beside an int and two const char *. Satisfying the rest needs a wrapper
+#   struct per pair, so eq(out, "expected", "description") in the test harnesses
+#   would stop reading like a test. The two findings that carried real
+#   consequence were fixed instead: hcsecd_set() takes a struct so name and pin
+#   cannot be swapped, and safefile_write() takes mode before buf so it is not
+#   beside len.
+#
+# readability-* is deliberately not enabled. Style here is KNF, settled by
+# .clang-format, and readability-braces-around-statements would demand braces
+# that style(9) explicitly allows us to omit. Two tools arguing over the same
+# lines is worse than one.

@@ -20,12 +20,11 @@
 
 #include <sys/cdefs.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 
 #include <dirent.h>
+#include <fts.h>
 #include <stdarg.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,9 +56,9 @@ ok(int cond, const char *fmt, ...)
 	checks++;
 	va_start(ap, fmt);
 	if (cond) {
-		fputs("ok   ", stdout);
+		(void)fputs("ok   ", stdout);
 	} else {
-		fputs("FAIL ", stdout);
+		(void)fputs("FAIL ", stdout);
 		failures++;
 	}
 	vprintf(fmt, ap);
@@ -77,15 +76,15 @@ put_file(const char *path, const char *content, mode_t mode)
 {
 	FILE	*f;
 
-	if ((f = fopen(path, "w")) == NULL ||
-	    fputs(content, f) == EOF) {
-		fprintf(stderr, "setup: %s: %s\n", path, strerror(errno));
+	f = fopen(path, "w");
+	if (f == NULL || fputs(content, f) == EOF) {
+		(void)fprintf(stderr, "setup: %s: %s\n", path, strerror(errno));
 		if (f != NULL)
-			fclose(f);
+			(void)fclose(f);
 		exit(2);
 	}
 	if (fclose(f) == EOF || chmod(path, mode) == -1) {
-		fprintf(stderr, "setup: %s: %s\n", path, strerror(errno));
+		(void)fprintf(stderr, "setup: %s: %s\n", path, strerror(errno));
 		exit(2);
 	}
 }
@@ -130,7 +129,8 @@ count_temps(const char *dir)
 	DIR		*d;
 	int		 n = 0;
 
-	if ((d = opendir(dir)) == NULL)
+	d = opendir(dir);
+	if (d == NULL)
 		return (-1);
 	while ((de = readdir(d)) != NULL) {
 		if (strstr(de->d_name, ".btmgr.") != NULL)
@@ -143,26 +143,30 @@ count_temps(const char *dir)
 static void
 rm_rf(const char *path)
 {
-	struct dirent	*de;
-	char		 sub[PATH_MAX];
-	DIR		*d;
+	char	*argv[2];
+	FTS	*fts;
+	FTSENT	*ent;
 
-	if ((d = opendir(path)) == NULL) {
-		unlink(path);
+	argv[0] = (char *)path;
+	argv[1] = NULL;
+
+	fts = fts_open(argv, FTS_PHYSICAL | FTS_NOSTAT, NULL);
+	if (fts == NULL)
 		return;
+
+	for (;;) {
+		ent = fts_read(fts);
+		if (ent == NULL)
+			break;
+
+		/* FTS_DP is the post-order visit, so contents go before the dir. */
+		if (ent->fts_info == FTS_DP)
+			(void)rmdir(ent->fts_path);
+		else if (ent->fts_info != FTS_D)
+			(void)unlink(ent->fts_path);
 	}
-	while ((de = readdir(d)) != NULL) {
-		if (strcmp(de->d_name, ".") == 0 ||
-		    strcmp(de->d_name, "..") == 0)
-			continue;
-		snprintf(sub, sizeof(sub), "%s/%s", path, de->d_name);
-		if (de->d_type == DT_DIR)
-			rm_rf(sub);
-		else
-			unlink(sub);
-	}
-	closedir(d);
-	rmdir(path);
+
+	(void)fts_close(fts);
 }
 
 int
@@ -178,39 +182,40 @@ main(int argc, char **argv)
 	int			 owned = 0, rc;
 
 	if (argc > 2) {
-		fprintf(stderr, "usage: btmgr-filetest [scratch-directory]\n");
+		(void)fprintf(stderr, "usage: btmgr-filetest [scratch-directory]\n");
 		return (2);
 	}
 
 	if (argc == 2) {
 		if (strlcpy(root, argv[1], sizeof(root)) >= sizeof(root)) {
-			fprintf(stderr, "path too long\n");
+			(void)fprintf(stderr, "path too long\n");
 			return (2);
 		}
 		if (mkdir(root, 0755) == -1 && errno != EEXIST) {
-			fprintf(stderr, "mkdir %s: %s\n", root,
+			(void)fprintf(stderr, "mkdir %s: %s\n", root,
 			    strerror(errno));
 			return (2);
 		}
 	} else {
-		if ((tmpdir = getenv("TMPDIR")) == NULL || *tmpdir == '\0')
+		tmpdir = getenv("TMPDIR");
+		if (tmpdir == NULL || *tmpdir == '\0')
 			tmpdir = "/tmp";
-		snprintf(root, sizeof(root), "%s/btmgr-filetest.XXXXXX",
+		(void)snprintf(root, sizeof(root), "%s/btmgr-filetest.XXXXXX",
 		    tmpdir);
 		if (mkdtemp(root) == NULL) {
-			fprintf(stderr, "mkdtemp: %s\n", strerror(errno));
+			(void)fprintf(stderr, "mkdtemp: %s\n", strerror(errno));
 			return (2);
 		}
 		owned = 1;
 	}
 
-	snprintf(rundir, sizeof(rundir), "%s/run", root);
-	snprintf(target, sizeof(target), "%s/hcsecd.conf", root);
-	snprintf(bak, sizeof(bak), "%s.bak", target);
+	(void)snprintf(rundir, sizeof(rundir), "%s/run", root);
+	(void)snprintf(target, sizeof(target), "%s/hcsecd.conf", root);
+	(void)snprintf(bak, sizeof(bak), "%s.bak", target);
 
 	if (safefile_init(&ctx, rundir, 0) == -1 ||
 	    safefile_init(&dry, rundir, 1) == -1) {
-		fprintf(stderr, "safefile_init: %s\n", strerror(errno));
+		(void)fprintf(stderr, "safefile_init: %s\n", strerror(errno));
 		return (2);
 	}
 
@@ -224,7 +229,7 @@ main(int argc, char **argv)
 	put_file(target, "original\n", 0600);
 	before = ino_of(target);
 
-	rc = safefile_write(&ctx, target, "first\n", 6, 0600, err, sizeof(err));
+	rc = safefile_write(&ctx, target, 0600, "first\n", 6, err, sizeof(err));
 	ok(rc == SAFEFILE_WRITTEN, "first write reports WRITTEN (got %d, %s)",
 	    rc, err);
 	ok(exists(bak), ".bak was created");
@@ -246,7 +251,7 @@ main(int argc, char **argv)
 
 	/* A0.2 again: the second write must leave the first backup alone. */
 	printf("\n-- A0.2 one backup per boot --\n");
-	rc = safefile_write(&ctx, target, "second\n", 7, 0600, err,
+	rc = safefile_write(&ctx, target, 0600, "second\n", 7, err,
 	    sizeof(err));
 	ok(rc == SAFEFILE_WRITTEN, "second write reports WRITTEN (got %d, %s)",
 	    rc, err);
@@ -258,7 +263,7 @@ main(int argc, char **argv)
 	/* A0.5. */
 	printf("\n-- A0.5 no write when nothing changed --\n");
 	before = ino_of(target);
-	rc = safefile_write(&ctx, target, "second\n", 7, 0600, err,
+	rc = safefile_write(&ctx, target, 0600, "second\n", 7, err,
 	    sizeof(err));
 	ok(rc == SAFEFILE_UNCHANGED, "identical content reports UNCHANGED "
 	    "(got %d)", rc);
@@ -279,9 +284,9 @@ main(int argc, char **argv)
 	{
 		char	hosts[PATH_MAX];
 
-		snprintf(hosts, sizeof(hosts), "%s/hosts", root);
+		(void)snprintf(hosts, sizeof(hosts), "%s/hosts", root);
 		put_file(hosts, "old\n", 0644);
-		rc = safefile_write(&ctx, hosts, "new\n", 4, 0600, err,
+		rc = safefile_write(&ctx, hosts, 0600, "new\n", 4, err,
 		    sizeof(err));
 		ok(rc == SAFEFILE_WRITTEN, "wrote hosts (got %d, %s)", rc, err);
 		ok(mode_of(hosts) == 0644,
@@ -298,10 +303,10 @@ main(int argc, char **argv)
 	{
 		char	fresh[PATH_MAX], freshbak[PATH_MAX];
 
-		snprintf(fresh, sizeof(fresh), "%s/devices.json", root);
-		snprintf(freshbak, sizeof(freshbak), "%s.bak", fresh);
+		(void)snprintf(fresh, sizeof(fresh), "%s/devices.json", root);
+		(void)snprintf(freshbak, sizeof(freshbak), "%s.bak", fresh);
 
-		rc = safefile_write(&ctx, fresh, "{}\n", 3, 0600, err,
+		rc = safefile_write(&ctx, fresh, 0600, "{}\n", 3, err,
 		    sizeof(err));
 		ok(rc == SAFEFILE_WRITTEN, "created devices.json (got %d, %s)",
 		    rc, err);
@@ -310,7 +315,7 @@ main(int argc, char **argv)
 		    mode_of(fresh));
 		ok(!exists(freshbak), "no .bak for a file that did not exist");
 
-		rc = safefile_write(&ctx, fresh, "{\"a\":1}\n", 8, 0600, err,
+		rc = safefile_write(&ctx, fresh, 0600, "{\"a\":1}\n", 8, err,
 		    sizeof(err));
 		ok(rc == SAFEFILE_WRITTEN, "rewrote devices.json (got %d, %s)",
 		    rc, err);
@@ -322,7 +327,7 @@ main(int argc, char **argv)
 	/* A new boot clears the markers, so the next write refreshes .bak. */
 	printf("\n-- a new boot takes a fresh backup --\n");
 	rm_rf(rundir);
-	rc = safefile_write(&ctx, target, "third\n", 6, 0600, err, sizeof(err));
+	rc = safefile_write(&ctx, target, 0600, "third\n", 6, err, sizeof(err));
 	ok(rc == SAFEFILE_WRITTEN, "write after reboot (got %d, %s)", rc, err);
 	got = get_file(bak);
 	ok(got != NULL && strcmp(got, "second\n") == 0,
@@ -334,11 +339,11 @@ main(int argc, char **argv)
 	{
 		char	dpath[PATH_MAX], dbak[PATH_MAX];
 
-		snprintf(dpath, sizeof(dpath), "%s/dry.conf", root);
-		snprintf(dbak, sizeof(dbak), "%s.bak", dpath);
+		(void)snprintf(dpath, sizeof(dpath), "%s/dry.conf", root);
+		(void)snprintf(dbak, sizeof(dbak), "%s.bak", dpath);
 		put_file(dpath, "untouched\n", 0600);
 
-		rc = safefile_write(&dry, dpath, "changed\n", 8, 0600, err,
+		rc = safefile_write(&dry, dpath, 0600, "changed\n", 8, err,
 		    sizeof(err));
 		ok(rc == SAFEFILE_DRYRUN, "reports DRYRUN (got %d)", rc);
 		got = get_file(dpath);
@@ -347,7 +352,7 @@ main(int argc, char **argv)
 		free(got);
 		ok(!exists(dbak), "no .bak was made");
 
-		rc = safefile_write(&dry, dpath, "untouched\n", 10, 0600, err,
+		rc = safefile_write(&dry, dpath, 0600, "untouched\n", 10, err,
 		    sizeof(err));
 		ok(rc == SAFEFILE_UNCHANGED,
 		    "a dry run still distinguishes UNCHANGED (got %d)", rc);
@@ -358,9 +363,9 @@ main(int argc, char **argv)
 	{
 		char	bogus[PATH_MAX];
 
-		snprintf(bogus, sizeof(bogus), "%s/nonexistent/x.conf", root);
+		(void)snprintf(bogus, sizeof(bogus), "%s/nonexistent/x.conf", root);
 		err[0] = '\0';
-		rc = safefile_write(&ctx, bogus, "x\n", 2, 0600, err,
+		rc = safefile_write(&ctx, bogus, 0600, "x\n", 2, err,
 		    sizeof(err));
 		ok(rc == SAFEFILE_ERROR, "writing into a missing directory "
 		    "fails (got %d)", rc);
@@ -374,7 +379,7 @@ main(int argc, char **argv)
 	{
 		char	missing[PATH_MAX];
 
-		snprintf(missing, sizeof(missing), "%s/not-here", root);
+		(void)snprintf(missing, sizeof(missing), "%s/not-here", root);
 		errno = 0;
 		got = safefile_read(missing, NULL);
 		ok(got == NULL && errno == ENOENT,

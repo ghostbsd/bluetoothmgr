@@ -34,14 +34,19 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "btmgr.h"
 #include "inflight.h"
 #include "ipc.h"
 #include "listen.h"
 #include "proto.h"
 #include "state.h"
 
-/* Must come after the system headers: it redefines malloc and friends. */
-#include "memcheck.h"
+/*
+ * Must come after the system headers: it redefines malloc and friends. The
+ * pragma says so to clang-include-cleaner, which sees no direct use of this
+ * header because the use is macro replacement of malloc(), not a symbol.
+ */
+#include "memcheck.h"	/* IWYU pragma: keep */
 
 #define	DEFAULT_SOCKET	"/var/run/bluetoothmgr.sock"
 #define	SOCKET_MODE	0660
@@ -102,7 +107,7 @@ static void	on_expired(const struct inflight *f, void *arg);
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: bluetoothmgrd [-f] [-s socket]\n");
+	(void)fprintf(stderr, "usage: bluetoothmgrd [-f] [-s socket]\n");
 	exit(1);
 }
 
@@ -267,7 +272,7 @@ on_completion(const struct listen_report *r, void *arg)
 	char		 detail[64];
 
 	if (r->status != 0)
-		snprintf(detail, sizeof(detail),
+		(void)snprintf(detail, sizeof(detail),
 		    "controller reported status 0x%02x", r->status);
 
 	/*

@@ -11,6 +11,7 @@
 
 #include <errno.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,9 +40,9 @@ ok(int cond, const char *fmt, ...)
 	checks++;
 	va_start(ap, fmt);
 	if (cond) {
-		fputs("ok   ", stdout);
+		(void)fputs("ok   ", stdout);
 	} else {
-		fputs("FAIL ", stdout);
+		(void)fputs("FAIL ", stdout);
 		failures++;
 	}
 	vprintf(fmt, ap);
@@ -232,7 +233,6 @@ test_suffix(void)
 
 	printf("\nA2.4 collision suffixes\n");
 
-	btmgr_alias_with_suffix("speaker", 2, out, sizeof(out));
 	suffix_eq("speaker", 2, "speaker2", "a short stem keeps all of itself");
 	suffix_eq("0123456789abcdef", 2, "0123456789abcde2",
 	    "a full stem gives up one character to stay in budget");

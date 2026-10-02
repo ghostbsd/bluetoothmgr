@@ -18,6 +18,9 @@
  *   minor = (0x28043c >> 2) & 0x3f = 0x0f   Video Display and Loudspeaker
  */
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "btmgr.h"
 
 /* Major device classes we care about. */
