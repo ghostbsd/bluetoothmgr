@@ -830,7 +830,7 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
 
 - [x] `hosts.c`: parse, generate aliases, 16 character budget (A2.3),
       collision suffixes, preserve records we did not write
-- [ ] `hcsecd.c`: parse the lex/yacc grammar, regenerate whole, preserve the
+- [x] `hcsecd.c`: parse the lex/yacc grammar, regenerate whole, preserve the
       mandatory default entry and every block we did not author (A1)
 - [ ] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
       never log or transmit key material (A3)
