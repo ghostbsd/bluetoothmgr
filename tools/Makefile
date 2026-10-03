@@ -5,6 +5,7 @@
 SUBDIR=		btmgr-filetest \
 		btmgr-hoststest \
 		btmgr-probe \
+		btmgr-secdtest \
 		btmgr-strtest
 
 .include <bsd.subdir.mk>

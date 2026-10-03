@@ -841,8 +841,17 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       the user wrote is reported as kept rather than rewritten, unless the
       caller passes force for a rename the user asked for. Not yet wired into
       the daemon: that arrives with the A6 pairing sequence
-- [ ] `hcsecd.c`: parse the lex/yacc grammar, regenerate whole, preserve the
-      mandatory default entry and every block we did not author (A1)
+- [x] `hcsecd.c`: parse the lex/yacc grammar, regenerate whole, preserve the
+      mandatory default entry and every block we did not author (A1). Chunk
+      model, same shape as `hosts.c`: a block we cannot fully parse is kept
+      verbatim and can never be authored, which is both A0.4 and
+      self-preservation, since `hcsecd` exits on a parse error rather than
+      degrading. Five grammar facts came from `lexer.l` and `parser.y`, the
+      load-bearing one being that `bdaddr` needs exactly two hex digits per
+      octet, unlike `bt_aton()`. A learned key survives a rename. A3.3 is
+      enforced by omission: no accessor returns key material. A1.2.2 duplicate
+      pruning is a separate call, so parsing never mutates. Verified by
+      `tools/btmgr-secdtest`, 76 checks against the base system template
 - [ ] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
       never log or transmit key material (A3)
 - [ ] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
