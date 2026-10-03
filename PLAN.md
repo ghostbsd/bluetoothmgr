@@ -828,8 +828,19 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
 
 **Checklist**
 
-- [ ] `hosts.c`: parse, generate aliases, 16 character budget (A2.3),
-      collision suffixes, preserve records we did not write
+- [x] `hosts.c`: parse, generate aliases, 16 character budget (A2.3),
+      collision suffixes, preserve records we did not write. A text-in,
+      text-out model, so A0.3 and A0.4 are the same thing here: a line we did
+      not touch is re-emitted byte for byte, which is also what makes A0.5
+      reachable. Verified by `tools/btmgr-hoststest`, 65 checks including a
+      byte-exact round trip of this machine's real `/etc/bluetooth/hosts`.
+      Three rules come from reading `bt_gethostent()` rather than the file's
+      comments: a record with no trailing newline is invisible to
+      `libbluetooth`, alias matching is `strcasecmp()` so A2.4 uniqueness is
+      case-insensitive, and `#` ends a record anywhere on the line. A record
+      the user wrote is reported as kept rather than rewritten, unless the
+      caller passes force for a rename the user asked for. Not yet wired into
+      the daemon: that arrives with the A6 pairing sequence
 - [ ] `hcsecd.c`: parse the lex/yacc grammar, regenerate whole, preserve the
       mandatory default entry and every block we did not author (A1)
 - [ ] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,

@@ -75,5 +75,6 @@ tools/probe/probe3-adapter
 tools/btmgr-probe/btmgr-probe
 tools/btmgr-filetest/btmgr-filetest
 tools/btmgr-strtest/btmgr-strtest
+tools/btmgr-hoststest/btmgr-hoststest
 
 daemon/bluetoothmgrd
