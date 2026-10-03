@@ -3,6 +3,7 @@
 # does not implement the bsd.subdir.mk target set.
 
 SUBDIR=		btmgr-filetest \
+		btmgr-hoststest \
 		btmgr-probe \
 		btmgr-strtest
 
