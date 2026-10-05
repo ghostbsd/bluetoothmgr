@@ -77,5 +77,6 @@ tools/btmgr-filetest/btmgr-filetest
 tools/btmgr-strtest/btmgr-strtest
 tools/btmgr-hoststest/btmgr-hoststest
 tools/btmgr-secdtest/btmgr-secdtest
+tools/btmgr-keystest/btmgr-keystest
 
 daemon/bluetoothmgrd

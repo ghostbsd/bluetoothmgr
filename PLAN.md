@@ -852,8 +852,19 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       enforced by omission: no accessor returns key material. A1.2.2 duplicate
       pruning is a separate call, so parsing never mutates. Verified by
       `tools/btmgr-secdtest`, 76 checks against the base system template
-- [ ] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
-      never log or transmit key material (A3)
+- [x] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
+      never log or transmit key material (A3). A3.3 is enforced structurally
+      rather than by care: the module never decodes a key. A record is its
+      original line plus a parsed address, so the 32 hex characters never reach
+      a variable of ours and there is nothing to leak. There is no setter at
+      all, since A3.1 makes any write a race with hcsecd rewriting the file on
+      SIGHUP. keys_remove() deletes every matching record, not just the first,
+      because get_key() uses the first and a leftover duplicate would silently
+      become the live key. Four parse rules come from read_keys_file(), the
+      surprising one being that the separator must be a space: a tab separated
+      record is ignored by hcsecd. A3.4 orphan detection needs both files, so
+      keys_addrs() lists and the caller decides. Verified by
+      `tools/btmgr-keystest`, 36 checks
 - [ ] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
 - [x] A0 write discipline: atomic rename, one `.bak` per boot, never edit in
       place, never write when the content is unchanged. `common/safefile.c`,
