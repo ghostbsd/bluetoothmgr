@@ -832,7 +832,7 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       collision suffixes, preserve records we did not write
 - [x] `hcsecd.c`: parse the lex/yacc grammar, regenerate whole, preserve the
       mandatory default entry and every block we did not author (A1)
-- [ ] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
+- [x] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
       never log or transmit key material (A3)
 - [ ] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
 - [x] A0 write discipline: atomic rename, one `.bak` per boot, never edit in
