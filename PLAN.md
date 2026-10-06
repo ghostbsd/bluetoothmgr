@@ -834,7 +834,7 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       mandatory default entry and every block we did not author (A1)
 - [x] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
       never log or transmit key material (A3)
-- [ ] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
+- [x] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
 - [x] A0 write discipline: atomic rename, one `.bak` per boot, never edit in
       place, never write when the content is unchanged. `common/safefile.c`,
       verified by `tools/btmgr-filetest`: 30 checks, no root or hardware

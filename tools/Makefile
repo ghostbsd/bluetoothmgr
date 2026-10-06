@@ -7,6 +7,7 @@ SUBDIR=		btmgr-filetest \
 		btmgr-keystest \
 		btmgr-probe \
 		btmgr-secdtest \
+		btmgr-storetest \
 		btmgr-strtest
 
 .include <bsd.subdir.mk>
