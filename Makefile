@@ -17,7 +17,8 @@ ANALYZE_INCS=	-Ilib/libbtmgr -Icommon -Idaemon/src -I/usr/local/include
 ANALYZE_SRCS!=	echo lib/libbtmgr/*.c common/*.c daemon/src/*.c \
 		tools/btmgr-probe/*.c tools/btmgr-filetest/*.c \
 		tools/btmgr-strtest/*.c tools/btmgr-hoststest/*.c \
-		tools/btmgr-secdtest/*.c tools/btmgr-keystest/*.c
+		tools/btmgr-secdtest/*.c tools/btmgr-keystest/*.c \
+		tools/btmgr-storetest/*.c
 
 TIDY?=		clang-tidy19
 

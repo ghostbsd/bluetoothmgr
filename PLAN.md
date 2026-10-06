@@ -865,7 +865,19 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       record is ignored by hcsecd. A3.4 orphan detection needs both files, so
       keys_addrs() lists and the caller decides. Verified by
       `tools/btmgr-keystest`, 36 checks
-- [ ] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
+- [x] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4). The one
+      file in Part A that is ours alone, so A0.4 does not apply: emission is a
+      full rewrite and an unrecognised field is dropped rather than preserved.
+      A4.1 is enforced twice, by having no setter that accepts a secret and by
+      the parser reading only the seven fields it knows, so a pin or key already
+      on disk is gone from the next write. A4.3 makes a bad file cost the cache
+      and not the daemon: a malformed top level gives an empty store with
+      *malformed set, while a single bad entry is skipped and counted so the
+      good ones survive. A version newer than ours is refused rather than
+      rewritten, which sends it down the rename-aside path and preserves it.
+      Keys are sorted and devices keep insertion order so one model always
+      renders the same bytes, which is what A0.5 needs. Verified by
+      `tools/btmgr-storetest`, 69 checks
 - [x] A0 write discipline: atomic rename, one `.bak` per boot, never edit in
       place, never write when the content is unchanged. `common/safefile.c`,
       verified by `tools/btmgr-filetest`: 30 checks, no root or hardware
