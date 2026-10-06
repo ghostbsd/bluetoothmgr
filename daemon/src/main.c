@@ -36,6 +36,7 @@
 
 #include "btmgr.h"
 #include "inflight.h"
+#include "paths.h"
 #include "ipc.h"
 #include "listen.h"
 #include "proto.h"
@@ -83,6 +84,7 @@ struct daemon {
 	int		 dirty;
 	uid_t		 sockuid;	/* SPEC.md A5.3 */
 	gid_t		 sockgid;
+	struct btmgr_paths paths;	/* where the config files are */
 	struct inflight_table	pending;
 	volatile int	 quit;
 };
@@ -107,7 +109,13 @@ static void	on_expired(const struct inflight *f, void *arg);
 static void
 usage(void)
 {
-	(void)fprintf(stderr, "usage: bluetoothmgrd [-f] [-s socket]\n");
+	(void)fprintf(stderr,
+	    "usage: bluetoothmgrd [-f] [-n] [-r root] [-s socket]\n"
+	    "\t-n\tdry run: report what would be written, write nothing\n"
+	    "\t-r\twrite the config files under root instead of /, for a\n"
+	    "\t\ttrial against copies. Use " BTMGR_SANDBOX ", never a\n"
+	    "\t\tworld-writable directory: a sandbox copy of hcsecd.conf\n"
+	    "\t\tcarries PINs and link keys.\n");
 	exit(1);
 }
 
@@ -675,7 +683,8 @@ main(int argc, char *argv[])
 	struct daemon	 d;
 	struct kevent	 events[MAX_EVENTS];
 	struct client	*c;
-	int		 ch, foreground = 0, i, n;
+	const char	*root = NULL;
+	int		 ch, foreground = 0, dry_run = 0, i, n;
 
 	memset(&d, 0, sizeof(d));
 	d.kq = -1;
@@ -683,10 +692,16 @@ main(int argc, char *argv[])
 	d.hci = -1;
 	d.sockpath = DEFAULT_SOCKET;
 
-	while ((ch = getopt(argc, argv, "fs:")) != -1) {
+	while ((ch = getopt(argc, argv, "fnr:s:")) != -1) {
 		switch (ch) {
 		case 'f':
 			foreground = 1;
+			break;
+		case 'n':
+			dry_run = 1;
+			break;
+		case 'r':
+			root = optarg;
 			break;
 		case 's':
 			d.sockpath = optarg;
@@ -697,6 +712,14 @@ main(int argc, char *argv[])
 	}
 	if (optind != argc)
 		usage();
+
+	/*
+	 * Resolve the config paths before anything else, so a bad -r is a
+	 * startup error rather than a surprise at the first write. init()
+	 * refuses a relative root and a world-writable one.
+	 */
+	if (btmgr_paths_init(&d.paths, root, dry_run) < 0)
+		err(1, "config root '%s'", root != NULL ? root : "/");
 
 	/*
 	 * PLAN.md F8. A raw HCI write can return EPIPE unexpectedly, and a

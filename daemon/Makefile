@@ -6,6 +6,8 @@ MAN=
 .PATH:		${.CURDIR}/src ${.CURDIR}/../common
 
 SRCS=		main.c \
+		paths.c \
+		safefile.c \
 		inflight.c \
 		ipc.c \
 		listen.c \

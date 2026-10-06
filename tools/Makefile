@@ -5,6 +5,7 @@
 SUBDIR=		btmgr-filetest \
 		btmgr-hoststest \
 		btmgr-keystest \
+		btmgr-pathtest \
 		btmgr-probe \
 		btmgr-secdtest \
 		btmgr-storetest \

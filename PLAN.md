@@ -893,8 +893,20 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       of `_` are collapsed so the 16 character budget is not spent on
       separators. `hosts.c` and `hcsecd.c` are the callers that will exercise
       it in anger
-- [ ] `--dry-run` and a config-directory override, so the whole thing can be
-      exercised against copies in `/tmp` before it touches `/etc`
+- [x] `--dry-run` and a config-directory override, so the whole thing can be
+      exercised against copies before it touches `/etc`. `bluetoothmgrd -n`
+      reports what would be written and writes nothing; `-r root` puts every
+      config path under `root`, including the A0.2 markers, so a trial run
+      cannot record that it backed up the real `/etc/bluetooth` this boot and
+      make the next real write skip the backup. **Not `/tmp`:** a sandbox holds
+      copies of `hcsecd.conf` and the key store, so PINs and link keys end up
+      under it, and a predictable name in a world-writable directory also lets
+      another user pre-create a path component as a symlink. The recommended
+      root is `BTMGR_SANDBOX`, `/var/db/bluetoothmgr/sandbox`, which sits inside
+      a directory A4 already requires to be 0700 and root owned.
+      `btmgr_paths_init()` refuses a relative root with `EINVAL` and a
+      world-writable one with `EPERM`. Verified by `tools/btmgr-pathtest`, 47
+      checks
 - [ ] Verified on hardware: **F7 reproduced.** Pairing a device with no block
       in `hcsecd.conf` logs "Could not find entry for remote bdaddr" and the
       key is discarded. This is the claim the README rests on and it is still
