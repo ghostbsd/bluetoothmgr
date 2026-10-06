@@ -851,7 +851,7 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       of `_` are collapsed so the 16 character budget is not spent on
       separators. `hosts.c` and `hcsecd.c` are the callers that will exercise
       it in anger
-- [ ] `--dry-run` and a config-directory override, so the whole thing can be
+- [x] `--dry-run` and a config-directory override, so the whole thing can be
       exercised against copies before it touches `/etc`
 - [ ] Verified on hardware: **F7 reproduced.** Pairing a device with no block
       in `hcsecd.conf` logs "Could not find entry for remote bdaddr" and the
