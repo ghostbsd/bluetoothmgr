@@ -887,7 +887,24 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       verified by `tools/btmgr-filetest`: 30 checks, no root or hardware
       needed. A0.3 and A0.4 stay with the callers, since this layer only ever
       sees a finished buffer
-- [ ] A6 pairing order enforced: write the block, reload, *then* pair
+- [x] A6 pairing order enforced: write the block, reload, *then* pair.
+      `common/pairing.c`. The sequence spans an asynchronous gap, so it is a
+      parked state machine rather than one function: `pairing_begin()` does
+      steps 1 to 4, the caller then issues `Create_Connection`, and
+      `pairing_complete()` does steps 6 and 7 when `Link_Key_Notification`
+      arrives. `pairing_abort()` is the other exit. Rollback saves the whole
+      pre-change text of both config files rather than inverting each change,
+      because re-pairing a device we already manage is an update and inverting
+      that would need the previous value. A8.1 reload and A8.2 "is it running"
+      are injected through `struct pair_ops`, which is what makes the ordering
+      testable with no radio. A6.2 is the caller's obligation, not this
+      module's: it must refuse any other config write while a pairing is
+      parked, since someone else's reload drops the pairing just as surely.
+      Verified by `tools/btmgr-pairtest`, 46 checks, including that a failed
+      reload leaves both files byte-identical and that A8.2 writes nothing at
+      all. **Not yet wired into the daemon**: the event loop still only logs
+      `Link_Key_Notification`, and the A8 `service hcsecd reload` helper does
+      not exist, so `pair_ops` has no real implementation
 - [x] A7 sanitisation of every device-supplied string. `common/sanitise.c`,
       verified by `tools/btmgr-strtest`: 66 checks over A7.1, A7.2 and A7.4
       plus the alias rules A2.2 to A2.5, no root or hardware needed. A7.3 has

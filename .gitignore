@@ -80,5 +80,6 @@ tools/btmgr-secdtest/btmgr-secdtest
 tools/btmgr-keystest/btmgr-keystest
 tools/btmgr-storetest/btmgr-storetest
 tools/btmgr-pathtest/btmgr-pathtest
+tools/btmgr-pairtest/btmgr-pairtest
 
 daemon/bluetoothmgrd
