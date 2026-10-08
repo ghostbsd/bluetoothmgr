@@ -844,7 +844,7 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       verified by `tools/btmgr-filetest`: 30 checks, no root or hardware
       needed. A0.3 and A0.4 stay with the callers, since this layer only ever
       sees a finished buffer
-- [ ] A6 ordering implemented as a module: `common/pairing.c`, a parked state
+- [x] A6 ordering implemented as a module: `common/pairing.c`, a parked state
       machine spanning the asynchronous gap
 - [x] A7 sanitisation of every device-supplied string. `common/sanitise.c`,
       verified by `tools/btmgr-strtest`: 66 checks over A7.1, A7.2 and A7.4
