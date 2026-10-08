@@ -171,13 +171,30 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
 
 ## A5. `/var/run/bluetoothmgr.sock`
 
-- **A5.1** A `SOCK_STREAM` Unix domain socket, mode `0660`, group `operator`.
+- **A5.1** A `SOCK_STREAM` Unix domain socket. The filesystem mode is not the
+  authorization boundary; A5.3 is.
 - **A5.2** The daemon MUST `unlink()` a stale socket at startup, and MUST remove
   it on clean shutdown.
-- **A5.3** The daemon MUST call `getpeereid()` on accept. A peer whose uid is
-  not 0 and whose gid is not the socket group MUST be refused any command that
-  changes state. Read-only commands MAY be served to any peer that got through
-  the filesystem permissions.
+- **A5.3** State-changing commands MUST be refused unless the peer is root or
+  has an active GUI session. Read-only commands MAY be served to any peer that
+  got through the filesystem permissions.
+
+  Peer uid and pid come from `getsockopt(LOCAL_PEERCRED)`, since `struct xucred`
+  carries `cr_pid`. Sessions come from `getutxent()` over `/var/run/utx.active`,
+  which only root can write.
+
+  A GUI session is a `USER_PROCESS` record whose `ut_line` or `ut_host` begins
+  with `:`. Both fields matter: lightdm's record is on line `:0`, while the
+  session leader `mate-session` is on line `ttyv8` with host `:0`. A console
+  login with no host is not a GUI session, and `ssh` on `pts/N` is not either.
+
+  The peer's uid MUST match such a session's user AND its pid MUST descend from
+  that session's pid, walked with `sysctl kern.proc.pid`. Uid alone would
+  authorize the same user's ssh session.
+
+  The daemon MUST confirm the session process still exists and started no later
+  than the record's login time, since a crashed display manager can leave a
+  record behind and the pid can be reused.
 
 ## A6. Pairing sequence (the ordering constraint)
 

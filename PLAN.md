@@ -488,9 +488,11 @@ gives us real events worth pushing. Add a framing rule and an event channel.
 embedded newlines. This is trivial to parse with `getline()` and trivial to
 debug with `nc -U`.
 
-**Socket.** `/var/run/bluetoothmgr.sock`, mode `0660`, group `operator`. Clients
-are desktop sessions, so group membership is the access control. Reject commands
-that change state if the peer is not in the group, checked with `getpeereid()`.
+**Socket.** `/var/run/bluetoothmgr.sock`. Clients are desktop sessions, so the
+access control is the session itself, not a group: reject commands that change
+state unless the peer is root or has an active GUI session, checked per
+process from `LOCAL_PEERCRED` and `/var/run/utx.active`. See section 7 for why
+not polkit, and `SPEC.md` A5.
 
 Commands, client to daemon:
 
@@ -796,7 +798,9 @@ channel for asynchronous commands.
       `getpeereid()` reports only the peer's primary gid while the kernel
       admits a connection on any of its groups, so a primary-gid-only check
       refuses precisely the intended deployment (socket group `operator`,
-      users added to `operator` supplementarily)
+      users added to `operator` supplementarily). **Superseded:** A5.3 no longer
+      uses a group at all, see section 7. This records what M2 built and is what
+      the code still does; replacing it is M4 work
 - [x] Verified unprivileged: every state-changing verb reaches the HCI layer
       and fails with `EPERM`, rather than being refused by our own check
 - [x] Clean under the strict warning set, the static analyzer, and `memcheck`
@@ -991,6 +995,14 @@ Resolved from the brief's open list:
 
 Resolved but not previously listed:
 
+- **Authorization mechanism.** `utmpx` plus `LOCAL_PEERCRED`, not polkit. The
+  rule is "a GUI session, or root", and `struct xucred` carries
+  `cr_pid` so the peer's session can be checked per process with base system
+  calls only. polkit and ConsoleKit2 answer the same question, but both are
+  dependencies this daemon does not otherwise need, and the rule is fixed enough
+  that a policy file buys nothing. There is no `operator` group: every client is
+  a GUI process in the graphical session, so a standing group grant would only
+  widen the rule, never describe it.
 - **JSON library.** `jansson`. It is already in the tree, it is plain C with no
   GLib dependency, so `common/` links into the GLib-free daemon and the GTK
   clients alike. `json-glib` would drag GLib into the daemon, which contradicts
