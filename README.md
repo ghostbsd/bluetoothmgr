@@ -25,7 +25,7 @@ in syslog.
 
 That is invisible from the command line and it is deterministic, not flaky.
 Getting the ordering right automatically is the single most useful thing this
-project does. See `PLAN.md` F7.
+project does. Reproduced on hardware. See `PLAN.md` F7.
 
 ## Documents
 
