@@ -106,7 +106,11 @@ ipc_listen(const char *path, mode_t mode)
 		return (-1);
 	}
 
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	/*
+	 * SOCK_CLOEXEC: nothing here spawns today, but a child inheriting the
+	 * listening socket would hold the channel that A5.3 authorizes on.
+	 */
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return (-1);
 
@@ -145,7 +149,8 @@ ipc_accept(int lfd)
 	struct client	*c;
 	int		 fd, saved;
 
-	fd = accept(lfd, NULL, NULL);
+	/* accept() does not inherit SOCK_CLOEXEC from the listener. */
+	fd = accept4(lfd, NULL, NULL, SOCK_CLOEXEC);
 	if (fd < 0)
 		return (NULL);
 
