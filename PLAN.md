@@ -318,7 +318,7 @@ Two things the real file on this machine tells us that the grammar does not:
   Leave them alone. They are harmless, and "preserve what we did not write" is
   the rule that keeps us from destroying a hand-tuned config.
 
-### F7. Link keys are silently discarded for any device not already in `hcsecd.conf`. **[verified]**
+### F7. Link keys are silently discarded for any device not already in `hcsecd.conf`. **[verified on hardware]**
 
 This is the root cause of the persistence problem described in the audio journey
 document, and it is deterministic rather than flaky.
@@ -343,6 +343,32 @@ unlisted device *appears* to succeed, because the default entry answers the PIN
 request. The controller then sends `Link_Key_Notification`, `hcsecd` logs
 "Could not find entry for remote bdaddr" and discards it, and the device needs
 full re-pairing on next connect.
+
+**Reproduced on hardware, 2026-10-09**, with a Bluetooth speaker that had an
+alias in `/etc/bluetooth/hosts` but no block in `hcsecd.conf`. Addresses below
+are redacted. Two preconditions are easy to miss. The adapter needs
+`write_authentication_enable 1`, because `create_connection` on its own builds a
+bare ACL link that never authenticates, so none of these events fire at all. The
+default entry also needs a real PIN: with the stock `pin nopin` the pairing dies
+one step earlier, at `PIN_Code_Negative_Reply`, and `create_connection` reports
+`Status: Key missing [0x6]`.
+
+```
+Got Link_Key_Request event from 'ubt0hci', remote bdaddr aa:bb:cc:dd:ee:ff
+Found matching entry, remote bdaddr 00:00:00:00:00:00, name 'Default entry', link key doesn't exist
+Sending Link_Key_Negative_Reply to 'ubt0hci' for remote bdaddr aa:bb:cc:dd:ee:ff
+Got PIN_Code_Request event from 'ubt0hci', remote bdaddr aa:bb:cc:dd:ee:ff
+Found matching entry, remote bdaddr 00:00:00:00:00:00, name 'Default entry', PIN code exists
+Sending PIN_Code_Reply to 'ubt0hci' for remote bdaddr aa:bb:cc:dd:ee:ff
+Got Link_Key_Notification event from 'ubt0hci', remote bdaddr aa:bb:cc:dd:ee:ff
+Could not find entry for remote bdaddr aa:bb:cc:dd:ee:ff
+```
+
+`create_connection` succeeded and reported a connection handle, so the pairing
+looked fine from the outside, while nothing was written to
+`/var/db/hcsecd.keys`. The `remote bdaddr 00:00:00:00:00:00` on both "Found
+matching entry" lines is the table above in action: two handlers accepted the
+default entry, the third refused it.
 
 **Consequences for the design:**
 
@@ -673,8 +699,8 @@ Each milestone ends with something runnable and testable.
 Checklists distinguish **written** from **verified**, and verified on hardware
 from verified synthetically. That distinction has already earned its keep
 twice: `listen.c` passed every synthetic test while never having seen a real
-HCI event, and F7 is asserted in three documents on the strength of source
-reading alone.
+HCI event, and F7 was asserted in three documents on the strength of source
+reading long before anyone watched it happen.
 
 ### M0. Repo scaffolding
 Directory tree, BSD `Makefile`s using `bsd.prog.mk` and `bsd.lib.mk`,
@@ -928,9 +954,10 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       `btmgr_paths_init()` refuses a relative root with `EINVAL` and a
       world-writable one with `EPERM`. Verified by `tools/btmgr-pathtest`, 47
       checks
-- [ ] Verified on hardware: **F7 reproduced.** Pairing a device with no block
+- [x] Verified on hardware: **F7 reproduced.** Pairing a device with no block
       in `hcsecd.conf` logs "Could not find entry for remote bdaddr" and the
-      key is discarded. This is the claim the README rests on and it is still
+      key is discarded. The full event trace and the two preconditions it needs
+      are in F7 above. This was the claim the README rests on and it had been
       source reading only
 - [ ] Verified on hardware: a device paired through the daemon survives a
       reboot without re-pairing
