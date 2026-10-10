@@ -212,9 +212,9 @@ The daemon MUST perform pairing in exactly this order:
 1. Resolve the device name and class. Generate an alias per A2.
 2. Write the alias to `/etc/bluetooth/hosts` (A2).
 3. Write or update the device's block in `hcsecd.conf`, including the PIN (A1).
-4. `service hcsecd reload` (A8). Wait for it to complete.
+4. Reload `hcsecd` (A8.1). Wait for it to complete.
 5. **Only now** issue `Create_Connection` and let pairing proceed.
-6. On `Link_Key_Notification`, issue a further `service hcsecd reload` to force
+6. On `Link_Key_Notification`, reload `hcsecd` again to force
    `dump_keys_file()` to flush the new key to disk (A8.3).
 7. Update `devices.json` (A4).
 
@@ -239,23 +239,56 @@ strict grammars, plus syslog.
   truncated per A2.3. `bluetooth-config.sh` uses `tr -c '[:alnum:]-,.' _` for
   the same reason. Note that our set excludes `,`, which that script permits.
 - **A7.3** The daemon MUST NOT construct any shell command by concatenating a
-  device-supplied string. Where it must invoke `service`, it MUST use
-  `posix_spawn()` or `fork()` plus `execve()` with an argument vector, never
-  `system()` or `popen()`.
+  device-supplied string. Where it must invoke an external program, such as the
+  `service` call in A8.5, it MUST use `posix_spawn()` or `fork()` plus
+  `execve()` with an argument vector, never `system()` or `popen()`. A8.1 needs
+  no external program at all: it sends a signal.
 - **A7.4** A name that sanitises to the empty string MUST fall back to a
   generated alias derived from the address, for example `bt-112233` from the
   last three octets.
 
 ## A8. Service control
 
-- **A8.1** To make `hcsecd` re-read its configuration the daemon MUST use
-  `service hcsecd reload`, which delivers `SIGHUP`. It MUST NOT use `restart`.
-  A restart tears down the HCI socket and drops in-flight pairing; `SIGHUP`
-  calls `dump_keys_file()`, `read_config_file()`, `read_keys_file()` in that
-  order, preserving learned keys.
+- **A8.1** To make `hcsecd` re-read its configuration the daemon MUST send it
+  `SIGHUP`, which calls `dump_keys_file()`, `read_config_file()` and
+  `read_keys_file()` in that order, preserving learned keys. It MUST NOT
+  restart the service: a restart tears down the HCI socket and drops in-flight
+  pairing.
+
+  The daemon MUST NOT do this by running `service hcsecd reload`. That command
+  does not exist. `/etc/rc.d/hcsecd` never sets `extra_commands`, so `reload`
+  is not one of its keywords and the call fails with a usage error. There is a
+  second, worse reason: for any command that *is* gated by `rcvar`, `rc.subr`
+  prints "Cannot ... Set hcsecd_enable to YES" and returns status **0** when
+  the service is disabled. A spawned `service` call can therefore report
+  success having done nothing, which would let pairing proceed against an
+  unreloaded `hcsecd` and lose the link key exactly as F7 does.
+
+  `rc.subr`'s own `reload` is `kill -HUP` on the pid it has found, so
+  signalling directly is equivalent and avoids a subprocess entirely.
+- **A8.1.1** There is no pidfile to read. `/etc/rc.d/hcsecd` declares
+  `pidfile="/var/run/hcsecd.pid"`, but `hcsecd` only calls `daemon(3)` and
+  never creates it, so `rc.subr` falls back to matching the process table. The
+  daemon MUST do the same: enumerate processes and match on the process name.
+- **A8.1.2** A match MUST also require uid 0, because opening the raw HCI
+  socket is privileged, so a real `hcsecd` is always root. Matching on the name
+  alone would let any user put a program called `hcsecd` in the daemon's way
+  and receive a `SIGHUP` from root.
+- **A8.1.3** A matched pid MUST be greater than 1, and a zombie MUST NOT count
+  as running. `kill(2)` reads 0 as every process in the caller's process group
+  and a negative pid as a process group, so a pid that could mean either must
+  never reach it: one `SIGHUP` from a root daemon would otherwise become a
+  system-wide one. A zombie keeps its name but cannot act on a signal, so
+  counting one would park a pairing against a process that has already gone.
+- **A8.1.4** More than one matching process MAY exist, for instance a debug
+  `hcsecd` started by hand alongside the service. The daemon SHOULD signal all
+  of them, as `rc.subr` does, and SHOULD report the count.
 - **A8.2** The daemon MUST tolerate `hcsecd` not running. If `hcsecd_enable` is
   not set, pairing cannot persist keys, and the daemon MUST report that as a
-  distinct condition rather than failing obscurely.
+  distinct condition rather than failing obscurely. The check is the same
+  lookup as A8.1.1 to A8.1.3. An inconclusive answer, such as a process table
+  that could not be read, MUST be treated as not running, because that is the
+  direction in which nothing is written.
 - **A8.3** `hcsecd` flushes keys to disk only on `SIGHUP` and on clean shutdown.
   A `SIGKILL` or a panic loses every key learned since the last flush. The
   daemon SHOULD therefore trigger a reload shortly after a successful pairing,

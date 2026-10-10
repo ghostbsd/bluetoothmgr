@@ -39,9 +39,9 @@
  * reload", never restart, since a restart tears down the HCI socket and drops
  * in-flight pairing while SIGHUP preserves learned keys.
  *
- * A7.3 forbids building either call with system(3) or popen(3). The daemon's
- * implementation must use posix_spawn() or fork() plus execve() with an
- * argument vector.
+ * The implementation is common/hcsecdctl.c, which finds hcsecd in the process
+ * table and sends it SIGHUP. "service hcsecd reload" is not a real command and
+ * there is no pidfile to read; see SPEC.md A8.1 and that header.
  */
 struct pair_ops {
 	int	 (*reload)(void *context);		/* 0 on success */

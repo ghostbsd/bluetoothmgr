@@ -208,7 +208,7 @@ pairing_begin(const struct btmgr_paths *paths, const struct pair_ops *ops,
 	 */
 	if (ops->reload != NULL && ops->reload(ops->context) != 0) {
 		trace_step(report, "reload-failed");
-		set_detail(report, "service hcsecd reload failed; not pairing");
+		set_detail(report, "the hcsecd reload failed; not pairing");
 		goto rollback;
 	}
 	trace_step(report, "reload");

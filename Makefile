@@ -19,7 +19,7 @@ ANALYZE_SRCS!=	echo lib/libbtmgr/*.c common/*.c daemon/src/*.c \
 		tools/btmgr-strtest/*.c tools/btmgr-hoststest/*.c \
 		tools/btmgr-secdtest/*.c tools/btmgr-keystest/*.c \
 		tools/btmgr-storetest/*.c tools/btmgr-pathtest/*.c \
-		tools/btmgr-pairtest/*.c
+		tools/btmgr-pairtest/*.c tools/btmgr-ctltest/*.c
 
 TIDY?=		clang-tidy19
 
