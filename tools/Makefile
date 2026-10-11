@@ -9,6 +9,7 @@ SUBDIR=		btmgr-ctltest \
 		btmgr-pairtest \
 		btmgr-pathtest \
 		btmgr-probe \
+		btmgr-prototest \
 		btmgr-secdtest \
 		btmgr-storetest \
 		btmgr-strtest

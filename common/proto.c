@@ -304,6 +304,54 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 		out->has_on = 1;
 	}
 
+	/*
+	 * The PIN is the one field that must survive exactly. A device name is
+	 * cosmetic, so A7.1 transliterates it, but hcsecd_set() runs the PIN
+	 * through the same sanitiser, and a PIN silently rewritten is a secret
+	 * that no longer matches the one on the device. The failure then looks
+	 * like the device rejecting a correct PIN. So anything A7.1 would
+	 * change is refused here instead.
+	 */
+	v = json_object_get(root, "pin");
+	if (v != NULL) {
+		const char	*pin;
+		size_t		 i, len;
+
+		if (!json_is_string(v)) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+
+		pin = json_string_value(v);
+		len = strlen(pin);
+
+		/*
+		 * Absent means "this device needs no PIN", which hcsecd spells
+		 * nopin. An empty string would mean the same thing by a second
+		 * route, so refuse it and keep one spelling.
+		 */
+		if (len == 0 || len > BTMGR_PIN_MAX) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+
+		for (i = 0; i < len; i++) {
+			unsigned char ch = (unsigned char)pin[i];
+
+			if (ch == '"' || ch == '\\' || ch < 0x20 ||
+			    ch == 0x7f) {
+				strlcpy(code, "bad_json", codelen);
+				json_decref(root);
+				return (-1);
+			}
+		}
+
+		memcpy(out->pin, pin, len + 1);
+		out->has_pin = 1;
+	}
+
 	json_decref(root);
 
 	return (0);

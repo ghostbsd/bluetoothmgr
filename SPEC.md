@@ -383,6 +383,17 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
   completion event is the answer to all of them, so the daemon MUST fan the
   result out to every waiting request rather than answering the first and
   letting the rest time out.
+- **B4.4** `pair`'s `pin` is optional. Absent means the device needs no PIN,
+  which `hcsecd` spells `nopin`; an empty string MUST be refused so that there
+  is only one spelling for it.
+- **B4.5** A `pin` MUST be a JSON string of 1 to 16 bytes. 16 is
+  `NG_HCI_PIN_SIZE`, the width of the field in `ng_hci_pin_code_rep_cp`, so a
+  longer one could never be sent and MUST be refused rather than truncated.
+- **B4.6** A `pin` containing `"`, `\`, a C0 control or DEL MUST be refused.
+  Unlike a device name, a PIN is an exact secret, and A7.1 transliteration
+  would silently turn it into a different one. The resulting failure would look
+  like the device rejecting a correct PIN. The daemon MUST NOT log a PIN, per
+  the same reasoning as A3.3.
 
 ## B5. State object *(provisional, expect churn)*
 

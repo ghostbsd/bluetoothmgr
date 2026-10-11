@@ -25,6 +25,13 @@
 
 #define	BTMGR_CMD_NAME_MAX	32
 
+/*
+ * A legacy Bluetooth PIN is at most 16 bytes: NG_HCI_PIN_SIZE, the width of
+ * the pin field in ng_hci_pin_code_rep_cp. A longer one could never be sent,
+ * so it is refused here rather than truncated into a wrong secret.
+ */
+#define	BTMGR_PIN_MAX		16
+
 /* A parsed command. SPEC.md B3 and B4. */
 struct proto_cmd {
 	int		id;
@@ -37,6 +44,8 @@ struct proto_cmd {
 	int		timeout;
 	int		has_on;
 	int		on;
+	int		has_pin;
+	char		pin[BTMGR_PIN_MAX + 1];
 };
 
 /*

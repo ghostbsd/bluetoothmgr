@@ -82,5 +82,6 @@ tools/btmgr-storetest/btmgr-storetest
 tools/btmgr-pathtest/btmgr-pathtest
 tools/btmgr-pairtest/btmgr-pairtest
 tools/btmgr-ctltest/btmgr-ctltest
+tools/btmgr-prototest/btmgr-prototest
 
 daemon/bluetoothmgrd
