@@ -145,6 +145,12 @@ pairing_begin(const struct btmgr_paths *paths, const struct pair_ops *ops,
 		return (PAIR_NO_HCSECD);
 	}
 
+	/* Under a -r root nothing exists yet, and the first write needs it. */
+	if (btmgr_paths_mkdirs(paths) != 0) {
+		set_detail(report, "could not create the config directories");
+		return (PAIR_ERROR);
+	}
+
 	/* Read both files first, so rollback has something to restore to. */
 	state->hosts_before = safefile_read(paths->hosts, NULL);
 	state->hcsecd_before = safefile_read(paths->hcsecd, NULL);

@@ -41,6 +41,7 @@ static int	 checks;
 static void	 ok(int cond, const char *fmt, ...) __printflike(2, 3);
 static void	 eq(const char *got, const char *want, const char *what);
 static void	 rm_rf(const char *path);
+static void	 test_bare_root(const char *scratch);
 static char	*slurp(const char *path);
 
 /* A documentation address, in bdaddr_t storage order. */
@@ -245,6 +246,48 @@ test_order(const char *scratch)
 	ok(strstr(text, "0000") == NULL,
 	    "and A4.1 holds: the PIN is not in devices.json");
 	free(text);
+}
+
+/*
+ * pairing_begin() on a root where nothing exists yet. Every other case here
+ * calls btmgr_paths_mkdirs() from seed(), which hid the fact that begin never
+ * created its own directories: under -r the daemon failed on the first write
+ * with "mkdir .../var/run/bluetoothmgr: No such file or directory".
+ */
+static void
+test_bare_root(const char *scratch)
+{
+	struct btmgr_paths	 paths;
+	struct pair_state	 state;
+	struct pair_report	 report;
+	struct fake		 fake = { 0, 0, 1 };
+	struct pair_ops		 ops = { fake_reload, fake_running, &fake };
+	char			 root[PATH_MAX];
+	char			*text;
+
+	printf("\npairing_begin creates its own directories\n");
+
+	(void)snprintf(root, sizeof(root), "%s/bare", scratch);
+
+	if (btmgr_paths_init(&paths, root, 0) != 0) {
+		ok(0, "could not init the paths");
+		return;
+	}
+
+	ok(pairing_begin(&paths, &ops, speaker_addr, "Soundbar X900", "0000",
+	    &state, &report) == PAIR_PARKED,
+	    "begin parks even though no directory existed");
+	eq(report.trace, "alias,hosts,secd,reload", "having done every step");
+
+	text = slurp(paths.hosts);
+	ok(strstr(text, "Soundbar_X900") != NULL, "hosts was written");
+	free(text);
+
+	text = slurp(paths.hcsecd);
+	ok(strstr(text, "aa:bb:cc:11:22:02") != NULL, "so was hcsecd.conf");
+	free(text);
+
+	pairing_state_free(&state);
 }
 
 /* A6.3: if the reload fails we MUST NOT pair, and MUST roll back. */
@@ -452,6 +495,7 @@ main(int argc, char *argv[])
 	}
 
 	test_order(scratch);
+	test_bare_root(scratch);
 	test_reload_failure(scratch);
 	test_no_hcsecd(scratch);
 	test_default_entry(scratch);
