@@ -32,7 +32,33 @@
  */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
+static int	 pin_is_sendable(const char *pin);
 static char	*render(json_t *root);
+
+/*
+ * A name is cosmetic, so A7.1 transliterates it. A PIN is an exact secret, and
+ * hcsecd_set() runs it through the same sanitiser, so anything A7.1 would
+ * rewrite is refused. Shared by both directions: the encoder refusing what the
+ * parser refuses means a frontend learns at once instead of after a round trip.
+ */
+static int
+pin_is_sendable(const char *pin)
+{
+	size_t	 i, len;
+
+	len = strlen(pin);
+	if (len == 0 || len > BTMGR_PIN_MAX)
+		return (0);
+
+	for (i = 0; i < len; i++) {
+		unsigned char ch = (unsigned char)pin[i];
+
+		if (ch == '"' || ch == '\\' || ch < 0x20 || ch == 0x7f)
+			return (0);
+	}
+
+	return (1);
+}
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
 
@@ -112,6 +138,126 @@ conn_json(const struct btmgr_conn *c)
 	    json_string(c->master ? "master" : "slave"));
 
 	return (o);
+}
+
+/* Read a JSON boolean into *out, leaving it alone when the key is absent. */
+static void
+read_boolean(json_t *obj, const char *key, int *out)
+{
+	json_t	*value = json_object_get(obj, key);
+
+	if (json_is_boolean(value))
+		*out = json_is_true(value) ? 1 : 0;
+}
+
+int
+proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
+{
+	json_error_t	 err;
+	json_t		*root, *value;
+
+	memset(out, 0, sizeof(*out));
+
+	root = json_loadb(line, len, 0, &err);
+	if (root == NULL)
+		return (-1);
+	if (!json_is_object(root)) {
+		json_decref(root);
+		return (-1);
+	}
+
+	value = json_object_get(root, "id");
+	if (json_is_integer(value)) {
+		out->kind = PROTO_MSG_REPLY;
+		out->request_id = (int)json_integer_value(value);
+
+		read_boolean(root, "ok", &out->succeeded);
+
+		value = json_object_get(root, "error");
+		if (json_is_string(value))
+			strlcpy(out->error_code, json_string_value(value),
+			    sizeof(out->error_code));
+
+		value = json_object_get(root, "detail");
+		if (json_is_string(value))
+			strlcpy(out->error_detail, json_string_value(value),
+			    sizeof(out->error_detail));
+
+		json_decref(root);
+
+		return (0);
+	}
+
+	value = json_object_get(root, "event");
+	if (!json_is_string(value)) {
+		json_decref(root);		/* neither a reply nor an event */
+		return (-1);
+	}
+
+	out->kind = PROTO_MSG_EVENT;
+	strlcpy(out->event_name, json_string_value(value),
+	    sizeof(out->event_name));
+
+	value = json_object_get(root, "proto");
+	if (json_is_integer(value)) {
+		out->has_proto_version = 1;
+		out->proto_version = (int)json_integer_value(value);
+	}
+
+	if (strcmp(out->event_name, "state") == 0) {
+		out->has_state = 1;
+		read_boolean(root, "adapter_present",
+		    &out->state.adapter_present);
+		read_boolean(root, "powered", &out->state.powered);
+		read_boolean(root, "discoverable", &out->state.discoverable);
+		read_boolean(root, "scanning", &out->state.scanning);
+		read_boolean(root, "config_readable",
+		    &out->state.config_readable);
+
+		value = json_object_get(root, "connections");
+		if (json_is_array(value))
+			out->state.connection_count =
+			    (int)json_array_size(value);
+	}
+
+	json_decref(root);
+
+	return (0);
+}
+
+char *
+proto_encode_cmd(const struct proto_cmd *cmd)
+{
+	char	 addr[BTMGR_ADDR_STRSIZE];
+	json_t	*obj;
+
+	if (cmd == NULL || cmd->id < 0 || cmd->name[0] == '\0')
+		return (NULL);
+	if (cmd->has_pin && !pin_is_sendable(cmd->pin))
+		return (NULL);
+
+	obj = json_object();
+	if (obj == NULL)
+		return (NULL);
+
+	json_object_set_new(obj, "id", json_integer(cmd->id));
+	json_object_set_new(obj, "cmd", json_string(cmd->name));
+
+	if (cmd->has_addr)
+		json_object_set_new(obj, "addr",
+		    json_string(bt_ntoa(&cmd->addr, addr)));
+	if (cmd->has_timeout)
+		json_object_set_new(obj, "timeout",
+		    json_integer(cmd->timeout));
+	if (cmd->has_on)
+		json_object_set_new(obj, "on", json_boolean(cmd->on));
+	if (cmd->has_pin)
+		json_object_set_new(obj, "pin", json_string(cmd->pin));
+	if (cmd->has_device_name)
+		json_object_set_new(obj, "name",
+		    json_string(cmd->device_name));
+
+	return (render(obj));
 }
 
 char *
@@ -312,7 +458,7 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 	v = json_object_get(root, "pin");
 	if (v != NULL) {
 		const char	*pin;
-		size_t		 i, len;
+		size_t		 len;
 
 		if (!json_is_string(v)) {
 			strlcpy(code, "bad_json", codelen);
@@ -321,30 +467,15 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 		}
 
 		pin = json_string_value(v);
-		len = strlen(pin);
 
-		/*
-		 * Absent means "this device needs no PIN", which hcsecd spells
-		 * nopin. An empty string would mean the same thing by a second
-		 * route, so refuse it and keep one spelling.
-		 */
-		if (len == 0 || len > BTMGR_PIN_MAX) {
+		/* Absent is how "this device needs no PIN" is spelled. */
+		if (!pin_is_sendable(pin)) {
 			strlcpy(code, "bad_json", codelen);
 			json_decref(root);
 			return (-1);
 		}
 
-		for (i = 0; i < len; i++) {
-			unsigned char ch = (unsigned char)pin[i];
-
-			if (ch == '"' || ch == '\\' || ch < 0x20 ||
-			    ch == 0x7f) {
-				strlcpy(code, "bad_json", codelen);
-				json_decref(root);
-				return (-1);
-			}
-		}
-
+		len = strlen(pin);
 		memcpy(out->pin, pin, len + 1);
 		out->has_pin = 1;
 	}

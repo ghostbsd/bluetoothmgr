@@ -918,8 +918,8 @@ show/hide bound to `adapter_present`, and a "Preferences…" item. Uses
 
 **Checklist**
 
-- [ ] `common/ipc_client.c`, the client half of the protocol, shared by every
-      frontend
+- [x] `common/ipc_client.c`, the client half of the protocol, shared by every
+      frontend. `common/linebuf.c` underneath it
 - [ ] Applet skeleton, popup, icon states: absent, off, on, connected
 - [ ] Show and hide driven by `adapter_present`
 - [ ] Reconnect when the daemon restarts under it

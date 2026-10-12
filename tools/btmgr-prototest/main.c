@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "proto.h"
+#include "state.h"
 
 /* Must come after the system headers: it redefines malloc and friends. */
 #include "memcheck.h"	/* IWYU pragma: keep */
@@ -78,6 +79,12 @@ parse(const char *line, struct proto_cmd *cmd, char *code, size_t codelen)
 	code[0] = '\0';
 
 	return (proto_parse_cmd(line, strlen(line), cmd, code, codelen));
+}
+
+static int
+decode(const char *line, struct proto_msg *msg)
+{
+	return (proto_parse_msg(line, strlen(line), msg));
 }
 
 /* Assert a line is refused, and refused with the code SPEC.md B6 names. */
@@ -300,6 +307,258 @@ test_name(void)
 	rejects(line, "bad_json", "a name over BTMGR_NAME_SIZE is refused");
 }
 
+/*
+ * The encoder is the parser's inverse, so encoding then parsing must give back
+ * what went in. That is the only check that actually enforces proto.h's claim
+ * that the two cannot disagree.
+ */
+static void
+round_trip(const struct proto_cmd *sent, const char *what)
+{
+	struct proto_cmd	 got;
+	char			*line;
+	char			 code[32];
+	int			 same;
+
+	line = proto_encode_cmd(sent);
+	if (line == NULL) {
+		ok(0, "%s (encode returned NULL)", what);
+		return;
+	}
+
+	if (proto_parse_cmd(line, strlen(line), &got, code, sizeof(code)) != 0) {
+		ok(0, "%s (its own output failed to parse: %s)", what, code);
+		free(line);
+		return;
+	}
+
+	same = got.id == sent->id &&
+	    strcmp(got.name, sent->name) == 0 &&
+	    got.has_addr == sent->has_addr &&
+	    got.has_timeout == sent->has_timeout &&
+	    got.timeout == sent->timeout &&
+	    got.has_on == sent->has_on &&
+	    got.on == sent->on &&
+	    got.has_pin == sent->has_pin &&
+	    got.has_device_name == sent->has_device_name &&
+	    (!sent->has_addr ||
+	    memcmp(&got.addr, &sent->addr, sizeof(got.addr)) == 0) &&
+	    (!sent->has_pin || strcmp(got.pin, sent->pin) == 0) &&
+	    (!sent->has_device_name ||
+	    strcmp(got.device_name, sent->device_name) == 0);
+
+	ok(same, "%s%s%s", what, same ? "" : " via ", same ? "" : line);
+	free(line);
+}
+
+static void
+test_encode(void)
+{
+	struct proto_cmd	 cmd;
+	char			*line;
+
+	printf("\nencoding commands\n");
+
+	/* The shape of every line: one object, newline terminated, per B1.2. */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 1;
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	line = proto_encode_cmd(&cmd);
+	ok(line != NULL, "a bare command encodes");
+	if (line != NULL) {
+		eq(line, "{\"id\":1,\"cmd\":\"get_state\"}\n",
+		    "with no absent field emitted");
+		free(line);
+	}
+
+	/* Refusals, so a malformed struct cannot reach the daemon. */
+	ok(proto_encode_cmd(NULL) == NULL, "a NULL command is refused");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = -1;
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	ok(proto_encode_cmd(&cmd) == NULL, "a negative id is refused, per B3.1");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 2;
+	ok(proto_encode_cmd(&cmd) == NULL, "an empty command name is refused");
+
+	printf("\nencode then parse\n");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 3;
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	round_trip(&cmd, "get_state survives a round trip");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 4;
+	(void)strlcpy(cmd.name, "connect", sizeof(cmd.name));
+	cmd.has_addr = 1;
+	(void)bt_aton("aa:bb:cc:11:22:02", &cmd.addr);
+	round_trip(&cmd, "connect with an address");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 5;
+	(void)strlcpy(cmd.name, "pair", sizeof(cmd.name));
+	cmd.has_addr = 1;
+	(void)bt_aton("aa:bb:cc:11:22:02", &cmd.addr);
+	cmd.has_pin = 1;
+	(void)strlcpy(cmd.pin, "0000", sizeof(cmd.pin));
+	cmd.has_device_name = 1;
+	(void)strlcpy(cmd.device_name, "Soundbar X900",
+	    sizeof(cmd.device_name));
+	round_trip(&cmd, "pair with addr, pin and name");
+
+	/* on = false must survive, not be mistaken for absent. */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 6;
+	(void)strlcpy(cmd.name, "set_discoverable", sizeof(cmd.name));
+	cmd.has_on = 1;
+	cmd.on = 0;
+	round_trip(&cmd, "set_discoverable with on false, not absent");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 7;
+	(void)strlcpy(cmd.name, "set_discoverable", sizeof(cmd.name));
+	cmd.has_timeout = 1;
+	cmd.timeout = 0;
+	round_trip(&cmd, "set_discoverable with timeout zero, not absent");
+
+	/*
+	 * The encoder refuses every PIN the parser refuses, so a frontend
+	 * finds out before the round trip rather than after it.
+	 */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 8;
+	(void)strlcpy(cmd.name, "pair", sizeof(cmd.name));
+	cmd.has_pin = 1;
+	(void)strlcpy(cmd.pin, "12\"34", sizeof(cmd.pin));
+	ok(proto_encode_cmd(&cmd) == NULL, "a PIN with a quote is not encodable");
+
+	cmd.pin[0] = '\0';
+	ok(proto_encode_cmd(&cmd) == NULL, "nor is an empty one");
+
+	/*
+	 * An over-long PIN is unrepresentable here: cmd.pin is
+	 * BTMGR_PIN_MAX + 1 bytes, so one cannot be built to encode. The
+	 * parser covers that case, where the string arrives from the wire.
+	 */
+
+	/* A name with a quote is legal and must survive JSON escaping. */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 9;
+	(void)strlcpy(cmd.name, "pair", sizeof(cmd.name));
+	cmd.has_device_name = 1;
+	(void)strlcpy(cmd.device_name, "a \" quote", sizeof(cmd.device_name));
+	round_trip(&cmd, "a device name containing a quote survives escaping");
+}
+
+/*
+ * Decoding. The strongest cases feed proto_parse_msg() the daemon's own
+ * emitters rather than hand-written JSON, so the two cannot drift apart.
+ */
+static void
+test_decode(void)
+{
+	struct proto_msg	 msg;
+	struct state		 st;
+	char			*line;
+
+	printf("\nB3.3 decoding replies and events\n");
+
+	/* Straight from proto_ok(), which is what the daemon really sends. */
+	line = proto_ok(7);
+	if (line == NULL) {
+		ok(0, "proto_ok returned NULL");
+		return;
+	}
+	ok(proto_parse_msg(line, strlen(line), &msg) == 0,
+	    "the daemon's own ok reply decodes");
+	ok(msg.kind == PROTO_MSG_REPLY, "as a reply");
+	ok(msg.request_id == 7, "with the id it was addressed to");
+	ok(msg.succeeded == 1, "and succeeded set");
+	free(line);
+
+	line = proto_error(8, "busy", "a pairing is in progress");
+	if (line == NULL) {
+		ok(0, "proto_error returned NULL");
+		return;
+	}
+	ok(proto_parse_msg(line, strlen(line), &msg) == 0,
+	    "the daemon's own error reply decodes");
+	ok(msg.kind == PROTO_MSG_REPLY, "also as a reply");
+	ok(msg.request_id == 8, "with its id");
+	ok(msg.succeeded == 0, "and succeeded clear");
+	eq(msg.error_code, "busy", "carrying the B6 code");
+	eq(msg.error_detail, "a pairing is in progress", "and the detail");
+	free(line);
+
+	/* B2.1 needs the proto number, so hello must expose it. */
+	line = proto_hello();
+	if (line == NULL) {
+		ok(0, "proto_hello returned NULL");
+		return;
+	}
+	ok(proto_parse_msg(line, strlen(line), &msg) == 0, "hello decodes");
+	ok(msg.kind == PROTO_MSG_EVENT, "as an event");
+	eq(msg.event_name, "hello", "named hello");
+	ok(msg.has_proto_version && msg.proto_version == BTMGR_PROTO_VERSION,
+	    "exposing the proto version B2.1 makes the client check");
+	free(line);
+
+	printf("\nthe state event\n");
+
+	memset(&st, 0, sizeof(st));
+	st.adapter_present = 1;
+	st.powered = 1;
+	st.discoverable = 0;
+	st.scanning = 1;
+	st.config_readable = 1;
+	st.nconns = 0;
+
+	line = proto_state_event(&st);
+	if (line == NULL) {
+		ok(0, "proto_state_event returned NULL");
+		return;
+	}
+	ok(proto_parse_msg(line, strlen(line), &msg) == 0, "a state event decodes");
+	ok(msg.has_state, "and is marked as carrying state");
+	ok(msg.state.adapter_present == 1, "adapter_present survives");
+	ok(msg.state.powered == 1, "powered survives");
+	ok(msg.state.discoverable == 0,
+	    "discoverable false survives, not defaulted true");
+	ok(msg.state.scanning == 1, "scanning survives");
+	ok(msg.state.connection_count == 0, "an empty connection list counts 0");
+	free(line);
+
+	/* One connection is what flips the applet to its connected icon. */
+	st.nconns = 1;
+	st.conns[0].handle = 72;
+	st.conns[0].acl = 1;
+	line = proto_state_event(&st);
+	if (line != NULL) {
+		ok(proto_parse_msg(line, strlen(line), &msg) == 0,
+		    "a state event with a connection decodes");
+		ok(msg.state.connection_count == 1, "and counts it");
+		free(line);
+	}
+
+	printf("\nmalformed and unknown\n");
+
+	ok(decode("", &msg) == -1, "an empty line is refused");
+	ok(decode("not json", &msg) == -1, "rubbish is refused");
+	ok(decode("[1,2]", &msg) == -1, "an array is not a message");
+	ok(decode("{\"ok\":true}", &msg) == -1,
+	    "an object with neither id nor event is refused, per B3.3");
+
+	/* B7 will grow. An unknown event must decode, not fail. */
+	ok(decode("{\"event\":\"device_found\",\"addr\":\"1:2:3:4:5:6\"}",
+	    &msg) == 0, "an event this build does not know still decodes");
+	ok(msg.kind == PROTO_MSG_EVENT, "as an event");
+	eq(msg.event_name, "device_found", "with its name available");
+	ok(msg.has_state == 0, "and no state claimed");
+}
+
 int
 main(void)
 {
@@ -309,6 +568,8 @@ main(void)
 	test_scalars();
 	test_pin();
 	test_name();
+	test_encode();
+	test_decode();
 
 	if (btmgr_mc_report() != 0) {
 		printf("memcheck: allocations still live\n");
