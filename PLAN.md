@@ -1,8 +1,7 @@
 # BluetoothMgr — Implementation Plan
 
-Status: M1, M2 done and M3a written. `lib/libbtmgr`, `tools/btmgr-probe` and
-`bluetoothmgrd` build and run, verified on hardware. M3a, the privileged
-operations, is next. Section 6 tracks progress per milestone.
+Status: M1, M2, M3a and M3b done, all verified on hardware. M4, the MATE panel
+applet, is next. Section 6 tracks progress per milestone.
 
 See `SPEC.md` for the normative contract. This document holds the research
 and the reasoning; the spec holds the rules.
@@ -36,15 +35,15 @@ ordinary user. Results:
 |---|---|---|
 | Kernel modules loaded | `ng_ubt`, `ng_hci`, `ng_bluetooth`, `ng_l2cap`, `ng_btsocket`, `ng_socket` | `kldstat` |
 | Adapter | CSR dongle at `ugen0.2`, node `ubt0hci` | `usbconfig`, `bt_devenum()` |
-| Adapter BD_ADDR | `00:1a:7d:da:71:13` | `bt_devinfo()` |
+| Adapter BD_ADDR | `aa:bb:cc:11:22:03` | `bt_devinfo()` |
 | Adapter state | `0x00000003`, inited | `bt_devinfo()` |
-| Adapter friendly name | `ericbsd-ghostbsd-pc (ubt0)` | `HCI_Read_Local_Name` |
+| Adapter friendly name | `example-pc (ubt0)` | `HCI_Read_Local_Name` |
 | Scan enable | `0x03`, inquiry scan ON, page scan ON | `HCI_Read_Scan_Enable` |
 | Class of device | `ff:01:0c` | `HCI_Read_Unit_Class` |
 | Running daemons | `hcsecd`, `sdpd`. Not `bthidd` | `pgrep` |
 | Stack brought up by | `devd`, automatically on USB attach | `/etc/devd/bluetooth.conf` |
-| Inquiry as normal user | works, found `bc:5c:17:c6:87:3f` "Basement TV 2" class `28:04:3c` | probe2 |
-| Existing alias | `0f:44:53:d2:d7:88  headphones` | `/etc/bluetooth/hosts` |
+| Inquiry as normal user | works, found `aa:bb:cc:11:22:04` a nearby TV class `28:04:3c` | probe2 |
+| Existing alias | `0a:bb:cc:11:22:01  headphones` | `/etc/bluetooth/hosts` |
 
 Toolchain and libraries, all present: clang 19.1.7, `gtk+-3.0`,
 `libmatepanelapplet-4.0`, `glib-2.0`, `json-glib-1.0`, `jansson`, `libbluetooth`,
@@ -145,7 +144,7 @@ based on `priv_check(td, PRIV_NETBLUETOOTH_RAW)`. Unprivileged sockets are then
 checked against a static allowlist, `ng_btsocket_hci_raw_sec_filter`, built at
 module init around line 810.
 
-Measured as user `ericbsd`, no sudo:
+Measured as an ordinary user, no sudo:
 
 ```
 bt_devopen("ubt0hci")              ok
@@ -287,19 +286,36 @@ sighup(int s)
 }
 ```
 
-It dumps learned keys to disk *first*, then re-reads config and keys. The rc
-script is plain `rc.subr` with a `pidfile`, so `service hcsecd reload` delivers
-that `SIGHUP` and works today.
+It dumps learned keys to disk *first*, then re-reads config and keys.
 
-**Use `reload`, never `restart`.** A restart tears down the HCI socket and drops
-any in-flight pairing. A reload preserves in-memory keys by flushing them first.
-This matters more than it looks, because of F7.
+**`service hcsecd reload` does not deliver that `SIGHUP`.** This document
+asserted that it did, and it was wrong; M3b found out by trying it.
+`/etc/rc.d/hcsecd` never sets `extra_commands`, so `reload` is not one of the
+script's keywords and the command fails with a usage error. `rc.subr`'s own
+`reload` is `kill -HUP` on the pid it has found, so the daemon sends the signal
+itself. See SPEC.md A8.1 and `common/hcsecdctl.c`.
+
+There is no pidfile either, which was the second wrong assumption. The rc
+script declares `pidfile="/var/run/hcsecd.pid"`, but `hcsecd` only calls
+`daemon(3)` and never writes one, so the file does not exist and `rc.subr`
+falls back to matching the process table. That is what we do: match on the
+process name, require uid 0, and refuse pid 0 and pid 1.
+
+There is a nastier trap next to it. For any command that *is* gated by `rcvar`,
+`rc.subr` prints "Cannot ... Set hcsecd_enable to YES" and returns status **0**
+when the service is disabled. Had we spawned `service` and trusted its exit
+status, a disabled `hcsecd` would have read as a successful reload, pairing
+would have gone ahead, and the key would have been lost exactly as in F7.
+
+**Send `SIGHUP`, never `restart`.** A restart tears down the HCI socket and
+drops any in-flight pairing. `SIGHUP` preserves in-memory keys by flushing them
+first. This matters more than it looks, because of F7.
 
 So driving `hcsecd` means:
 
 1. Parse `/etc/bluetooth/hcsecd.conf` ourselves, since it cannot be queried.
 2. Regenerate it with the device block we need.
-3. `service hcsecd reload`.
+3. Send `SIGHUP` to the running `hcsecd` (A8.1).
 
 The file is parsed by a real lex/yacc grammar (`lexer.l`, `parser.y`). The
 syntax is strict and the errors are poor, matching the "syntax error cost real
@@ -318,7 +334,7 @@ Two things the real file on this machine tells us that the grammar does not:
   Leave them alone. They are harmless, and "preserve what we did not write" is
   the rule that keeps us from destroying a hand-tuned config.
 
-### F7. Link keys are silently discarded for any device not already in `hcsecd.conf`. **[verified]**
+### F7. Link keys are silently discarded for any device not already in `hcsecd.conf`. **[verified on hardware]**
 
 This is the root cause of the persistence problem described in the audio journey
 document, and it is deterministic rather than flaky.
@@ -344,11 +360,37 @@ request. The controller then sends `Link_Key_Notification`, `hcsecd` logs
 "Could not find entry for remote bdaddr" and discards it, and the device needs
 full re-pairing on next connect.
 
+**Reproduced on hardware, 2026-10-09**, with a Bluetooth speaker that had an
+alias in `/etc/bluetooth/hosts` but no block in `hcsecd.conf`. Addresses below
+are redacted. Two preconditions are easy to miss. The adapter needs
+`write_authentication_enable 1`, because `create_connection` on its own builds a
+bare ACL link that never authenticates, so none of these events fire at all. The
+default entry also needs a real PIN: with the stock `pin nopin` the pairing dies
+one step earlier, at `PIN_Code_Negative_Reply`, and `create_connection` reports
+`Status: Key missing [0x6]`.
+
+```
+Got Link_Key_Request event from 'ubt0hci', remote bdaddr aa:bb:cc:dd:ee:ff
+Found matching entry, remote bdaddr 00:00:00:00:00:00, name 'Default entry', link key doesn't exist
+Sending Link_Key_Negative_Reply to 'ubt0hci' for remote bdaddr aa:bb:cc:dd:ee:ff
+Got PIN_Code_Request event from 'ubt0hci', remote bdaddr aa:bb:cc:dd:ee:ff
+Found matching entry, remote bdaddr 00:00:00:00:00:00, name 'Default entry', PIN code exists
+Sending PIN_Code_Reply to 'ubt0hci' for remote bdaddr aa:bb:cc:dd:ee:ff
+Got Link_Key_Notification event from 'ubt0hci', remote bdaddr aa:bb:cc:dd:ee:ff
+Could not find entry for remote bdaddr aa:bb:cc:dd:ee:ff
+```
+
+`create_connection` succeeded and reported a connection handle, so the pairing
+looked fine from the outside, while nothing was written to
+`/var/db/hcsecd.keys`. The `remote bdaddr 00:00:00:00:00:00` on both "Found
+matching entry" lines is the table above in action: two handlers accepted the
+default entry, the third refused it.
+
 **Consequences for the design:**
 
 - An explicit per-device block in `hcsecd.conf` is **mandatory** for key
   persistence. Not a nicety.
-- Ordering is fixed: write the block, `service hcsecd reload`, *then* pair.
+- Ordering is fixed: write the block, reload `hcsecd`, *then* pair.
   Pairing first loses the key.
 - This single behaviour is the most valuable thing BluetoothMgr automates. It is
   invisible from the CLI, the failure is silent, and the only evidence is a
@@ -452,7 +494,7 @@ New pieces relative to the brief, and why:
 - **`store.c`.** FreeBSD has no device database. `hcsecd.conf` holds pairing
   secrets, `/etc/bluetooth/hosts` holds aliases, `bthidd.conf` holds HID
   descriptors, and none of them holds "this is a headset, the user calls it
-  Monster, last connected Tuesday". We need our own, at
+  My Headset, last connected Tuesday". We need our own, at
   `/var/db/bluetoothmgr/devices.json`. This is the single biggest functional
   gap versus BlueZ.
 - **`hcsecd.c`, `keys.c`, `hosts.c`.** Config ownership, per F6 and F7, plus
@@ -474,7 +516,7 @@ understanding the daemon.
 | live inquiry | who is nearby but unknown, class of device, RSSI | none |
 
 Keyed by BD_ADDR throughout. The `type` field in the IPC protocol comes from
-decoding the class of device. The probe saw `28:04:3c` from "Basement TV 2":
+decoding the class of device. The probe saw `28:04:3c` from a nearby TV:
 major device class bits 8 to 12 give `0x04`, which is Audio/Video, and the
 service class bits give rendering plus audio. That decode belongs in
 `devices.c` as a small lookup table.
@@ -488,9 +530,11 @@ gives us real events worth pushing. Add a framing rule and an event channel.
 embedded newlines. This is trivial to parse with `getline()` and trivial to
 debug with `nc -U`.
 
-**Socket.** `/var/run/bluetoothmgr.sock`, mode `0660`, group `operator`. Clients
-are desktop sessions, so group membership is the access control. Reject commands
-that change state if the peer is not in the group, checked with `getpeereid()`.
+**Socket.** `/var/run/bluetoothmgr.sock`. Clients are desktop sessions, so the
+access control is the session itself, not a group: reject commands that change
+state unless the peer is root or has an active GUI session, checked per
+process from `LOCAL_PEERCRED` and `/var/run/utx.active`. See section 7 for why
+not polkit, and `SPEC.md` A5.
 
 Commands, client to daemon:
 
@@ -503,7 +547,7 @@ Commands, client to daemon:
 {"id": 6, "cmd": "disconnect", "addr": "00:11:22:33:44:55"}
 {"id": 7, "cmd": "pair", "addr": "00:11:22:33:44:55", "pin": "0000"}
 {"id": 8, "cmd": "remove", "addr": "00:11:22:33:44:55"}
-{"id": 9, "cmd": "set_alias", "addr": "00:11:22:33:44:55", "alias": "z337"}
+{"id": 9, "cmd": "set_alias", "addr": "00:11:22:33:44:55", "alias": "speaker_addr"}
 ```
 
 Every command carries an `id`. Every reply echoes it. Without this, a client
@@ -517,9 +561,9 @@ Replies and events, daemon to client:
 
 {"event": "state", "adapter_present": true, "powered": true,
  "discoverable": false, "scanning": false,
- "adapter": {"addr": "00:1a:7d:da:71:13", "name": "ericbsd-ghostbsd-pc"},
+ "adapter": {"addr": "aa:bb:cc:11:22:03", "name": "example-pc"},
  "devices": [
-   {"addr": "0f:44:53:d2:d7:88", "name": "Monster", "alias": "headphones",
+   {"addr": "0a:bb:cc:11:22:01", "name": "Headset H200", "alias": "headphones",
     "type": "headset", "connected": false, "paired": true, "trusted": true}
  ]}
 
@@ -671,8 +715,8 @@ Each milestone ends with something runnable and testable.
 Checklists distinguish **written** from **verified**, and verified on hardware
 from verified synthetically. That distinction has already earned its keep
 twice: `listen.c` passed every synthetic test while never having seen a real
-HCI event, and F7 is asserted in three documents on the strength of source
-reading alone.
+HCI event, and F7 was asserted in three documents on the strength of source
+reading long before anyone watched it happen.
 
 ### M0. Repo scaffolding
 Directory tree, BSD `Makefile`s using `bsd.prog.mk` and `bsd.lib.mk`,
@@ -711,7 +755,7 @@ API conventions fixed here and followed by every module after:
       `-Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings`
 - [x] Verified on hardware: adapter state, connection list, live scan
 - [x] Verified on hardware: class decode on two devices, covering both a
-      specific mapping (Z337 `24:04:14`, Loudspeaker) and the fallback
+      specific mapping (a speaker, `24:04:14`, Loudspeaker) and the fallback
       (TV `28:04:3c`)
 
 ### M2. Daemon core **[done]**
@@ -765,7 +809,7 @@ Decisions made while building it:
       path, 0 live at exit. Tracker validated by introducing a deliberate
       leak, which it caught and clang did not
 
-### M3a. Privileged HCI operations
+### M3a. Privileged HCI operations **[done]**
 `connect`, `disconnect`, `set_discoverable`. Root required, but no file is
 written, so the blast radius is a device that fails to connect. Doing this
 before M3b means the root-related bugs surface while nothing can be damaged.
@@ -796,7 +840,9 @@ channel for asynchronous commands.
       `getpeereid()` reports only the peer's primary gid while the kernel
       admits a connection on any of its groups, so a primary-gid-only check
       refuses precisely the intended deployment (socket group `operator`,
-      users added to `operator` supplementarily)
+      users added to `operator` supplementarily). **Superseded:** A5.3 no longer
+      uses a group at all, see section 7. This records what M2 built and is what
+      the code still does; replacing it is M4 work
 - [x] Verified unprivileged: every state-changing verb reaches the HCI layer
       and fails with `EPERM`, rather than being refused by our own check
 - [x] Clean under the strict warning set, the static analyzer, and `memcheck`
@@ -807,7 +853,7 @@ channel for asynchronous commands.
       **5.14s**. The completion carried a usable bdaddr and we correlated it
       by address, so `inflight.c` stands as written
 - [x] Verified on hardware: connect and disconnect driven through IPC as root.
-      A Logitech Z337 connected in **0.21s** and **0.29s** across two runs,
+      A Bluetooth speaker connected in **0.21s** and **0.29s** across two runs,
       handle 72, ACL, master. The `state` event carried the connection ~0.04s
       later, and `disconnect` resolved the address against it and replied `ok`
       in **0.08s**, exercising the handle lookup
@@ -822,25 +868,32 @@ Deliberately excluded: `write_authentication_enable`. The audio journey shows
 it is required before `virtual_oss` can open A2DP, but it belongs with the
 audio work in M7 rather than shipping as a toggle nobody can test.
 
-### M3b. Config ownership
+M7 must first test whether the per-link `Authentication_Requested` of A6.5 is
+enough for `virtual_oss`, before adding any adapter-wide toggle.
+
+### M3b. Config ownership **[done]**
 `hosts.c`, `hcsecd.c`, `keys.c`, `store.c`. This is the half that can damage a
 working setup, which is why `SPEC.md` Part A was written before any of it.
 
 **Checklist**
 
-- [ ] `hosts.c`: parse, generate aliases, 16 character budget (A2.3),
+- [x] `hosts.c`: parse, generate aliases, 16 character budget (A2.3),
       collision suffixes, preserve records we did not write
-- [ ] `hcsecd.c`: parse the lex/yacc grammar, regenerate whole, preserve the
+- [x] `hcsecd.c`: parse the lex/yacc grammar, regenerate whole, preserve the
       mandatory default entry and every block we did not author (A1)
-- [ ] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
+- [x] `keys.c`: read `/var/db/hcsecd.keys`, delete for stale key recovery,
       never log or transmit key material (A3)
-- [ ] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
+- [x] `store.c`: `/var/db/bluetoothmgr/devices.json`, no secrets (A4)
 - [x] A0 write discipline: atomic rename, one `.bak` per boot, never edit in
       place, never write when the content is unchanged. `common/safefile.c`,
       verified by `tools/btmgr-filetest`: 30 checks, no root or hardware
       needed. A0.3 and A0.4 stay with the callers, since this layer only ever
       sees a finished buffer
-- [ ] A6 pairing order enforced: write the block, reload, *then* pair
+- [x] A6 ordering implemented as a module: `common/pairing.c`, a parked state
+      machine spanning the asynchronous gap
+- [x] A8.1 to A8.2 service control: `common/hcsecdctl.c`, the real `pair_ops`
+- [x] A6 wired into the daemon: the `pair` command, the parked state in the
+      event loop with a timeout, authentication per A6.5, and B4.7
 - [x] A7 sanitisation of every device-supplied string. `common/sanitise.c`,
       verified by `tools/btmgr-strtest`: 66 checks over A7.1, A7.2 and A7.4
       plus the alias rules A2.2 to A2.5, no root or hardware needed. A7.3 has
@@ -850,13 +903,12 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
       of `_` are collapsed so the 16 character budget is not spent on
       separators. `hosts.c` and `hcsecd.c` are the callers that will exercise
       it in anger
-- [ ] `--dry-run` and a config-directory override, so the whole thing can be
-      exercised against copies in `/tmp` before it touches `/etc`
-- [ ] Verified on hardware: **F7 reproduced.** Pairing a device with no block
+- [x] `--dry-run` and a config-directory override, so the whole thing can be
+      exercised against copies before it touches `/etc`
+- [x] Verified on hardware: **F7 reproduced.** Pairing a device with no block
       in `hcsecd.conf` logs "Could not find entry for remote bdaddr" and the
-      key is discarded. This is the claim the README rests on and it is still
-      source reading only
-- [ ] Verified on hardware: a device paired through the daemon survives a
+      key is discarded
+- [x] Verified on hardware: a device paired through the daemon survives a
       reboot without re-pairing
 
 ### M4. MATE panel applet
@@ -936,6 +988,14 @@ Resolved from the brief's open list:
 
 Resolved but not previously listed:
 
+- **Authorization mechanism.** `utmpx` plus `LOCAL_PEERCRED`, not polkit. The
+  rule is "a GUI session, or root", and `struct xucred` carries
+  `cr_pid` so the peer's session can be checked per process with base system
+  calls only. polkit and ConsoleKit2 answer the same question, but both are
+  dependencies this daemon does not otherwise need, and the rule is fixed enough
+  that a policy file buys nothing. There is no `operator` group: every client is
+  a GUI process in the graphical session, so a standing group grant would only
+  widen the rule, never describe it.
 - **JSON library.** `jansson`. It is already in the tree, it is plain C with no
   GLib dependency, so `common/` links into the GLib-free daemon and the GTK
   clients alike. `json-glib` would drag GLib into the daemon, which contradicts
@@ -961,9 +1021,9 @@ Still open:
 | Risk | Impact | Mitigation |
 |---|---|---|
 | SSP absence blocks modern devices | high. Many headsets simply will not pair | scope as M6, be explicit in docs that v1 is legacy pairing |
-| `hcsecd` coexistence is fragile | medium. Restarting it drops in-flight pairing | never edit its config in place, always regenerate plus `.bak`, and use `service hcsecd reload` (SIGHUP), never `restart` |
+| `hcsecd` coexistence is fragile | medium. Restarting it drops in-flight pairing | never edit its config in place, always regenerate plus `.bak`, and send `SIGHUP` directly, never `restart` |
 | Link key discarded for unlisted device (F7) | high. Silent, and forces re-pairing every session | guarantee the config block exists and reload before pairing is attempted, never after |
-| Firmware clearing pairing on disconnect | medium. Monster headphones do this | detect the reconnect failure, offer one-click key delete plus re-pair |
+| Firmware clearing pairing on disconnect | medium. Some headphones do this | detect the reconnect failure, offer one-click key delete plus re-pair |
 | Two pairing agents if a user starts `hcsecd` during M6 | high. Both reply, controller errors | M6 setting must stop and disable `hcsecd`, and the daemon should refuse to arm SSP while `hcsecd` is running |
 | MATE applet API churn | low | pinned by the `libmatepanelapplet-4.0` package already installed |
 | Daemon dies on SIGPIPE (F8) | medium. A raw HCI write can return EPIPE unexpectedly | `signal(SIGPIPE, SIG_IGN)` at daemon startup, and check every write's return |

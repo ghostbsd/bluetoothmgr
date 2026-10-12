@@ -6,11 +6,20 @@ MAN=
 .PATH:		${.CURDIR}/src ${.CURDIR}/../common
 
 SRCS=		main.c \
+		paths.c \
+		safefile.c \
 		inflight.c \
 		ipc.c \
 		listen.c \
 		state.c \
 		proto.c \
+		pairing.c \
+		hcsecdctl.c \
+		hosts.c \
+		hcsecd.c \
+		store.c \
+		btaddr.c \
+		sanitise.c \
 		memcheck.c
 
 LIBBTMGR_DIR=	${.CURDIR}/../lib/libbtmgr

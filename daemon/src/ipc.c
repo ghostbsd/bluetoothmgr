@@ -30,8 +30,12 @@
 #include "ipc.h"
 #include "proto.h"
 
-/* Must come after the system headers: it redefines malloc and friends. */
-#include "memcheck.h"
+/*
+ * Must come after the system headers: it redefines malloc and friends. The
+ * pragma says so to clang-include-cleaner, which sees no direct use of this
+ * header because the use is macro replacement of malloc(), not a symbol.
+ */
+#include "memcheck.h"	/* IWYU pragma: keep */
 
 static int	set_nonblock(int fd);
 static int	buf_append(char **buf, size_t *len, size_t *cap,
@@ -102,7 +106,11 @@ ipc_listen(const char *path, mode_t mode)
 		return (-1);
 	}
 
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	/*
+	 * SOCK_CLOEXEC: nothing here spawns today, but a child inheriting the
+	 * listening socket would hold the channel that A5.3 authorizes on.
+	 */
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return (-1);
 
@@ -141,7 +149,8 @@ ipc_accept(int lfd)
 	struct client	*c;
 	int		 fd, saved;
 
-	fd = accept(lfd, NULL, NULL);
+	/* accept() does not inherit SOCK_CLOEXEC from the listener. */
+	fd = accept4(lfd, NULL, NULL, SOCK_CLOEXEC);
 	if (fd < 0)
 		return (NULL);
 

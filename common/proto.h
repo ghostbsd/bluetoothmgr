@@ -21,9 +21,16 @@
 #define	BTMGR_PROTO_VERSION	0
 
 /* SPEC.md B1.3. A longer line closes the connection unparsed. */
-#define	BTMGR_LINE_MAX		(64 * 1024)
+#define	BTMGR_LINE_MAX		((size_t)64 * 1024)
 
 #define	BTMGR_CMD_NAME_MAX	32
+
+/*
+ * A legacy Bluetooth PIN is at most 16 bytes: NG_HCI_PIN_SIZE, the width of
+ * the pin field in ng_hci_pin_code_rep_cp. A longer one could never be sent,
+ * so it is refused here rather than truncated into a wrong secret.
+ */
+#define	BTMGR_PIN_MAX		16
 
 /* A parsed command. SPEC.md B3 and B4. */
 struct proto_cmd {
@@ -37,6 +44,12 @@ struct proto_cmd {
 	int		timeout;
 	int		has_on;
 	int		on;
+	int		has_pin;
+	char		pin[BTMGR_PIN_MAX + 1];
+
+	/* From the client's scan. Without it A2 aliases everything bt-xxxxxx. */
+	int		has_device_name;
+	char		device_name[BTMGR_NAME_SIZE];
 };
 
 /*

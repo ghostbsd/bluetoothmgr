@@ -23,8 +23,12 @@
 
 #include "safefile.h"
 
-/* Must come after the system headers: it redefines malloc and friends. */
-#include "memcheck.h"
+/*
+ * Must come after the system headers: it redefines malloc and friends. The
+ * pragma says so to clang-include-cleaner, which sees no direct use of this
+ * header because the use is macro replacement of malloc(), not a symbol.
+ */
+#include "memcheck.h"	/* IWYU pragma: keep */
 
 static int	 marker_path(const struct safefile_ctx *ctx, const char *path,
 		     char *out, size_t outlen);
@@ -52,7 +56,7 @@ seterr(char *err, size_t errlen, const char *fmt, ...)
 
 	saved = errno;
 	va_start(ap, fmt);
-	vsnprintf(err, errlen, fmt, ap);
+	(void)vsnprintf(err, errlen, fmt, ap);
 	va_end(ap);
 	errno = saved;
 }
@@ -83,7 +87,8 @@ safefile_read(const char *path, size_t *lenp)
 	size_t		 off, want;
 	int		 fd, saved;
 
-	if ((fd = open(path, O_RDONLY | O_CLOEXEC)) == -1)
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd == -1)
 		return (NULL);
 
 	if (fstat(fd, &sb) == -1) {
@@ -109,7 +114,8 @@ safefile_read(const char *path, size_t *lenp)
 	 * us. Read until EOF and grow as needed rather than trusting it.
 	 */
 	want = (size_t)sb.st_size + 1;
-	if ((buf = malloc(want)) == NULL) {
+	buf = malloc(want);
+	if (buf == NULL) {
 		saved = errno;
 		close(fd);
 		errno = saved;
@@ -122,7 +128,8 @@ safefile_read(const char *path, size_t *lenp)
 			char	*nbuf;
 
 			want *= 2;
-			if ((nbuf = realloc(buf, want)) == NULL) {
+			nbuf = realloc(buf, want);
+			if (nbuf == NULL) {
 				saved = errno;
 				free(buf);
 				close(fd);
@@ -175,7 +182,8 @@ marker_path(const struct safefile_ctx *ctx, const char *path, char *out,
 		h *= 1099511628211ULL;
 	}
 
-	if ((base = strrchr(path, '/')) != NULL)
+	base = strrchr(path, '/');
+	if (base != NULL)
 		base++;
 	else
 		base = path;
@@ -205,7 +213,8 @@ copy_preserving(const char *src, const char *dst, char *err, size_t errlen)
 	ssize_t		 n;
 	int		 in, out, saved;
 
-	if ((in = open(src, O_RDONLY | O_CLOEXEC)) == -1) {
+	in = open(src, O_RDONLY | O_CLOEXEC);
+	if (in == -1) {
 		seterr(err, errlen, "open %s: %s", src, strerror(errno));
 		return (-1);
 	}
@@ -368,7 +377,8 @@ sync_dir(const char *path)
 	const char	*slash;
 	int		 fd, rc, saved;
 
-	if ((slash = strrchr(path, '/')) == NULL) {
+	slash = strrchr(path, '/');
+	if (slash == NULL) {
 		if (strlcpy(dir, ".", sizeof(dir)) >= sizeof(dir))
 			return (-1);
 	} else {
@@ -384,7 +394,8 @@ sync_dir(const char *path)
 		dir[n] = '\0';
 	}
 
-	if ((fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) == -1)
+	fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (fd == -1)
 		return (-1);
 	rc = fsync(fd);
 	saved = errno;
@@ -395,7 +406,7 @@ sync_dir(const char *path)
 
 int
 safefile_write(const struct safefile_ctx *ctx, const char *path,
-    const void *buf, size_t len, mode_t mode, char *err, size_t errlen)
+    mode_t mode, const void *buf, size_t len, char *err, size_t errlen)
 {
 	struct stat	 sb;
 	char		 tmp[PATH_MAX];
@@ -415,7 +426,8 @@ safefile_write(const struct safefile_ctx *ctx, const char *path,
 	 */
 	have_old = 0;
 	target_mode = mode;
-	if ((cur = safefile_read(path, &curlen)) != NULL) {
+	cur = safefile_read(path, &curlen);
+	if (cur != NULL) {
 		if (curlen == len && (len == 0 || memcmp(cur, buf, len) == 0)) {
 			free(cur);
 			return (SAFEFILE_UNCHANGED);
@@ -458,7 +470,8 @@ safefile_write(const struct safefile_ctx *ctx, const char *path,
 	}
 
 	/* A0.6: mkstemp creates O_EXCL, mode 0600. */
-	if ((fd = mkstemp(tmp)) == -1) {
+	fd = mkstemp(tmp);
+	if (fd == -1) {
 		seterr(err, errlen, "mkstemp %s: %s", tmp, strerror(errno));
 		return (SAFEFILE_ERROR);
 	}

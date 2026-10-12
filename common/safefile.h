@@ -51,8 +51,8 @@
 enum safefile_result {
 	SAFEFILE_ERROR	 = -1,
 	SAFEFILE_WRITTEN =  0,	/* content differed, the rename happened */
-	SAFEFILE_UNCHANGED,	/* A0.5: identical on disk, nothing done */
-	SAFEFILE_DRYRUN		/* would have written, --dry-run is on */
+	SAFEFILE_UNCHANGED = 1,	/* A0.5: identical on disk, nothing done */
+	SAFEFILE_DRYRUN	 = 2	/* would have written, --dry-run is on */
 };
 
 /*
@@ -97,7 +97,7 @@ int	safefile_init(struct safefile_ctx *ctx, const char *rundir,
 #define	SAFEFILE_ERRLEN		256
 
 int	safefile_write(const struct safefile_ctx *ctx, const char *path,
-	    const void *buf, size_t len, mode_t mode, char *err, size_t errlen);
+	    mode_t mode, const void *buf, size_t len, char *err, size_t errlen);
 
 /*
  * Slurp a whole file. Returns a malloc'd, NUL terminated buffer the caller

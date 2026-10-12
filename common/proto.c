@@ -21,10 +21,16 @@
 
 #include <jansson.h>
 
+#include "btmgr.h"
 #include "proto.h"
+#include "state.h"
 
-/* Must come after the system headers: it redefines malloc and friends. */
-#include "memcheck.h"
+/*
+ * Must come after the system headers: it redefines malloc and friends. The
+ * pragma says so to clang-include-cleaner, which sees no direct use of this
+ * header because the use is macro replacement of malloc(), not a symbol.
+ */
+#include "memcheck.h"	/* IWYU pragma: keep */
 
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
@@ -296,6 +302,75 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 		}
 		out->on = json_is_true(v) ? 1 : 0;
 		out->has_on = 1;
+	}
+
+	/*
+	 * A name is cosmetic, so A7.1 transliterates it. A PIN is an exact
+	 * secret, and hcsecd_set() runs it through the same sanitiser, so
+	 * anything A7.1 would rewrite is refused here instead.
+	 */
+	v = json_object_get(root, "pin");
+	if (v != NULL) {
+		const char	*pin;
+		size_t		 i, len;
+
+		if (!json_is_string(v)) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+
+		pin = json_string_value(v);
+		len = strlen(pin);
+
+		/*
+		 * Absent means "this device needs no PIN", which hcsecd spells
+		 * nopin. An empty string would mean the same thing by a second
+		 * route, so refuse it and keep one spelling.
+		 */
+		if (len == 0 || len > BTMGR_PIN_MAX) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+
+		for (i = 0; i < len; i++) {
+			unsigned char ch = (unsigned char)pin[i];
+
+			if (ch == '"' || ch == '\\' || ch < 0x20 ||
+			    ch == 0x7f) {
+				strlcpy(code, "bad_json", codelen);
+				json_decref(root);
+				return (-1);
+			}
+		}
+
+		memcpy(out->pin, pin, len + 1);
+		out->has_pin = 1;
+	}
+
+	/* jansson rejects invalid UTF-8, so B1.4 is settled before we see it. */
+	v = json_object_get(root, "name");
+	if (v != NULL) {
+		const char	*nm;
+
+		if (!json_is_string(v)) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+
+		nm = json_string_value(v);
+
+		/* Absent is how "no name" is spelled, as with pin. */
+		if (nm[0] == '\0' ||
+		    strlcpy(out->device_name, nm, sizeof(out->device_name)) >=
+		    sizeof(out->device_name)) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+		out->has_device_name = 1;
 	}
 
 	json_decref(root);

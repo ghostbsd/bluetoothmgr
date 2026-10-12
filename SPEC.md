@@ -171,13 +171,30 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
 
 ## A5. `/var/run/bluetoothmgr.sock`
 
-- **A5.1** A `SOCK_STREAM` Unix domain socket, mode `0660`, group `operator`.
+- **A5.1** A `SOCK_STREAM` Unix domain socket. The filesystem mode is not the
+  authorization boundary; A5.3 is.
 - **A5.2** The daemon MUST `unlink()` a stale socket at startup, and MUST remove
   it on clean shutdown.
-- **A5.3** The daemon MUST call `getpeereid()` on accept. A peer whose uid is
-  not 0 and whose gid is not the socket group MUST be refused any command that
-  changes state. Read-only commands MAY be served to any peer that got through
-  the filesystem permissions.
+- **A5.3** State-changing commands MUST be refused unless the peer is root or
+  has an active GUI session. Read-only commands MAY be served to any peer that
+  got through the filesystem permissions.
+
+  Peer uid and pid come from `getsockopt(LOCAL_PEERCRED)`, since `struct xucred`
+  carries `cr_pid`. Sessions come from `getutxent()` over `/var/run/utx.active`,
+  which only root can write.
+
+  A GUI session is a `USER_PROCESS` record whose `ut_line` or `ut_host` begins
+  with `:`. Both fields matter: lightdm's record is on line `:0`, while the
+  session leader `mate-session` is on line `ttyv8` with host `:0`. A console
+  login with no host is not a GUI session, and `ssh` on `pts/N` is not either.
+
+  The peer's uid MUST match such a session's user AND its pid MUST descend from
+  that session's pid, walked with `sysctl kern.proc.pid`. Uid alone would
+  authorize the same user's ssh session.
+
+  The daemon MUST confirm the session process still exists and started no later
+  than the record's login time, since a crashed display manager can leave a
+  record behind and the pid can be reused.
 
 ## A6. Pairing sequence (the ordering constraint)
 
@@ -195,9 +212,10 @@ The daemon MUST perform pairing in exactly this order:
 1. Resolve the device name and class. Generate an alias per A2.
 2. Write the alias to `/etc/bluetooth/hosts` (A2).
 3. Write or update the device's block in `hcsecd.conf`, including the PIN (A1).
-4. `service hcsecd reload` (A8). Wait for it to complete.
-5. **Only now** issue `Create_Connection` and let pairing proceed.
-6. On `Link_Key_Notification`, issue a further `service hcsecd reload` to force
+4. Reload `hcsecd` (A8.1). Wait for it to complete.
+5. **Only now** issue `Create_Connection`, then on `Connection_Complete` issue
+   `Authentication_Requested` for that handle (A6.5).
+6. On `Link_Key_Notification`, reload `hcsecd` again to force
    `dump_keys_file()` to flush the new key to disk (A8.3).
 7. Update `devices.json` (A4).
 
@@ -207,7 +225,18 @@ The daemon MUST perform pairing in exactly this order:
   drops the in-flight pairing.
 - **A6.3** If step 4 fails, the daemon MUST abort and MUST NOT attempt step 5.
 - **A6.4** On abort at any step after 2, the daemon SHOULD roll the config back
-  to its prior content rather than leaving a half-written block.
+  to its prior content rather than leaving a half-written block. It SHOULD also
+  drop the link step 5 opened, since a failed authentication leaves the ACL
+  link up and A6.6 then refuses the retry.
+- **A6.5** `Create_Connection` alone is not enough. It leaves an unauthenticated
+  ACL link, which exchanges no PIN, so `Link_Key_Notification` never fires and
+  the pairing cannot complete. Authentication MUST be requested per link rather
+  than by enabling the adapter's global authentication mode, which would change
+  behaviour for every device.
+- **A6.6** The daemon MUST refuse `pair` for a device that already has a
+  connection. `Create_Connection` on an open link produces no
+  `Connection_Complete` at all, so step 5 would never report either way.
+  Being connected is not being paired; see B5.2.
 
 ## A7. Sanitisation of device-supplied strings
 
@@ -222,23 +251,56 @@ strict grammars, plus syslog.
   truncated per A2.3. `bluetooth-config.sh` uses `tr -c '[:alnum:]-,.' _` for
   the same reason. Note that our set excludes `,`, which that script permits.
 - **A7.3** The daemon MUST NOT construct any shell command by concatenating a
-  device-supplied string. Where it must invoke `service`, it MUST use
-  `posix_spawn()` or `fork()` plus `execve()` with an argument vector, never
-  `system()` or `popen()`.
+  device-supplied string. Where it must invoke an external program, such as the
+  `service` call in A8.5, it MUST use `posix_spawn()` or `fork()` plus
+  `execve()` with an argument vector, never `system()` or `popen()`. A8.1 needs
+  no external program at all: it sends a signal.
 - **A7.4** A name that sanitises to the empty string MUST fall back to a
-  generated alias derived from the address, for example `bt-d2d788` from the
+  generated alias derived from the address, for example `bt-112233` from the
   last three octets.
 
 ## A8. Service control
 
-- **A8.1** To make `hcsecd` re-read its configuration the daemon MUST use
-  `service hcsecd reload`, which delivers `SIGHUP`. It MUST NOT use `restart`.
-  A restart tears down the HCI socket and drops in-flight pairing; `SIGHUP`
-  calls `dump_keys_file()`, `read_config_file()`, `read_keys_file()` in that
-  order, preserving learned keys.
+- **A8.1** To make `hcsecd` re-read its configuration the daemon MUST send it
+  `SIGHUP`, which calls `dump_keys_file()`, `read_config_file()` and
+  `read_keys_file()` in that order, preserving learned keys. It MUST NOT
+  restart the service: a restart tears down the HCI socket and drops in-flight
+  pairing.
+
+  The daemon MUST NOT do this by running `service hcsecd reload`. That command
+  does not exist. `/etc/rc.d/hcsecd` never sets `extra_commands`, so `reload`
+  is not one of its keywords and the call fails with a usage error. There is a
+  second, worse reason: for any command that *is* gated by `rcvar`, `rc.subr`
+  prints "Cannot ... Set hcsecd_enable to YES" and returns status **0** when
+  the service is disabled. A spawned `service` call can therefore report
+  success having done nothing, which would let pairing proceed against an
+  unreloaded `hcsecd` and lose the link key exactly as F7 does.
+
+  `rc.subr`'s own `reload` is `kill -HUP` on the pid it has found, so
+  signalling directly is equivalent and avoids a subprocess entirely.
+- **A8.1.1** There is no pidfile to read. `/etc/rc.d/hcsecd` declares
+  `pidfile="/var/run/hcsecd.pid"`, but `hcsecd` only calls `daemon(3)` and
+  never creates it, so `rc.subr` falls back to matching the process table. The
+  daemon MUST do the same: enumerate processes and match on the process name.
+- **A8.1.2** A match MUST also require uid 0, because opening the raw HCI
+  socket is privileged, so a real `hcsecd` is always root. Matching on the name
+  alone would let any user put a program called `hcsecd` in the daemon's way
+  and receive a `SIGHUP` from root.
+- **A8.1.3** A matched pid MUST be greater than 1, and a zombie MUST NOT count
+  as running. `kill(2)` reads 0 as every process in the caller's process group
+  and a negative pid as a process group, so a pid that could mean either must
+  never reach it: one `SIGHUP` from a root daemon would otherwise become a
+  system-wide one. A zombie keeps its name but cannot act on a signal, so
+  counting one would park a pairing against a process that has already gone.
+- **A8.1.4** More than one matching process MAY exist, for instance a debug
+  `hcsecd` started by hand alongside the service. The daemon SHOULD signal all
+  of them, as `rc.subr` does, and SHOULD report the count.
 - **A8.2** The daemon MUST tolerate `hcsecd` not running. If `hcsecd_enable` is
   not set, pairing cannot persist keys, and the daemon MUST report that as a
-  distinct condition rather than failing obscurely.
+  distinct condition rather than failing obscurely. The check is the same
+  lookup as A8.1.1 to A8.1.3. An inconclusive answer, such as a process table
+  that could not be read, MUST be treated as not running, because that is the
+  direction in which nothing is written.
 - **A8.3** `hcsecd` flushes keys to disk only on `SIGHUP` and on clean shutdown.
   A `SIGKILL` or a panic loses every key learned since the last flush. The
   daemon SHOULD therefore trigger a reload shortly after a successful pairing,
@@ -333,6 +395,22 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
   completion event is the answer to all of them, so the daemon MUST fan the
   result out to every waiting request rather than answering the first and
   letting the rest time out.
+- **B4.4** `pair`'s `pin` is optional. Absent means the device needs no PIN,
+  which `hcsecd` spells `nopin`; an empty string MUST be refused so that there
+  is only one spelling for it.
+- **B4.5** A `pin` MUST be a JSON string of 1 to 16 bytes. 16 is
+  `NG_HCI_PIN_SIZE`, the width of the field in `ng_hci_pin_code_rep_cp`, so a
+  longer one could never be sent and MUST be refused rather than truncated.
+- **B4.6** A `pin` containing `"`, `\`, a C0 control or DEL MUST be refused.
+  Unlike a device name, a PIN is an exact secret, and A7.1 transliteration
+  would silently turn it into a different one. The resulting failure would look
+  like the device rejecting a correct PIN. The daemon MUST NOT log a PIN, per
+  the same reasoning as A3.3.
+- **B4.7** While a pairing is parked, between A6 step 5 and step 6, the daemon
+  MUST refuse `pair`, `remove`, `set_alias`, `set_trusted` and `set_power` with
+  `busy`. The first four reload `hcsecd`, which A6.2 forbids; `set_power` tears
+  the stack down per A8.5. `get_state`, `scan`, `connect`, `disconnect` and
+  `set_discoverable` MUST remain available.
 
 ## B5. State object *(provisional, expect churn)*
 
@@ -344,14 +422,14 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
   "discoverable": false,
   "scanning": false,
   "adapter": {
-    "addr": "00:1a:7d:da:71:13",
-    "name": "ericbsd-ghostbsd-pc",
+    "addr": "aa:bb:cc:11:22:03",
+    "name": "example-pc",
     "node": "ubt0hci"
   },
   "devices": [
     {
-      "addr": "0f:44:53:d2:d7:88",
-      "name": "Monster",
+      "addr": "0a:bb:cc:11:22:01",
+      "name": "Headset H200",
       "alias": "headphones",
       "type": "headset",
       "class": "28:04:3c",
