@@ -34,7 +34,8 @@
 #include "memcheck.h"	/* IWYU pragma: keep */
 
 static int	 pin_is_sendable(const char *pin);
-static void	 read_boolean(json_t *obj, const char *key, int *out);
+static int	 set_string(json_t *obj, const char *key, const char *value);
+static int	 read_boolean(json_t *obj, const char *key, int *out);
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
@@ -113,10 +114,13 @@ adapter_json(const struct btmgr_adapter *a)
 	if (o == NULL)
 		return (NULL);
 
-	json_object_set_new(o, "addr",
-	    json_string(bt_ntoa(&a->bdaddr, addr)));
-	json_object_set_new(o, "name", json_string(a->name));
-	json_object_set_new(o, "node", json_string(a->node));
+	/* a->name is whatever the controller reported, so may not be UTF-8. */
+	if (set_string(o, "addr", bt_ntoa(&a->bdaddr, addr)) != 0 ||
+	    set_string(o, "name", a->name) != 0 ||
+	    set_string(o, "node", a->node) != 0) {
+		json_decref(o);
+		return (NULL);
+	}
 
 	return (o);
 }
@@ -131,25 +135,31 @@ conn_json(const struct btmgr_conn *c)
 	if (o == NULL)
 		return (NULL);
 
-	json_object_set_new(o, "addr",
-	    json_string(bt_ntoa(&c->bdaddr, addr)));
-	json_object_set_new(o, "handle", json_integer(c->handle));
-	json_object_set_new(o, "link", json_string(c->acl ? "acl" : "sco"));
-	json_object_set_new(o, "encrypted", json_boolean(c->encrypted));
-	json_object_set_new(o, "role",
-	    json_string(c->master ? "master" : "slave"));
+	if (set_string(o, "addr", bt_ntoa(&c->bdaddr, addr)) != 0 ||
+	    json_object_set_new(o, "handle", json_integer(c->handle)) != 0 ||
+	    set_string(o, "link", c->acl ? "acl" : "sco") != 0 ||
+	    json_object_set_new(o, "encrypted",
+	    json_boolean(c->encrypted)) != 0 ||
+	    set_string(o, "role", c->master ? "master" : "slave") != 0) {
+		json_decref(o);
+		return (NULL);
+	}
 
 	return (o);
 }
 
-/* Read a JSON boolean into *out, leaving it alone when the key is absent. */
-static void
+/* A missing or non-boolean key is a malformed message, not a false. */
+static int
 read_boolean(json_t *obj, const char *key, int *out)
 {
 	json_t	*value = json_object_get(obj, key);
 
-	if (json_is_boolean(value))
-		*out = json_is_true(value) ? 1 : 0;
+	if (!json_is_boolean(value))
+		return (-1);
+
+	*out = json_is_true(value) ? 1 : 0;
+
+	return (0);
 }
 
 int
@@ -190,7 +200,11 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 		out->kind = PROTO_MSG_REPLY;
 		out->request_id = (int)id;
 
-		read_boolean(root, "ok", &out->succeeded);
+		/* B3's envelope: a reply without ok is malformed. */
+		if (read_boolean(root, "ok", &out->succeeded) != 0) {
+			json_decref(root);
+			return (-1);
+		}
 
 		value = json_object_get(root, "error");
 		if (json_is_string(value))
@@ -223,25 +237,50 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 		out->proto_version = (int)json_integer_value(value);
 	}
 
+	/*
+	 * Every field is required. Letting a missing adapter_present default
+	 * to false would make a truncated event indistinguishable from an
+	 * unplugged dongle, which is what the applet hides itself for.
+	 */
 	if (strcmp(out->event_name, "state") == 0) {
-		out->has_state = 1;
-		read_boolean(root, "adapter_present",
-		    &out->state.adapter_present);
-		read_boolean(root, "powered", &out->state.powered);
-		read_boolean(root, "discoverable", &out->state.discoverable);
-		read_boolean(root, "scanning", &out->state.scanning);
-		read_boolean(root, "config_readable",
-		    &out->state.config_readable);
-
 		value = json_object_get(root, "connections");
-		if (json_is_array(value))
-			out->state.connection_count =
-			    (int)json_array_size(value);
+		if (!json_is_array(value) ||
+		    read_boolean(root, "adapter_present",
+		    &out->state.adapter_present) != 0 ||
+		    read_boolean(root, "powered", &out->state.powered) != 0 ||
+		    read_boolean(root, "discoverable",
+		    &out->state.discoverable) != 0 ||
+		    read_boolean(root, "scanning", &out->state.scanning) != 0 ||
+		    read_boolean(root, "config_readable",
+		    &out->state.config_readable) != 0) {
+			json_decref(root);
+			return (-1);
+		}
+
+		out->state.connection_count = (int)json_array_size(value);
+		out->has_state = 1;
 	}
 
 	json_decref(root);
 
 	return (0);
+}
+
+/*
+ * json_string() returns NULL for invalid UTF-8 as well as for allocation
+ * failure, and set_new() then leaves the key out, so an unchecked insertion
+ * renders a command with a field silently missing.
+ */
+static int
+set_string(json_t *obj, const char *key, const char *value)
+{
+	json_t	*str = json_string(value);
+
+	if (str == NULL)
+		return (-1);
+
+	/* Steals the reference even when it fails, so there is no leak. */
+	return (json_object_set_new(obj, key, str));
 }
 
 char *
@@ -262,24 +301,32 @@ proto_encode_cmd(const struct proto_cmd *cmd)
 	if (obj == NULL)
 		return (NULL);
 
-	json_object_set_new(obj, "id", json_integer(cmd->id));
-	json_object_set_new(obj, "cmd", json_string(cmd->name));
+	if (json_object_set_new(obj, "id", json_integer(cmd->id)) != 0 ||
+	    set_string(obj, "cmd", cmd->name) != 0)
+		goto fail;
 
-	if (cmd->has_addr)
-		json_object_set_new(obj, "addr",
-		    json_string(bt_ntoa(&cmd->addr, addr)));
-	if (cmd->has_timeout)
-		json_object_set_new(obj, "timeout",
-		    json_integer(cmd->timeout));
-	if (cmd->has_on)
-		json_object_set_new(obj, "on", json_boolean(cmd->on));
-	if (cmd->has_pin)
-		json_object_set_new(obj, "pin", json_string(cmd->pin));
-	if (cmd->has_device_name)
-		json_object_set_new(obj, "name",
-		    json_string(cmd->device_name));
+	if (cmd->has_addr &&
+	    set_string(obj, "addr", bt_ntoa(&cmd->addr, addr)) != 0)
+		goto fail;
+	if (cmd->has_timeout &&
+	    json_object_set_new(obj, "timeout",
+	    json_integer(cmd->timeout)) != 0)
+		goto fail;
+	if (cmd->has_on &&
+	    json_object_set_new(obj, "on", json_boolean(cmd->on)) != 0)
+		goto fail;
+	if (cmd->has_pin && set_string(obj, "pin", cmd->pin) != 0)
+		goto fail;
+	if (cmd->has_device_name &&
+	    set_string(obj, "name", cmd->device_name) != 0)
+		goto fail;
 
 	return (render(obj));
+
+fail:
+	json_decref(obj);
+
+	return (NULL);
 }
 
 char *
@@ -291,9 +338,13 @@ proto_hello(void)
 	if (o == NULL)
 		return (NULL);
 
-	json_object_set_new(o, "event", json_string("hello"));
-	json_object_set_new(o, "proto", json_integer(BTMGR_PROTO_VERSION));
-	json_object_set_new(o, "daemon", json_string("bluetoothmgr/0.1.0"));
+	if (set_string(o, "event", "hello") != 0 ||
+	    json_object_set_new(o, "proto",
+	    json_integer(BTMGR_PROTO_VERSION)) != 0 ||
+	    set_string(o, "daemon", "bluetoothmgr/0.1.0") != 0) {
+		json_decref(o);
+		return (NULL);
+	}
 
 	return (render(o));
 }
@@ -308,37 +359,52 @@ proto_hello(void)
 char *
 proto_state_event(const struct state *st)
 {
-	json_t	*o, *devices, *conns;
+	json_t	*o, *devices, *conns, *adapter, *one;
 	int	 i;
 
 	o = json_object();
 	if (o == NULL)
 		return (NULL);
 
-	json_object_set_new(o, "event", json_string("state"));
-	json_object_set_new(o, "adapter_present",
-	    json_boolean(st->adapter_present));
-	json_object_set_new(o, "powered", json_boolean(st->powered));
-	json_object_set_new(o, "discoverable",
-	    json_boolean(st->discoverable));
-	json_object_set_new(o, "scanning", json_boolean(st->scanning));
-	json_object_set_new(o, "config_readable",
-	    json_boolean(st->config_readable));
+	if (set_string(o, "event", "state") != 0 ||
+	    json_object_set_new(o, "adapter_present",
+	    json_boolean(st->adapter_present)) != 0 ||
+	    json_object_set_new(o, "powered",
+	    json_boolean(st->powered)) != 0 ||
+	    json_object_set_new(o, "discoverable",
+	    json_boolean(st->discoverable)) != 0 ||
+	    json_object_set_new(o, "scanning",
+	    json_boolean(st->scanning)) != 0 ||
+	    json_object_set_new(o, "config_readable",
+	    json_boolean(st->config_readable)) != 0)
+		goto fail;
 
-	if (st->adapter_present)
-		json_object_set_new(o, "adapter", adapter_json(&st->adapter));
-	else
-		json_object_set_new(o, "adapter", json_null());
+	adapter = st->adapter_present ? adapter_json(&st->adapter) :
+	    json_null();
+	if (adapter == NULL || json_object_set_new(o, "adapter", adapter) != 0)
+		goto fail;
 
+	/* Inserted before filling, so the array is owned by o on any failure. */
 	conns = json_array();
-	for (i = 0; i < st->nconns; i++)
-		json_array_append_new(conns, conn_json(&st->conns[i]));
-	json_object_set_new(o, "connections", conns);
+	if (conns == NULL || json_object_set_new(o, "connections", conns) != 0)
+		goto fail;
+	for (i = 0; i < st->nconns; i++) {
+		one = conn_json(&st->conns[i]);
+		if (one == NULL || json_array_append_new(conns, one) != 0)
+			goto fail;
+	}
 
 	devices = json_array();
-	json_object_set_new(o, "devices", devices);
+	if (devices == NULL ||
+	    json_object_set_new(o, "devices", devices) != 0)
+		goto fail;
 
 	return (render(o));
+
+fail:
+	json_decref(o);
+
+	return (NULL);
 }
 
 char *
@@ -350,8 +416,11 @@ proto_ok(int id)
 	if (o == NULL)
 		return (NULL);
 
-	json_object_set_new(o, "id", json_integer(id));
-	json_object_set_new(o, "ok", json_true());
+	if (json_object_set_new(o, "id", json_integer(id)) != 0 ||
+	    json_object_set_new(o, "ok", json_true()) != 0) {
+		json_decref(o);
+		return (NULL);
+	}
 
 	return (render(o));
 }
@@ -365,11 +434,13 @@ proto_error(int id, const char *code, const char *detail)
 	if (o == NULL)
 		return (NULL);
 
-	json_object_set_new(o, "id", json_integer(id));
-	json_object_set_new(o, "ok", json_false());
-	json_object_set_new(o, "error", json_string(code));
-	if (detail != NULL)
-		json_object_set_new(o, "detail", json_string(detail));
+	if (json_object_set_new(o, "id", json_integer(id)) != 0 ||
+	    json_object_set_new(o, "ok", json_false()) != 0 ||
+	    set_string(o, "error", code) != 0 ||
+	    (detail != NULL && set_string(o, "detail", detail) != 0)) {
+		json_decref(o);
+		return (NULL);
+	}
 
 	return (render(o));
 }

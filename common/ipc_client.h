@@ -6,6 +6,11 @@
  * Owns no event loop and never blocks after connecting: the caller watches
  * btmgr_ipc_fd() in its own loop, GLib in the applet or kqueue elsewhere.
  * Framing is common/linebuf.c. Nothing here knows what the JSON means.
+ *
+ * B2.1's version check is the frontend's job, not this file's: the hello
+ * event arrives with proto_version set and the caller decides whether to
+ * disconnect. A library that closed the connection itself would do it behind
+ * its caller's back.
  */
 
 #ifndef BTMGR_IPC_CLIENT_H_

@@ -438,6 +438,21 @@ test_encode(void)
 	cmd.pin[0] = '\0';
 	ok(proto_encode_cmd(&cmd) == NULL, "nor is an empty one");
 
+	/*
+	 * A device name is arbitrary bytes from the device, so it can be
+	 * invalid UTF-8. jansson refuses it, and an unchecked insertion used
+	 * to render the command with the name silently missing.
+	 */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 11;
+	(void)strlcpy(cmd.name, "pair", sizeof(cmd.name));
+	cmd.has_device_name = 1;
+	cmd.device_name[0] = 'Z';
+	cmd.device_name[1] = (char)0xff;
+	cmd.device_name[2] = '\0';
+	ok(proto_encode_cmd(&cmd) == NULL,
+	    "a name with invalid UTF-8 fails rather than dropping the field");
+
 	/* Same asymmetry for the name: the parser refuses empty, so do we. */
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.id = 10;
@@ -551,6 +566,18 @@ test_decode(void)
 		free(line);
 	}
 
+	/*
+	 * The adapter name comes from HCI_Read_Local_Name, so it can be invalid
+	 * UTF-8. An unchecked insertion used to drop the name and still emit a
+	 * state event that looked complete.
+	 */
+	st.adapter_present = 1;
+	st.adapter.name[0] = 'u';
+	st.adapter.name[1] = (char)0xff;
+	st.adapter.name[2] = '\0';
+	ok(proto_state_event(&st) == NULL,
+	    "a non-UTF-8 adapter name fails the whole event, not just the field");
+
 	printf("\nmalformed and unknown\n");
 
 	ok(decode("", &msg) == -1, "an empty line is refused");
@@ -558,6 +585,25 @@ test_decode(void)
 	ok(decode("[1,2]", &msg) == -1, "an array is not a message");
 	ok(decode("{\"ok\":true}", &msg) == -1,
 	    "an object with neither id nor event is refused, per B3.3");
+
+	/* A reply without ok is not a reply. */
+	ok(decode("{\"id\":1}", &msg) == -1, "a reply with no ok is refused");
+
+	/*
+	 * An incomplete state event must be refused, not reported as an
+	 * adapter that is absent, which is what the applet hides itself for.
+	 */
+	ok(decode("{\"event\":\"state\",\"powered\":true,\"discoverable\":false,"
+	    "\"scanning\":false,\"config_readable\":true,\"connections\":[]}",
+	    &msg) == -1, "a state event missing adapter_present is refused");
+	ok(decode("{\"event\":\"state\",\"adapter_present\":true,"
+	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
+	    "\"config_readable\":true}", &msg) == -1,
+	    "a state event with no connections array is refused");
+	ok(decode("{\"event\":\"state\",\"adapter_present\":\"yes\","
+	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
+	    "\"config_readable\":true,\"connections\":[]}", &msg) == -1,
+	    "a state event with a non-boolean flag is refused");
 
 	/* An id that narrows to a pending one must not complete it. */
 	ok(decode("{\"id\":4294967296,\"ok\":true}", &msg) == -1,
