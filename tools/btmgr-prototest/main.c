@@ -438,6 +438,14 @@ test_encode(void)
 	cmd.pin[0] = '\0';
 	ok(proto_encode_cmd(&cmd) == NULL, "nor is an empty one");
 
+	/* Same asymmetry for the name: the parser refuses empty, so do we. */
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 10;
+	(void)strlcpy(cmd.name, "pair", sizeof(cmd.name));
+	cmd.has_device_name = 1;
+	ok(proto_encode_cmd(&cmd) == NULL,
+	    "an empty device name is not encodable either");
+
 	/*
 	 * An over-long PIN is unrepresentable here: cmd.pin is
 	 * BTMGR_PIN_MAX + 1 bytes, so one cannot be built to encode. The
@@ -550,6 +558,18 @@ test_decode(void)
 	ok(decode("[1,2]", &msg) == -1, "an array is not a message");
 	ok(decode("{\"ok\":true}", &msg) == -1,
 	    "an object with neither id nor event is refused, per B3.3");
+
+	/* An id that narrows to a pending one must not complete it. */
+	ok(decode("{\"id\":4294967296,\"ok\":true}", &msg) == -1,
+	    "an id past INT_MAX is refused, not truncated");
+	ok(decode("{\"id\":-5,\"ok\":true}", &msg) == -1,
+	    "a negative id is refused");
+	ok(decode("{\"id\":2147483647,\"ok\":true}", &msg) == 0 &&
+	    msg.request_id == 2147483647, "INT_MAX itself is still accepted");
+
+	/* B3.3 makes reply and event exclusive, so both at once is malformed. */
+	ok(decode("{\"id\":3,\"event\":\"state\",\"ok\":true}", &msg) == -1,
+	    "a message carrying both id and event is refused");
 
 	/* B7 will grow. An unknown event must decode, not fail. */
 	ok(decode("{\"event\":\"device_found\",\"addr\":\"1:2:3:4:5:6\"}",

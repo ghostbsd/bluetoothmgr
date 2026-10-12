@@ -15,6 +15,7 @@
  * root frees the whole tree.
  */
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,13 +34,16 @@
 #include "memcheck.h"	/* IWYU pragma: keep */
 
 static int	 pin_is_sendable(const char *pin);
+static void	 read_boolean(json_t *obj, const char *key, int *out);
 static char	*render(json_t *root);
+static json_t	*adapter_json(const struct btmgr_adapter *a);
+static json_t	*conn_json(const struct btmgr_conn *c);
 
 /*
- * A name is cosmetic, so A7.1 transliterates it. A PIN is an exact secret, and
+ * A name is cosmetic, so A7.1 transliterates it. A PIN is an exact secret and
  * hcsecd_set() runs it through the same sanitiser, so anything A7.1 would
- * rewrite is refused. Shared by both directions: the encoder refusing what the
- * parser refuses means a frontend learns at once instead of after a round trip.
+ * rewrite is refused. Shared by both directions, so a frontend learns at once
+ * rather than after a round trip.
  */
 static int
 pin_is_sendable(const char *pin)
@@ -59,8 +63,6 @@ pin_is_sendable(const char *pin)
 
 	return (1);
 }
-static json_t	*adapter_json(const struct btmgr_adapter *a);
-static json_t	*conn_json(const struct btmgr_conn *c);
 
 /*
  * Serialise a tree to one line, append the newline, and free the tree.
@@ -168,8 +170,25 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 
 	value = json_object_get(root, "id");
 	if (json_is_integer(value)) {
+		json_int_t	 id = json_integer_value(value);
+
+		/* B3.3 makes the two kinds exclusive. */
+		if (json_is_string(json_object_get(root, "event"))) {
+			json_decref(root);
+			return (-1);
+		}
+
+		/*
+		 * Narrowing without this check lets id 4294967296 arrive as 0
+		 * and complete whichever request holds that id.
+		 */
+		if (id < 0 || id > INT_MAX) {
+			json_decref(root);
+			return (-1);
+		}
+
 		out->kind = PROTO_MSG_REPLY;
-		out->request_id = (int)json_integer_value(value);
+		out->request_id = (int)id;
 
 		read_boolean(root, "ok", &out->succeeded);
 
@@ -234,6 +253,9 @@ proto_encode_cmd(const struct proto_cmd *cmd)
 	if (cmd == NULL || cmd->id < 0 || cmd->name[0] == '\0')
 		return (NULL);
 	if (cmd->has_pin && !pin_is_sendable(cmd->pin))
+		return (NULL);
+	/* The parser refuses an empty name, so emitting one is a doomed send. */
+	if (cmd->has_device_name && cmd->device_name[0] == '\0')
 		return (NULL);
 
 	obj = json_object();

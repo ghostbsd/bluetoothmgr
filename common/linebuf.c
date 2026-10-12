@@ -16,35 +16,45 @@
 
 static int	append_bounded(char **buffer, size_t *used, size_t *capacity,
 		    const char *data, size_t datalen, size_t max);
+static int	reserve(char **buffer, size_t *capacity, size_t needed);
+static size_t	pending_line_len(const struct linebuf *buf);
+
+static int
+reserve(char **buffer, size_t *capacity, size_t needed)
+{
+	char	*grown;
+	size_t	 new_capacity;
+
+	if (needed <= *capacity)
+		return (0);
+
+	new_capacity = (*capacity == 0) ? 1024 : *capacity;
+	while (new_capacity < needed)
+		new_capacity *= 2;
+
+	/* Via a temporary: realloc failing must not leak *buffer. */
+	grown = realloc(*buffer, new_capacity);
+	if (grown == NULL)
+		return (-1);
+
+	*buffer = grown;
+	*capacity = new_capacity;
+
+	return (0);
+}
 
 static int
 append_bounded(char **buffer, size_t *used, size_t *capacity, const char *data,
     size_t datalen, size_t max)
 {
-	char	*grown;
-	size_t	 needed, new_capacity;
+	size_t	 needed = *used + datalen;
 
-	needed = *used + datalen;
 	if (needed > max) {
 		errno = EMSGSIZE;
 		return (-1);
 	}
-
-	if (needed > *capacity) {
-		new_capacity = (*capacity == 0) ? 1024 : *capacity;
-		while (new_capacity < needed)
-			new_capacity *= 2;
-		if (new_capacity > max)
-			new_capacity = max;
-
-		/* Via a temporary: realloc failing must not leak *buffer. */
-		grown = realloc(*buffer, new_capacity);
-		if (grown == NULL)
-			return (-1);
-
-		*buffer = grown;
-		*capacity = new_capacity;
-	}
+	if (reserve(buffer, capacity, needed) != 0)
+		return (-1);
 
 	memcpy(*buffer + *used, data, datalen);
 	*used += datalen;
@@ -52,18 +62,33 @@ append_bounded(char **buffer, size_t *used, size_t *capacity, const char *data,
 	return (0);
 }
 
+/* Bytes after the last newline: the line still being received. */
+static size_t
+pending_line_len(const struct linebuf *buf)
+{
+	const char	*last;
+
+	if (buf->read_len == 0)
+		return (0);
+
+	last = memrchr(buf->read_buf, '\n', buf->read_len);
+	if (last == NULL)
+		return (buf->read_len);
+
+	return (buf->read_len - (size_t)(last - buf->read_buf) - 1);
+}
+
 void
 linebuf_init(struct linebuf *buf)
 {
-
 	memset(buf, 0, sizeof(*buf));
 }
 
 void
 linebuf_free(struct linebuf *buf)
 {
-
 	free(buf->read_buf);
+	free(buf->line_buf);
 	free(buf->write_buf);
 	memset(buf, 0, sizeof(*buf));
 }
@@ -73,7 +98,10 @@ linebuf_fill(struct linebuf *buf, int fd)
 {
 	char	 chunk[4096];
 	ssize_t	 nread;
-	size_t	 max = buf->read_max != 0 ? buf->read_max : LINEBUF_READ_MAX;
+	size_t	 line_max = buf->line_max != 0 ?
+		     buf->line_max : LINEBUF_LINE_MAX;
+	size_t	 buffer_max = buf->buffer_max != 0 ?
+		     buf->buffer_max : LINEBUF_BUFFER_MAX;
 
 	for (;;) {
 		nread = read(fd, chunk, sizeof(chunk));
@@ -90,8 +118,15 @@ linebuf_fill(struct linebuf *buf, int fd)
 		}
 
 		if (append_bounded(&buf->read_buf, &buf->read_len,
-		    &buf->read_capacity, chunk, (size_t)nread, max) != 0)
+		    &buf->read_capacity, chunk, (size_t)nread,
+		    buffer_max) != 0)
 			return (-1);
+
+		/* B1.3 is about one line, not about everything unread. */
+		if (pending_line_len(buf) > line_max) {
+			errno = EMSGSIZE;
+			return (-1);
+		}
 	}
 }
 
@@ -99,17 +134,7 @@ int
 linebuf_next_line(struct linebuf *buf, char **line, size_t *len)
 {
 	char	*newline;
-
-	/*
-	 * Discarding here rather than at the end of the previous call is what
-	 * keeps that call's returned pointer valid until this one.
-	 */
-	if (buf->read_handed_out > 0) {
-		memmove(buf->read_buf, buf->read_buf + buf->read_handed_out,
-		    buf->read_len - buf->read_handed_out);
-		buf->read_len -= buf->read_handed_out;
-		buf->read_handed_out = 0;
-	}
+	size_t	 linelen;
 
 	if (buf->read_buf == NULL || buf->read_len == 0)
 		return (0);
@@ -118,11 +143,20 @@ linebuf_next_line(struct linebuf *buf, char **line, size_t *len)
 	if (newline == NULL)
 		return (0);
 
-	*newline = '\0';
-	*line = buf->read_buf;
-	*len = (size_t)(newline - buf->read_buf);
+	linelen = (size_t)(newline - buf->read_buf);
 
-	buf->read_handed_out = *len + 1;
+	/* Copied out because a later fill can realloc read_buf and move it. */
+	if (reserve(&buf->line_buf, &buf->line_capacity, linelen + 1) != 0)
+		return (0);
+
+	memcpy(buf->line_buf, buf->read_buf, linelen);
+	buf->line_buf[linelen] = '\0';
+
+	buf->read_len -= linelen + 1;
+	memmove(buf->read_buf, newline + 1, buf->read_len);
+
+	*line = buf->line_buf;
+	*len = linelen;
 
 	return (1);
 }

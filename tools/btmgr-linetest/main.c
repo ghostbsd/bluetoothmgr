@@ -167,13 +167,23 @@ test_pointer_lifetime(void)
 	ok(linebuf_next_line(&buf, &first, &len) == 1, "the first line comes out");
 	eq(first, "first", "and reads correctly");
 
-	/*
-	 * A fill between the two calls must not move the buffer out from under
-	 * the pointer we are still holding.
-	 */
-	push(them, "third\n");
-	(void)linebuf_fill(&buf, us);
-	eq(first, "first", "and survives a fill while still held");
+	/* Past the initial 1024, so the fill really reallocs. */
+	{
+		char	*big = malloc(4001);
+
+		if (big == NULL) {
+			ok(0, "out of memory");
+		} else {
+			memset(big, 'x', 4000);
+			big[3999] = '\n';
+			big[4000] = '\0';
+			push(them, big);
+			(void)linebuf_fill(&buf, us);
+			free(big);
+			eq(first, "first",
+			    "survives a fill that reallocs the read buffer");
+		}
+	}
 
 	ok(linebuf_next_line(&buf, &second, &len) == 1, "the next line comes out");
 	eq(second, "second", "and is the one after it, not a repeat");
@@ -206,22 +216,53 @@ test_caps(void)
 	}
 	memset(big, 'a', 8192);
 
-	/* A small cap, so the test does not have to push 64 KiB. */
+	/* Small caps, so the test need not push 64 KiB. */
 	linebuf_init(&buf);
-	buf.read_max = 4096;
+	buf.line_max = 4096;
 
 	push(them, big);
 	errno = 0;
 	ok(linebuf_fill(&buf, us) == -1 && errno == EMSGSIZE,
-	    "a line past read_max is refused with EMSGSIZE");
+	    "one line past line_max is refused with EMSGSIZE");
 
 	linebuf_free(&buf);
 
-	/* The default applies when read_max is left at zero. */
 	linebuf_init(&buf);
 	push(them, big);
 	ok(linebuf_fill(&buf, us) == 0,
-	    "the same data fits under the default cap");
+	    "the same data fits under the default line_max");
+
+	linebuf_free(&buf);
+
+	/*
+	 * A burst of complete valid lines totalling more than line_max is
+	 * someone's working traffic, not an over-long line.
+	 */
+	linebuf_init(&buf);
+	buf.line_max = 64;
+	{
+		char	 small[32];
+		int	 i, sent = 0;
+
+		for (i = 0; i < 200; i++) {
+			(void)snprintf(small, sizeof(small), "{\"n\":%d}\n", i);
+			push(them, small);
+			sent++;
+		}
+		ok(linebuf_fill(&buf, us) == 0,
+		    "%d short lines totalling past line_max still fill", sent);
+		ok(buf.read_len > buf.line_max,
+		    "with more buffered than one line's worth");
+
+		for (i = 0; i < sent; i++) {
+			char	*line;
+			size_t	 len;
+
+			if (linebuf_next_line(&buf, &line, &len) != 1)
+				break;
+		}
+		ok(i == sent, "and all %d come back out", sent);
+	}
 
 	free(big);
 	linebuf_free(&buf);

@@ -109,7 +109,7 @@ fail_all_pending(struct btmgr_ipc *conn)
 		callback = slot->on_reply;
 		user_data = slot->user_data;
 
-		/* Release before calling out, so the callback may re-request. */
+		/* Released first, so the callback may issue a new request. */
 		memset(slot, 0, sizeof(*slot));
 
 		if (callback != NULL)
@@ -307,8 +307,16 @@ btmgr_ipc_request(struct btmgr_ipc *conn, struct proto_cmd *cmd,
 
 	if (btmgr_ipc_send(conn, line) != 0) {
 		saved = errno;
-		memset(slot, 0, sizeof(*slot));
 		free(line);
+
+		/*
+		 * The connection is unusable, so earlier requests will never be
+		 * answered either. Failing only this one leaves their callbacks
+		 * waiting for a reply that cannot come.
+		 */
+		memset(slot, 0, sizeof(*slot));
+		fail_all_pending(conn);
+
 		errno = saved;
 		return (-1);
 	}

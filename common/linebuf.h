@@ -13,8 +13,11 @@
 
 #include <stddef.h>
 
-/* SPEC.md B1.3. A longer line is refused unparsed. */
-#define	LINEBUF_READ_MAX	((size_t)64 * 1024)
+/* SPEC.md B1.3. One line longer than this is refused unparsed. */
+#define	LINEBUF_LINE_MAX	((size_t)64 * 1024)
+
+/* Total unread. Bigger than a line: a burst of valid lines is not an abuse. */
+#define	LINEBUF_BUFFER_MAX	((size_t)1024 * 1024)
 
 /* A peer that will not drain is wedged or hostile. SPEC.md A5. */
 #define	LINEBUF_WRITE_MAX	((size_t)256 * 1024)
@@ -23,14 +26,17 @@ struct linebuf {
 	char	*read_buf;
 	size_t	 read_len;
 	size_t	 read_capacity;
-	size_t	 read_handed_out;
+
+	char	*line_buf;
+	size_t	 line_capacity;
 
 	char	*write_buf;
 	size_t	 write_len;
 	size_t	 write_capacity;
 
-	size_t	 read_max;		/* 0 selects LINEBUF_READ_MAX */
-	size_t	 write_max;		/* 0 selects LINEBUF_WRITE_MAX */
+	size_t	 line_max;	/* 0 selects LINEBUF_LINE_MAX */
+	size_t	 buffer_max;	/* 0 selects LINEBUF_BUFFER_MAX */
+	size_t	 write_max;	/* 0 selects LINEBUF_WRITE_MAX */
 
 	int	 has_unwritten;
 };
@@ -41,13 +47,15 @@ void	linebuf_free(struct linebuf *buf);
 /*
  * Returns 0 normally, or -1 when the connection is finished and the caller
  * should drop it. errno tells which: 0 for a clean close, EMSGSIZE for a line
- * past read_max, otherwise the failing read's errno.
+ * past line_max or a buffer past buffer_max, otherwise the failing read's.
  */
 int	linebuf_fill(struct linebuf *buf, int fd);
 
 /*
  * Returns 1 with *line and *len set, or 0 when no complete line is buffered.
- * *line points into read_buf and stays valid until the next call.
+ *
+ * *line stays valid until the next linebuf_next_line() on this linebuf.
+ * linebuf_fill() does not disturb it.
  */
 int	linebuf_next_line(struct linebuf *buf, char **line, size_t *len);
 

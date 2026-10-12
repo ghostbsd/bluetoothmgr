@@ -559,6 +559,47 @@ test_connection_lost(void)
 	teardown(listen_fd, server_fd, conn);
 }
 
+/* A send failure makes the connection unusable, so nobody may be left waiting. */
+static void
+test_send_failure_fails_all(void)
+{
+	struct btmgr_ipc	*conn;
+	struct proto_cmd	 cmd;
+	struct reply_capture	 first, later;
+	int			 listen_fd, server_fd;
+
+	printf("\na send fails with earlier requests pending\n");
+
+	if (connect_pair(&listen_fd, &server_fd, &conn) != 0) {
+		ok(0, "could not set up a connection");
+		return;
+	}
+
+	memset(&first, 0, sizeof(first));
+	memset(&later, 0, sizeof(later));
+
+	memset(&cmd, 0, sizeof(cmd));
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	(void)btmgr_ipc_request(conn, &cmd, capture_reply, &first);
+	ok(btmgr_ipc_pending_count(conn) == 1, "one request is pending");
+
+	/* Kill the peer, so the next send cannot succeed. */
+	(void)close(server_fd);
+	server_fd = -1;
+	(void)btmgr_ipc_fill(conn);		/* notice the close */
+
+	memset(&cmd, 0, sizeof(cmd));
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	ok(btmgr_ipc_request(conn, &cmd, capture_reply, &later) == -1,
+	    "the next request fails to send");
+	ok(first.calls == 1 && first.succeeded == 0,
+	    "and the earlier request was failed, not left waiting");
+	eq(first.error_code, "io_error", "with io_error");
+	ok(btmgr_ipc_pending_count(conn) == 0, "the table is empty");
+
+	teardown(listen_fd, server_fd, conn);
+}
+
 int
 main(void)
 {
@@ -581,6 +622,7 @@ main(void)
 	test_events_and_strays();
 	test_table_full();
 	test_connection_lost();
+	test_send_failure_fails_all();
 
 	(void)unlink(sockpath);
 	(void)rmdir(dir);

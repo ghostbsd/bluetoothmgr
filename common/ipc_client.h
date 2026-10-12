@@ -30,6 +30,11 @@ struct btmgr_ipc;
  * Called once per request, which B3.2 guarantees. On a lost connection every
  * pending request is failed with error_code "io_error" so a frontend never
  * waits forever for a daemon that has gone.
+ *
+ * A callback may issue new requests. It MUST NOT call btmgr_ipc_close(): the
+ * dispatch loop is still walking this connection and would then use freed
+ * memory. To close from a callback, set a flag and close after
+ * btmgr_ipc_dispatch() returns.
  */
 typedef void (*btmgr_reply_fn)(const struct proto_msg *reply, void *user_data);
 
