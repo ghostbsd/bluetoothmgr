@@ -124,6 +124,49 @@ btmgr_disconnect_start(const char *node, uint16_t handle, uint8_t reason)
 }
 
 /*
+ * Ask the controller to authenticate an existing link, which is what starts
+ * the PIN exchange and makes hcsecd learn a key. SPEC.md A6 step 5.
+ *
+ * Without this, Create_Connection leaves a bare ACL link that never
+ * authenticates, so Link_Key_Notification never fires. That is the mechanism
+ * behind F7 and the reason reproducing it by hand needed
+ * write_authentication_enable. Requesting per link is narrower than flipping
+ * the adapter's global authentication mode.
+ *
+ * Asynchronous: the answer is Authentication_Complete on the event socket.
+ */
+int
+btmgr_authenticate_start(const char *node, uint16_t handle)
+{
+	ng_hci_auth_req_cp	cp;
+	int			s, saved;
+
+	if (node == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+
+	memset(&cp, 0, sizeof(cp));
+	cp.con_handle = htole16(handle);
+
+	s = bt_devopen(node);
+	if (s < 0)
+		return (-1);
+
+	if (bt_devsend(s, NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
+	    NG_HCI_OCF_AUTH_REQ), &cp, sizeof(cp)) < 0) {
+		saved = errno;
+		bt_devclose(s);
+		errno = saved;
+		return (-1);
+	}
+
+	bt_devclose(s);
+
+	return (0);
+}
+
+/*
  * Set inquiry scan (discoverable) and page scan (connectable).
  *
  * Synchronous, unlike the two above: Write_Scan_Enable completes immediately

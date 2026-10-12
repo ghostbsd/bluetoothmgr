@@ -35,7 +35,9 @@
 #include <unistd.h>
 
 #include "btmgr.h"
+#include "hcsecdctl.h"
 #include "inflight.h"
+#include "pairing.h"
 #include "paths.h"
 #include "ipc.h"
 #include "listen.h"
@@ -62,6 +64,13 @@
 #define	MAX_EVENTS	32
 
 /*
+ * How long a parked pairing waits for Link_Key_Notification. The user has to
+ * read a PIN off a screen and type it on the device, so this is generous
+ * compared with INFLIGHT_TIMEOUT_SEC, which only waits on the controller.
+ */
+#define	PAIRING_TIMEOUT_SEC	60
+
+/*
  * udata tags. kqueue hands back whatever pointer we registered, so a distinct
  * address per source tells the handler what fired without a lookup table. For
  * clients we register the struct client * itself, which is the real payoff:
@@ -71,6 +80,20 @@ static int	tag_listen_sock;	/* the IPC listening socket */
 static int	tag_hci;		/* the passive HCI event socket */
 static int	tag_timer;
 static int	tag_discoverable;
+
+/*
+ * A6: one pairing at a time, because A6.2 forbids the reload a second one's
+ * step 4 would need. client may die before the key arrives, so every use goes
+ * through client_alive().
+ */
+struct parked_pairing {
+	struct pair_state	 state;
+	struct client		*client;
+	int			 id;		/* the client's request id */
+	uint16_t		 handle;	/* 0 until the link is up */
+	time_t			 deadline;
+	char			 name[BTMGR_NAME_SIZE];
+};
 
 struct daemon {
 	int		 kq;
@@ -86,6 +109,8 @@ struct daemon {
 	gid_t		 sockgid;
 	struct btmgr_paths paths;	/* where the config files are */
 	struct inflight_table	pending;
+	struct hcsecd_ctl	hcsecd;		/* A8.1, the real pair_ops */
+	struct parked_pairing	pairing;
 	volatile int	 quit;
 };
 
@@ -103,6 +128,13 @@ static void	reconcile(struct daemon *d);
 static void	refresh_hci(struct daemon *d);
 static void	reply(struct daemon *d, struct client *c, char *line);
 static int	may_change(const struct daemon *d, const struct client *c);
+static int	blocked_while_pairing(const char *cmd);
+static struct pair_ops	pair_ops_for(struct daemon *d);
+static void	finish_pairing(struct daemon *d, const bdaddr_t *addr);
+static void	abandon_pairing(struct daemon *d, const char *code,
+		    const char *why);
+static void	do_pair(struct daemon *d, struct client *c,
+		    const struct proto_cmd *cmd);
 static void	on_completion(const struct listen_report *r, void *arg);
 static void	on_expired(const struct inflight *f, void *arg);
 
@@ -194,6 +226,15 @@ drop_client(struct daemon *d, struct client *c)
 	 */
 	inflight_drop_client(&d->pending, c);
 
+	/*
+	 * Same hazard for the parked pairing, and malloc reusing the address
+	 * would make client_alive() hand this reply to an unrelated client.
+	 * The pairing itself continues: the config is already written and the
+	 * device may still deliver a key, so rolling back would lose it.
+	 */
+	if (d->pairing.client == c)
+		d->pairing.client = NULL;
+
 	ipc_client_free(c);
 }
 
@@ -267,6 +308,100 @@ may_change(const struct daemon *d, const struct client *c)
 }
 
 /*
+ * SPEC.md B4.7. Listed by name rather than tested per handler so that a
+ * command added later is covered by editing this list, not by remembering.
+ * Four of these are not implemented yet.
+ */
+static int
+blocked_while_pairing(const char *cmd)
+{
+	static const char *const blocked[] = {
+		"pair", "remove", "set_alias", "set_trusted", "set_power"
+	};
+	size_t	 i;
+
+	for (i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {
+		if (strcmp(cmd, blocked[i]) == 0)
+			return (1);
+	}
+
+	return (0);
+}
+
+static struct pair_ops
+pair_ops_for(struct daemon *d)
+{
+	struct pair_ops	 ops;
+
+	ops.reload = hcsecd_ctl_reload;
+	ops.hcsecd_running = hcsecd_ctl_running;
+	ops.context = &d->hcsecd;
+
+	return (ops);
+}
+
+/* A6 steps 6 and 7, on Link_Key_Notification for the device we are pairing. */
+static void
+finish_pairing(struct daemon *d, const bdaddr_t *addr)
+{
+	struct pair_ops		 ops = pair_ops_for(d);
+	struct pair_report	 report;
+	struct client		*c = d->pairing.client;
+	enum pair_result	 r;
+	int			 id = d->pairing.id;
+
+	if (!d->pairing.state.active)
+		return;
+	if (memcmp(d->pairing.state.addr, addr, BTMGR_ADDR_LEN) != 0)
+		return;			/* some other device's key */
+
+	r = pairing_complete(&d->paths, &ops, &d->pairing.state,
+	    d->pairing.name, NULL, (int64_t)time(NULL), &report);
+
+	memset(&d->pairing, 0, sizeof(d->pairing));
+
+	if (!client_alive(d, c))
+		return;
+
+	if (r == PAIR_DONE)
+		reply(d, c, proto_ok(id));
+	else
+		reply(d, c, proto_error(id, "io_error",
+		    report.detail[0] != '\0' ? report.detail : NULL));
+}
+
+/* A6.4 via pairing_abort: roll both config files back and tell the client. */
+static void
+abandon_pairing(struct daemon *d, const char *code, const char *why)
+{
+	struct pair_ops		 ops = pair_ops_for(d);
+	struct pair_report	 report;
+	struct client		*c = d->pairing.client;
+	int			 id = d->pairing.id;
+	uint16_t		 handle = d->pairing.handle;
+
+	if (!d->pairing.state.active)
+		return;
+
+	(void)pairing_abort(&d->paths, &ops, &d->pairing.state, &report);
+	memset(&d->pairing, 0, sizeof(d->pairing));
+
+	/*
+	 * Drop the link step 5 opened. A failed authentication leaves the ACL
+	 * link up, and do_pair() refuses while one exists, so leaving it would
+	 * block the retry. Any link here is ours for that same reason.
+	 */
+	if (handle != 0 && d->last.adapter_present)
+		(void)btmgr_disconnect_start(d->last.adapter.node, handle,
+		    BTMGR_REASON_USER);
+
+	syslog(LOG_INFO, "pairing abandoned: %s", why);
+
+	if (client_alive(d, c))
+		reply(d, c, proto_error(id, code, why));
+}
+
+/*
  * A completion arrived on the passive listener. Match it against whoever
  * asked for it and answer them. This is the other half of the asynchronous
  * design: the reply to a connect request is delivered here, seconds after
@@ -282,6 +417,51 @@ on_completion(const struct listen_report *r, void *arg)
 	if (r->status != 0)
 		(void)snprintf(detail, sizeof(detail),
 		    "controller reported status 0x%02x", r->status);
+
+	/*
+	 * These two must return rather than fall through: the loop below reads
+	 * "not a connection completion" as a disconnection, so either would be
+	 * matched against the disconnect table by handle and silently consume
+	 * someone's pending request.
+	 */
+	if (r->kind == LISTEN_LINK_KEY) {
+		finish_pairing(d, &r->addr);
+		return;
+	}
+
+	if (r->kind == LISTEN_AUTH_COMPL) {
+		/*
+		 * Success means the key is on its way, so there is nothing to
+		 * do. Failure means it never will be, usually a refused or
+		 * mistyped PIN.
+		 */
+		if (r->status != 0 && d->pairing.state.active &&
+		    d->pairing.handle == r->handle)
+			abandon_pairing(d, "io_error", detail);
+		return;
+	}
+
+	if (r->kind == LISTEN_CON_COMPL && d->pairing.state.active &&
+	    memcmp(d->pairing.state.addr, &r->addr, BTMGR_ADDR_LEN) == 0) {
+		/*
+		 * A6 step 5 is not done until the link is authenticated: a bare
+		 * ACL link never exchanges a PIN, so no key would ever arrive.
+		 * On failure abandon now, since waiting out the timeout would
+		 * answer a page timeout with the unrelated "no link key".
+		 */
+		if (r->status != 0)
+			abandon_pairing(d, "io_error", detail);
+		else {
+			d->pairing.handle = r->handle;
+			if (btmgr_authenticate_start(d->last.adapter.node,
+			    r->handle) < 0)
+				abandon_pairing(d, "io_error",
+				    "could not request authentication");
+			else
+				syslog(LOG_INFO, "authentication requested, "
+				    "handle %u", r->handle);
+		}
+	}
 
 	/*
 	 * Loop, because more than one request can be waiting on the same
@@ -311,6 +491,87 @@ on_completion(const struct listen_report *r, void *arg)
 			reply(d, f->client,
 			    proto_error(f->id, "io_error", detail));
 	}
+}
+
+/*
+ * A6 steps 1 to 5. pairing_begin does 1 to 4 and parks; this then issues
+ * Create_Connection, which is step 5 and the thing no caller was doing.
+ */
+static void
+do_pair(struct daemon *d, struct client *c, const struct proto_cmd *cmd)
+{
+	struct pair_ops		 ops = pair_ops_for(d);
+	struct pair_report	 report;
+	enum pair_result	 r;
+
+	int	 i;
+
+	if (!cmd->has_addr) {
+		reply(d, c, proto_error(cmd->id, "bad_addr",
+		    "pair requires addr"));
+		return;
+	}
+
+	/*
+	 * Create_Connection on an open link produces no Connection_Complete at
+	 * all, so step 5 would wait out the whole timeout and then blame a
+	 * missing key. Being connected is not being paired: see B5.2.
+	 */
+	for (i = 0; i < d->last.nconns; i++) {
+		if (bdaddr_same(&d->last.conns[i].bdaddr, &cmd->addr)) {
+			reply(d, c, proto_error(cmd->id, "busy",
+			    "already connected; disconnect before pairing"));
+			return;
+		}
+	}
+
+	r = pairing_begin(&d->paths, &ops, (const uint8_t *)&cmd->addr,
+	    cmd->has_device_name ? cmd->device_name : NULL,
+	    cmd->has_pin ? cmd->pin : NULL, &d->pairing.state, &report);
+
+	switch (r) {
+	case PAIR_NO_HCSECD:
+		reply(d, c, proto_error(cmd->id, "hcsecd_unavailable",
+		    report.detail));
+		return;
+	case PAIR_REFUSED:
+		reply(d, c, proto_error(cmd->id, "not_permitted",
+		    report.detail));
+		return;
+	case PAIR_ERROR:
+		reply(d, c, proto_error(cmd->id, "hcsecd_config_error",
+		    report.detail[0] != '\0' ? report.detail : NULL));
+		return;
+	case PAIR_PARKED:
+		break;
+	default:
+		reply(d, c, proto_error(cmd->id, "io_error", NULL));
+		return;
+	}
+
+	d->pairing.client = c;
+	d->pairing.id = cmd->id;
+	d->pairing.deadline = time(NULL) + PAIRING_TIMEOUT_SEC;
+	if (cmd->has_device_name)
+		(void)strlcpy(d->pairing.name, cmd->device_name,
+		    sizeof(d->pairing.name));
+	else
+		d->pairing.name[0] = '\0';
+
+	/* Step 5. A6.1: only now, with the block on disk and hcsecd reloaded. */
+	if (btmgr_connect_start(d->last.adapter.node, &cmd->addr) < 0) {
+		int	 saved = errno;
+
+		/* B3.2 allows one reply, and abandon_pairing sends its own. */
+		d->pairing.client = NULL;
+		abandon_pairing(d, "io_error",
+		    "could not start the connection");
+		reply(d, c, proto_error(cmd->id, "io_error", strerror(saved)));
+		return;
+	}
+
+	/* The reply comes from finish_pairing() when the key arrives. */
+	syslog(LOG_INFO, "pairing started by uid %d", (int)c->uid);
 }
 
 /* A request outlived its deadline without a completion. */
@@ -359,6 +620,18 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 
 	if (!d->last.adapter_present) {
 		reply(d, c, proto_error(cmd.id, "no_adapter", NULL));
+		return;
+	}
+
+	/* SPEC.md B4.7. A reload now would drop the in-flight pairing. */
+	if (d->pairing.state.active && blocked_while_pairing(cmd.name)) {
+		reply(d, c, proto_error(cmd.id, "busy",
+		    "a pairing is in progress"));
+		return;
+	}
+
+	if (strcmp(cmd.name, "pair") == 0) {
+		do_pair(d, c, &cmd);
 		return;
 	}
 
@@ -721,6 +994,10 @@ main(int argc, char *argv[])
 	if (btmgr_paths_init(&d.paths, root, dry_run) < 0)
 		err(1, "config root '%s'", root != NULL ? root : "/");
 
+	/* A8.1. uid 0 because a real hcsecd must be root to open the socket. */
+	if (hcsecd_ctl_init(&d.hcsecd, NULL, 0, dry_run) < 0)
+		err(1, "hcsecd_ctl_init");
+
 	/*
 	 * PLAN.md F8. A raw HCI write can return EPIPE unexpectedly, and a
 	 * root daemon that dies on a signal because of it is unacceptable.
@@ -823,6 +1100,12 @@ main(int argc, char *argv[])
 				 */
 				inflight_expire(&d.pending, time(NULL),
 				    on_expired, &d);
+
+				if (d.pairing.state.active &&
+				    time(NULL) >= d.pairing.deadline)
+					abandon_pairing(&d, "timeout",
+					    "no link key arrived");
+
 				d.dirty = 1;
 				continue;
 			}

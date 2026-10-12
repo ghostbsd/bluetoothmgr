@@ -1,8 +1,7 @@
 # BluetoothMgr — Implementation Plan
 
-Status: M1, M2 done and M3a written. `lib/libbtmgr`, `tools/btmgr-probe` and
-`bluetoothmgrd` build and run, verified on hardware. M3a, the privileged
-operations, is next. Section 6 tracks progress per milestone.
+Status: M1, M2, M3a and M3b done, all verified on hardware. M4, the MATE panel
+applet, is next. Section 6 tracks progress per milestone.
 
 See `SPEC.md` for the normative contract. This document holds the research
 and the reasoning; the spec holds the rules.
@@ -810,7 +809,7 @@ Decisions made while building it:
       path, 0 live at exit. Tracker validated by introducing a deliberate
       leak, which it caught and clang did not
 
-### M3a. Privileged HCI operations
+### M3a. Privileged HCI operations **[done]**
 `connect`, `disconnect`, `set_discoverable`. Root required, but no file is
 written, so the blast radius is a device that fails to connect. Doing this
 before M3b means the root-related bugs surface while nothing can be damaged.
@@ -869,7 +868,10 @@ Deliberately excluded: `write_authentication_enable`. The audio journey shows
 it is required before `virtual_oss` can open A2DP, but it belongs with the
 audio work in M7 rather than shipping as a toggle nobody can test.
 
-### M3b. Config ownership
+M7 must first test whether the per-link `Authentication_Requested` of A6.5 is
+enough for `virtual_oss`, before adding any adapter-wide toggle.
+
+### M3b. Config ownership **[done]**
 `hosts.c`, `hcsecd.c`, `keys.c`, `store.c`. This is the half that can damage a
 working setup, which is why `SPEC.md` Part A was written before any of it.
 
@@ -890,7 +892,7 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
 - [x] A6 ordering implemented as a module: `common/pairing.c`, a parked state
       machine spanning the asynchronous gap
 - [x] A8.1 to A8.2 service control: `common/hcsecdctl.c`, the real `pair_ops`
-- [ ] A6 wired into the daemon: the `pair` command, the parked state in the
+- [x] A6 wired into the daemon: the `pair` command, the parked state in the
       event loop with a timeout, authentication per A6.5, and B4.7
 - [x] A7 sanitisation of every device-supplied string. `common/sanitise.c`,
       verified by `tools/btmgr-strtest`: 66 checks over A7.1, A7.2 and A7.4
@@ -906,7 +908,7 @@ working setup, which is why `SPEC.md` Part A was written before any of it.
 - [x] Verified on hardware: **F7 reproduced.** Pairing a device with no block
       in `hcsecd.conf` logs "Could not find entry for remote bdaddr" and the
       key is discarded
-- [ ] Verified on hardware: a device paired through the daemon survives a
+- [x] Verified on hardware: a device paired through the daemon survives a
       reboot without re-pairing
 
 ### M4. MATE panel applet

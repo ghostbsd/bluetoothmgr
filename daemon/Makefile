@@ -13,6 +13,13 @@ SRCS=		main.c \
 		listen.c \
 		state.c \
 		proto.c \
+		pairing.c \
+		hcsecdctl.c \
+		hosts.c \
+		hcsecd.c \
+		store.c \
+		btaddr.c \
+		sanitise.c \
 		memcheck.c
 
 LIBBTMGR_DIR=	${.CURDIR}/../lib/libbtmgr

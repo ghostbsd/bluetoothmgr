@@ -28,13 +28,21 @@ int	listen_open(const char *node);
  */
 enum listen_event {
 	LISTEN_CON_COMPL = 1,		/* Connection_Complete */
-	LISTEN_DISCON_COMPL		/* Disconnection_Complete */
+	LISTEN_DISCON_COMPL,		/* Disconnection_Complete */
+	LISTEN_AUTH_COMPL,		/* Authentication_Complete */
+	LISTEN_LINK_KEY			/* Link_Key_Notification: A6 step 6 */
 };
 
+/*
+ * Note what is missing: Link_Key_Notification carries the 16 byte link key
+ * itself, and this struct deliberately does not. A3.3 forbids logging or
+ * transmitting key material, and the daemon has no use for the value. Only
+ * the fact that a key was learned, and for which device, reaches the caller.
+ */
 struct listen_report {
 	enum listen_event	kind;
 	uint8_t			status;		/* 0 = success */
-	bdaddr_t		addr;		/* valid for CON_COMPL */
+	bdaddr_t		addr;		/* CON_COMPL and LINK_KEY */
 	uint16_t		handle;
 };
 

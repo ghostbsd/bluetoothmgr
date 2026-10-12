@@ -141,6 +141,7 @@ const char	*btmgr_type_name(enum btmgr_type);
 
 int		 btmgr_connect_start(const char *, const bdaddr_t *);
 int		 btmgr_disconnect_start(const char *, uint16_t, uint8_t);
+int		 btmgr_authenticate_start(const char *, uint16_t);
 int		 btmgr_set_scan(const char *, int, int);
 
 __END_DECLS

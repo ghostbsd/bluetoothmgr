@@ -213,7 +213,8 @@ The daemon MUST perform pairing in exactly this order:
 2. Write the alias to `/etc/bluetooth/hosts` (A2).
 3. Write or update the device's block in `hcsecd.conf`, including the PIN (A1).
 4. Reload `hcsecd` (A8.1). Wait for it to complete.
-5. **Only now** issue `Create_Connection` and let pairing proceed.
+5. **Only now** issue `Create_Connection`, then on `Connection_Complete` issue
+   `Authentication_Requested` for that handle (A6.5).
 6. On `Link_Key_Notification`, reload `hcsecd` again to force
    `dump_keys_file()` to flush the new key to disk (A8.3).
 7. Update `devices.json` (A4).
@@ -224,7 +225,18 @@ The daemon MUST perform pairing in exactly this order:
   drops the in-flight pairing.
 - **A6.3** If step 4 fails, the daemon MUST abort and MUST NOT attempt step 5.
 - **A6.4** On abort at any step after 2, the daemon SHOULD roll the config back
-  to its prior content rather than leaving a half-written block.
+  to its prior content rather than leaving a half-written block. It SHOULD also
+  drop the link step 5 opened, since a failed authentication leaves the ACL
+  link up and A6.6 then refuses the retry.
+- **A6.5** `Create_Connection` alone is not enough. It leaves an unauthenticated
+  ACL link, which exchanges no PIN, so `Link_Key_Notification` never fires and
+  the pairing cannot complete. Authentication MUST be requested per link rather
+  than by enabling the adapter's global authentication mode, which would change
+  behaviour for every device.
+- **A6.6** The daemon MUST refuse `pair` for a device that already has a
+  connection. `Create_Connection` on an open link produces no
+  `Connection_Complete` at all, so step 5 would never report either way.
+  Being connected is not being paired; see B5.2.
 
 ## A7. Sanitisation of device-supplied strings
 
@@ -394,6 +406,11 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
   would silently turn it into a different one. The resulting failure would look
   like the device rejecting a correct PIN. The daemon MUST NOT log a PIN, per
   the same reasoning as A3.3.
+- **B4.7** While a pairing is parked, between A6 step 5 and step 6, the daemon
+  MUST refuse `pair`, `remove`, `set_alias`, `set_trusted` and `set_power` with
+  `busy`. The first four reload `hcsecd`, which A6.2 forbids; `set_power` tears
+  the stack down per A8.5. `get_state`, `scan`, `connect`, `disconnect` and
+  `set_discoverable` MUST remain available.
 
 ## B5. State object *(provisional, expect churn)*
 

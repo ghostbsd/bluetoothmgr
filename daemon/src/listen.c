@@ -189,10 +189,28 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 			changed = 1;
 			break;
 
-		case NG_HCI_EVENT_AUTH_COMPL:
-			syslog(LOG_DEBUG, "authentication complete");
+		/* A failure here is why a pairing will get no key. */
+		case NG_HCI_EVENT_AUTH_COMPL: {
+			ng_hci_auth_compl_ep	*ep;
+
 			changed = 1;
+			if ((size_t)n < sizeof(*e) + sizeof(*ep))
+				break;
+
+			ep = (ng_hci_auth_compl_ep *)(e + 1);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.kind = LISTEN_AUTH_COMPL;
+			rep.status = ep->status;
+			rep.handle = le16toh(ep->con_handle);
+
+			syslog(LOG_DEBUG, "authentication complete, status %u",
+			    ep->status);
+
+			if (cb != NULL)
+				cb(&rep, arg);
 			break;
+		}
 
 		case NG_HCI_EVENT_CON_REQ:
 			syslog(LOG_DEBUG, "incoming connection request");
@@ -214,13 +232,32 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 		/*
 		 * Root only. Its arrival means hcsecd just learned a key, and
 		 * per F7 that key is only kept if the device already has a
-		 * block in hcsecd.conf. M3 acts on this; for now it is the
-		 * single most diagnostic line in the log.
+		 * block in hcsecd.conf. This is A6 step 6, so the daemon
+		 * finishes a parked pairing here.
+		 *
+		 * The payload also holds the key itself. It is not copied into
+		 * the report: A3.3 forbids handling key material, and knowing
+		 * a key arrived is all A6 needs.
 		 */
-		case NG_HCI_EVENT_LINK_KEY_NOTIFICATION:
-			syslog(LOG_INFO, "link key notification received");
+		case NG_HCI_EVENT_LINK_KEY_NOTIFICATION: {
+			ng_hci_link_key_notification_ep	*ep;
+
 			changed = 1;
+			if ((size_t)n < sizeof(*e) + sizeof(*ep))
+				break;		/* truncated, ignore */
+
+			ep = (ng_hci_link_key_notification_ep *)(e + 1);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.kind = LISTEN_LINK_KEY;
+			bdaddr_copy(&rep.addr, &ep->bdaddr);
+
+			syslog(LOG_INFO, "link key notification received");
+
+			if (cb != NULL)
+				cb(&rep, arg);
 			break;
+		}
 
 		default:
 			break;
