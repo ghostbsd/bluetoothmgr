@@ -46,6 +46,10 @@ struct proto_cmd {
 	int		on;
 	int		has_pin;
 	char		pin[BTMGR_PIN_MAX + 1];
+
+	/* From the client's scan. Without it A2 aliases everything bt-xxxxxx. */
+	int		has_device_name;
+	char		device_name[BTMGR_NAME_SIZE];
 };
 
 /*

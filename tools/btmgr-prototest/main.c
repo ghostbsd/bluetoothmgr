@@ -263,6 +263,43 @@ test_pin(void)
 	    "a PIN containing a double quote is refused, not transliterated");
 }
 
+/* B4 pair's name. Unlike the PIN this is cosmetic, so A7.1 may rewrite it. */
+static void
+test_name(void)
+{
+	struct proto_cmd	 cmd;
+	char			 code[32];
+	char			 line[BTMGR_NAME_SIZE + 64];
+	char			 toolong[BTMGR_NAME_SIZE + 8];
+
+	printf("\nB4 the pair name\n");
+
+	ok(parse("{\"id\":5,\"cmd\":\"pair\",\"name\":\"Soundbar X900\"}", &cmd,
+	    code, sizeof(code)) == 0, "a name parses");
+	ok(cmd.has_device_name, "and is marked present");
+	eq(cmd.device_name, "Soundbar X900", "and is carried through");
+
+	ok(parse("{\"id\":5,\"cmd\":\"pair\"}", &cmd, code, sizeof(code)) == 0 &&
+	    !cmd.has_device_name, "an absent name is distinguishable from any value");
+
+	/* A quote or a control character is the sanitiser's problem, not ours. */
+	ok(parse("{\"id\":5,\"cmd\":\"pair\",\"name\":\"a \\\" quote\"}", &cmd,
+	    code, sizeof(code)) == 0, "a name containing a quote is accepted");
+	eq(cmd.device_name, "a \" quote",
+	    "unchanged, for A7.1 to transliterate later");
+
+	rejects("{\"id\":5,\"cmd\":\"pair\",\"name\":42}", "bad_json",
+	    "a non-string name is bad_json");
+	rejects("{\"id\":5,\"cmd\":\"pair\",\"name\":\"\"}", "bad_json",
+	    "an empty name is refused, keeping one spelling for absent");
+
+	memset(toolong, 'a', sizeof(toolong) - 1);
+	toolong[sizeof(toolong) - 1] = '\0';
+	(void)snprintf(line, sizeof(line),
+	    "{\"id\":5,\"cmd\":\"pair\",\"name\":\"%s\"}", toolong);
+	rejects(line, "bad_json", "a name over BTMGR_NAME_SIZE is refused");
+}
+
 int
 main(void)
 {
@@ -271,6 +308,7 @@ main(void)
 	test_addr();
 	test_scalars();
 	test_pin();
+	test_name();
 
 	if (btmgr_mc_report() != 0) {
 		printf("memcheck: allocations still live\n");

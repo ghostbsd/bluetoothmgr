@@ -305,12 +305,9 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 	}
 
 	/*
-	 * The PIN is the one field that must survive exactly. A device name is
-	 * cosmetic, so A7.1 transliterates it, but hcsecd_set() runs the PIN
-	 * through the same sanitiser, and a PIN silently rewritten is a secret
-	 * that no longer matches the one on the device. The failure then looks
-	 * like the device rejecting a correct PIN. So anything A7.1 would
-	 * change is refused here instead.
+	 * A name is cosmetic, so A7.1 transliterates it. A PIN is an exact
+	 * secret, and hcsecd_set() runs it through the same sanitiser, so
+	 * anything A7.1 would rewrite is refused here instead.
 	 */
 	v = json_object_get(root, "pin");
 	if (v != NULL) {
@@ -350,6 +347,30 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 
 		memcpy(out->pin, pin, len + 1);
 		out->has_pin = 1;
+	}
+
+	/* jansson rejects invalid UTF-8, so B1.4 is settled before we see it. */
+	v = json_object_get(root, "name");
+	if (v != NULL) {
+		const char	*nm;
+
+		if (!json_is_string(v)) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+
+		nm = json_string_value(v);
+
+		/* Absent is how "no name" is spelled, as with pin. */
+		if (nm[0] == '\0' ||
+		    strlcpy(out->device_name, nm, sizeof(out->device_name)) >=
+		    sizeof(out->device_name)) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+		out->has_device_name = 1;
 	}
 
 	json_decref(root);
