@@ -307,16 +307,22 @@ connect_pair(int *listen_fd, int *server_fd, struct btmgr_ipc **conn)
 	return (0);
 }
 
+/* Takes ownership, so each allocation has exactly one free at one point. */
+static void
+send_owned(int fd, char *line)
+{
+	if (line == NULL)
+		return;
+
+	(void)write(fd, line, strlen(line));
+	free(line);
+}
+
 /* B2: the daemon speaks first, and requests are refused until it has. */
 static void
 handshake(struct btmgr_ipc *conn, int server_fd)
 {
-	char	*line = proto_hello();
-
-	if (line == NULL)
-		return;
-	(void)write(server_fd, line, strlen(line));
-	free(line);
+	send_owned(server_fd, proto_hello());
 	(void)btmgr_ipc_dispatch(conn, NULL, NULL);
 }
 
@@ -363,7 +369,6 @@ test_request_reply(void)
 	struct btmgr_ipc	*conn;
 	struct proto_cmd	 cmd;
 	struct reply_capture	 cap;
-	char			*line;
 	int			 listen_fd, server_fd, id;
 
 	printf("\nB3.1 a request and its reply\n");
@@ -387,9 +392,7 @@ test_request_reply(void)
 	ok(id == cmd.id, "the daemon side sees that same id");
 
 	/* Answer it, exactly once, as B3.2 requires. */
-	line = proto_ok(id);
-	(void)write(server_fd, line, strlen(line));
-	free(line);
+	send_owned(server_fd, proto_ok(id));
 
 	ok(btmgr_ipc_dispatch(conn, NULL, NULL) == 0, "dispatch succeeds");
 	ok(cap.calls == 1, "the callback fired once");
@@ -411,7 +414,6 @@ test_out_of_order(void)
 	struct btmgr_ipc	*conn;
 	struct proto_cmd	 first, second;
 	struct reply_capture	 cap_first, cap_second;
-	char			*line;
 	int			 listen_fd, server_fd;
 
 	printf("\ntwo requests, answered out of order\n");
@@ -437,12 +439,8 @@ test_out_of_order(void)
 	ok(btmgr_ipc_pending_count(conn) == 2, "both are pending");
 
 	/* Answer the second one first. */
-	line = proto_error(second.id, "busy", NULL);
-	(void)write(server_fd, line, strlen(line));
-	free(line);
-	line = proto_ok(first.id);
-	(void)write(server_fd, line, strlen(line));
-	free(line);
+	send_owned(server_fd, proto_error(second.id, "busy", NULL));
+	send_owned(server_fd, proto_ok(first.id));
 
 	(void)btmgr_ipc_dispatch(conn, NULL, NULL);
 
@@ -461,7 +459,6 @@ test_events_and_strays(void)
 {
 	struct btmgr_ipc	*conn;
 	struct event_capture	 cap;
-	char			*line;
 	int			 listen_fd, server_fd;
 
 	printf("\nevents, and replies to nothing\n");
@@ -474,25 +471,19 @@ test_events_and_strays(void)
 
 	memset(&cap, 0, sizeof(cap));
 
-	line = proto_hello();
-	(void)write(server_fd, line, strlen(line));
-	free(line);
+	send_owned(server_fd, proto_hello());
 
 	ok(btmgr_ipc_dispatch(conn, capture_event, &cap) == 0, "dispatch succeeds");
 	ok(cap.calls == 1, "the event callback fired");
 	eq(cap.event_name, "hello", "with the event name");
 
 	/* An event with no handler must be dropped, not break dispatch. */
-	line = proto_hello();
-	(void)write(server_fd, line, strlen(line));
-	free(line);
+	send_owned(server_fd, proto_hello());
 	ok(btmgr_ipc_dispatch(conn, NULL, NULL) == 0,
 	    "an event with no handler is harmless");
 
 	/* A reply to an id nobody is waiting on. */
-	line = proto_ok(99999);
-	(void)write(server_fd, line, strlen(line));
-	free(line);
+	send_owned(server_fd, proto_ok(99999));
 	ok(btmgr_ipc_dispatch(conn, NULL, NULL) == 0,
 	    "a reply to an unknown id is ignored, not an error");
 

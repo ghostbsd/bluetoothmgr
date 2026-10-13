@@ -87,6 +87,24 @@ decode(const char *line, struct proto_msg *msg)
 	return (proto_parse_msg(line, strlen(line), msg));
 }
 
+/* Takes ownership, so each allocation has exactly one free at one point. */
+static int
+decode_owned(char *line, struct proto_msg *msg)
+{
+	int	 rc;
+
+	/* Zeroed first, so a failed decode still leaves a defined msg. */
+	memset(msg, 0, sizeof(*msg));
+
+	if (line == NULL)
+		return (-1);
+
+	rc = proto_parse_msg(line, strlen(line), msg);
+	free(line);
+
+	return (rc);
+}
+
 /* Assert a line is refused, and refused with the code SPEC.md B6 names. */
 static void
 rejects(const char *line, const char *wantcode, const char *what)
@@ -328,8 +346,7 @@ round_trip(const struct proto_cmd *sent, const char *what)
 
 	if (proto_parse_cmd(line, strlen(line), &got, code, sizeof(code)) != 0) {
 		ok(0, "%s (its own output failed to parse: %s)", what, code);
-		free(line);
-		return;
+		goto done;
 	}
 
 	same = got.id == sent->id &&
@@ -348,6 +365,8 @@ round_trip(const struct proto_cmd *sent, const char *what)
 	    strcmp(got.device_name, sent->device_name) == 0);
 
 	ok(same, "%s%s%s", what, same ? "" : " via ", same ? "" : line);
+
+done:
 	free(line);
 }
 
@@ -485,49 +504,30 @@ test_decode(void)
 {
 	struct proto_msg	 msg;
 	struct state		 st;
-	char			*line;
 
 	printf("\nB3.3 decoding replies and events\n");
 
 	/* Straight from proto_ok(), which is what the daemon really sends. */
-	line = proto_ok(7);
-	if (line == NULL) {
-		ok(0, "proto_ok returned NULL");
-		return;
-	}
-	ok(proto_parse_msg(line, strlen(line), &msg) == 0,
+	ok(decode_owned(proto_ok(7), &msg) == 0,
 	    "the daemon's own ok reply decodes");
 	ok(msg.kind == PROTO_MSG_REPLY, "as a reply");
 	ok(msg.request_id == 7, "with the id it was addressed to");
 	ok(msg.succeeded == 1, "and succeeded set");
-	free(line);
 
-	line = proto_error(8, "busy", "a pairing is in progress");
-	if (line == NULL) {
-		ok(0, "proto_error returned NULL");
-		return;
-	}
-	ok(proto_parse_msg(line, strlen(line), &msg) == 0,
-	    "the daemon's own error reply decodes");
+	ok(decode_owned(proto_error(8, "busy", "a pairing is in progress"),
+	    &msg) == 0, "the daemon's own error reply decodes");
 	ok(msg.kind == PROTO_MSG_REPLY, "also as a reply");
 	ok(msg.request_id == 8, "with its id");
 	ok(msg.succeeded == 0, "and succeeded clear");
 	eq(msg.error_code, "busy", "carrying the B6 code");
 	eq(msg.error_detail, "a pairing is in progress", "and the detail");
-	free(line);
 
 	/* B2.1 needs the proto number, so hello must expose it. */
-	line = proto_hello();
-	if (line == NULL) {
-		ok(0, "proto_hello returned NULL");
-		return;
-	}
-	ok(proto_parse_msg(line, strlen(line), &msg) == 0, "hello decodes");
+	ok(decode_owned(proto_hello(), &msg) == 0, "hello decodes");
 	ok(msg.kind == PROTO_MSG_EVENT, "as an event");
 	eq(msg.event_name, "hello", "named hello");
 	ok(msg.has_proto_version && msg.proto_version == BTMGR_PROTO_VERSION,
 	    "exposing the proto version B2.1 makes the client check");
-	free(line);
 
 	printf("\nthe state event\n");
 
@@ -539,12 +539,8 @@ test_decode(void)
 	st.config_readable = 1;
 	st.nconns = 0;
 
-	line = proto_state_event(&st);
-	if (line == NULL) {
-		ok(0, "proto_state_event returned NULL");
-		return;
-	}
-	ok(proto_parse_msg(line, strlen(line), &msg) == 0, "a state event decodes");
+	ok(decode_owned(proto_state_event(&st), &msg) == 0,
+	    "a state event decodes");
 	ok(msg.has_state, "and is marked as carrying state");
 	ok(msg.state.adapter_present == 1, "adapter_present survives");
 	ok(msg.state.powered == 1, "powered survives");
@@ -552,19 +548,14 @@ test_decode(void)
 	    "discoverable false survives, not defaulted true");
 	ok(msg.state.scanning == 1, "scanning survives");
 	ok(msg.state.connection_count == 0, "an empty connection list counts 0");
-	free(line);
 
 	/* One connection is what flips the applet to its connected icon. */
 	st.nconns = 1;
 	st.conns[0].handle = 72;
 	st.conns[0].acl = 1;
-	line = proto_state_event(&st);
-	if (line != NULL) {
-		ok(proto_parse_msg(line, strlen(line), &msg) == 0,
-		    "a state event with a connection decodes");
-		ok(msg.state.connection_count == 1, "and counts it");
-		free(line);
-	}
+	ok(decode_owned(proto_state_event(&st), &msg) == 0,
+	    "a state event with a connection decodes");
+	ok(msg.state.connection_count == 1, "and counts it");
 
 	/*
 	 * The adapter name comes from HCI_Read_Local_Name, so it can be invalid
