@@ -15,7 +15,13 @@
 
 #include <stddef.h>
 
-#include "state.h"
+#include "btmgr.h"
+
+/*
+ * Only proto_state_event() needs it, and only by pointer, so a frontend
+ * including this does not drag in daemon/src/state.h.
+ */
+struct state;
 
 /* SPEC.md B2. Bumped on any breaking change. */
 #define	BTMGR_PROTO_VERSION	0
@@ -62,6 +68,63 @@ struct proto_cmd {
  */
 int	proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 	    char *code, size_t codelen);
+
+#define	BTMGR_ERROR_CODE_MAX	32
+#define	BTMGR_DETAIL_MAX	256
+#define	BTMGR_EVENT_NAME_MAX	32
+
+/* SPEC.md B3.3: a message carrying id is a reply, one carrying event is not. */
+enum proto_msg_kind {
+	PROTO_MSG_REPLY = 1,
+	PROTO_MSG_EVENT
+};
+
+/* The scalars of a state event. B5's arrays wait for a UI that shows them. */
+struct proto_adapter_state {
+	int	adapter_present;
+	int	powered;
+	int	discoverable;
+	int	scanning;
+	int	config_readable;
+	int	connection_count;
+};
+
+struct proto_msg {
+	enum proto_msg_kind	kind;
+
+	/* PROTO_MSG_REPLY */
+	int			request_id;
+	int			succeeded;
+	char			error_code[BTMGR_ERROR_CODE_MAX];
+	char			error_detail[BTMGR_DETAIL_MAX];
+
+	/* PROTO_MSG_EVENT */
+	char			event_name[BTMGR_EVENT_NAME_MAX];
+
+	/* Set for the hello event, which B2.1 makes the client check. */
+	int			has_proto_version;
+	int			proto_version;
+
+	/* Set for the state event only. */
+	int			has_state;
+	struct proto_adapter_state state;
+};
+
+/*
+ * Decode one line from the daemon. Returns 0, or -1 when the line is not a
+ * valid message. An event this build does not know still decodes, with
+ * event_name set and nothing else, so new events in B7 do not break old
+ * clients.
+ */
+int	proto_parse_msg(const char *line, size_t len, struct proto_msg *out);
+
+/*
+ * Client to daemon: the inverse of proto_parse_cmd, so a round trip through
+ * both is what keeps the two from disagreeing. Only the fields proto_cmd
+ * carries can be emitted, so scan, set_alias and set_trusted wait until their
+ * fields exist. Returns NULL on bad input or allocation failure.
+ */
+char	*proto_encode_cmd(const struct proto_cmd *cmd);
 
 /* Daemon to client. Each returns a malloc'd line including its '\n'. */
 char	*proto_hello(void);
