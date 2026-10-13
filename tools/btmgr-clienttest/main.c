@@ -307,6 +307,19 @@ connect_pair(int *listen_fd, int *server_fd, struct btmgr_ipc **conn)
 	return (0);
 }
 
+/* B2: the daemon speaks first, and requests are refused until it has. */
+static void
+handshake(struct btmgr_ipc *conn, int server_fd)
+{
+	char	*line = proto_hello();
+
+	if (line == NULL)
+		return;
+	(void)write(server_fd, line, strlen(line));
+	free(line);
+	(void)btmgr_ipc_dispatch(conn, NULL, NULL);
+}
+
 static void
 teardown(int listen_fd, int server_fd, struct btmgr_ipc *conn)
 {
@@ -359,6 +372,7 @@ test_request_reply(void)
 		ok(0, "could not set up a connection");
 		return;
 	}
+	handshake(conn, server_fd);
 
 	memset(&cap, 0, sizeof(cap));
 	memset(&cmd, 0, sizeof(cmd));
@@ -406,6 +420,7 @@ test_out_of_order(void)
 		ok(0, "could not set up a connection");
 		return;
 	}
+	handshake(conn, server_fd);
 
 	memset(&cap_first, 0, sizeof(cap_first));
 	memset(&cap_second, 0, sizeof(cap_second));
@@ -455,6 +470,7 @@ test_events_and_strays(void)
 		ok(0, "could not set up a connection");
 		return;
 	}
+	handshake(conn, server_fd);
 
 	memset(&cap, 0, sizeof(cap));
 
@@ -480,10 +496,44 @@ test_events_and_strays(void)
 	ok(btmgr_ipc_dispatch(conn, NULL, NULL) == 0,
 	    "a reply to an unknown id is ignored, not an error");
 
-	/* A line that is not a message at all. */
+	teardown(listen_fd, server_fd, conn);
+}
+
+/*
+ * A line that does not parse is a B1.2 violation. Skipping it used to leave
+ * any request whose reply it was pending forever, since there is no
+ * client-side timeout.
+ */
+static void
+test_unparseable_line(void)
+{
+	struct btmgr_ipc	*conn;
+	struct proto_cmd	 cmd;
+	struct reply_capture	 cap;
+	int			 listen_fd, server_fd;
+
+	printf("\nB1.2 a line that does not parse\n");
+
+	if (connect_pair(&listen_fd, &server_fd, &conn) != 0) {
+		ok(0, "could not set up a connection");
+		return;
+	}
+	handshake(conn, server_fd);
+
+	memset(&cap, 0, sizeof(cap));
+	memset(&cmd, 0, sizeof(cmd));
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	(void)btmgr_ipc_request(conn, &cmd, capture_reply, &cap);
+	ok(btmgr_ipc_pending_count(conn) == 1, "a request is pending");
+
 	(void)write(server_fd, "not json\n", 9);
-	ok(btmgr_ipc_dispatch(conn, NULL, NULL) == 0,
-	    "an unparseable line is skipped");
+
+	errno = 0;
+	ok(btmgr_ipc_dispatch(conn, NULL, NULL) == -1 && errno == EPROTO,
+	    "dispatch reports EPROTO rather than skipping it");
+	ok(cap.calls == 1, "the pending request was failed, not left waiting");
+	eq(cap.error_code, "io_error", "with io_error");
+	ok(btmgr_ipc_pending_count(conn) == 0, "and the table was cleared");
 
 	teardown(listen_fd, server_fd, conn);
 }
@@ -501,6 +551,7 @@ test_table_full(void)
 		ok(0, "could not set up a connection");
 		return;
 	}
+	handshake(conn, server_fd);
 
 	for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
 		memset(&cmd, 0, sizeof(cmd));
@@ -538,6 +589,7 @@ test_connection_lost(void)
 		ok(0, "could not set up a connection");
 		return;
 	}
+	handshake(conn, server_fd);
 
 	memset(&cap, 0, sizeof(cap));
 	memset(&cmd, 0, sizeof(cmd));
@@ -574,6 +626,7 @@ test_send_failure_fails_all(void)
 		ok(0, "could not set up a connection");
 		return;
 	}
+	handshake(conn, server_fd);
 
 	memset(&first, 0, sizeof(first));
 	memset(&later, 0, sizeof(later));
@@ -596,6 +649,81 @@ test_send_failure_fails_all(void)
 	    "and the earlier request was failed, not left waiting");
 	eq(first.error_code, "io_error", "with io_error");
 	ok(btmgr_ipc_pending_count(conn) == 0, "the table is empty");
+
+	teardown(listen_fd, server_fd, conn);
+}
+
+/* B2.1: an incompatible daemon must not stay connected and usable. */
+static void
+test_handshake(void)
+{
+	struct btmgr_ipc	*conn;
+	struct proto_cmd	 cmd;
+	struct reply_capture	 cap;
+	char			 wrong[128];
+	int			 listen_fd, server_fd;
+
+	printf("\nB2.1 the version handshake\n");
+
+	if (connect_pair(&listen_fd, &server_fd, &conn) != 0) {
+		ok(0, "could not set up a connection");
+		return;
+	}
+
+	/* Before hello, a request would reach a daemon we have not agreed with. */
+	ok(btmgr_ipc_is_ready(conn) == 0, "a fresh connection is not ready");
+	memset(&cmd, 0, sizeof(cmd));
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	errno = 0;
+	ok(btmgr_ipc_request(conn, &cmd, NULL, NULL) == -1 && errno == ENOTCONN,
+	    "and a request before hello is refused with ENOTCONN");
+
+	handshake(conn, server_fd);
+	ok(btmgr_ipc_is_ready(conn) == 1, "after hello it is ready");
+	memset(&cmd, 0, sizeof(cmd));
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	ok(btmgr_ipc_request(conn, &cmd, NULL, NULL) == 0,
+	    "and a request is accepted");
+
+	teardown(listen_fd, server_fd, conn);
+
+	/* A daemon announcing a version we do not speak. */
+	if (connect_pair(&listen_fd, &server_fd, &conn) != 0) {
+		ok(0, "could not set up a second connection");
+		return;
+	}
+
+	memset(&cap, 0, sizeof(cap));
+	(void)snprintf(wrong, sizeof(wrong),
+	    "{\"event\":\"hello\",\"proto\":%d,\"daemon\":\"other\"}\n",
+	    BTMGR_PROTO_VERSION + 1);
+	(void)write(server_fd, wrong, strlen(wrong));
+
+	errno = 0;
+	ok(btmgr_ipc_dispatch(conn, NULL, NULL) == -1 &&
+	    errno == EPROTONOSUPPORT,
+	    "a mismatched proto makes dispatch report EPROTONOSUPPORT");
+	ok(btmgr_ipc_is_ready(conn) == 0, "the connection is not ready");
+
+	memset(&cmd, 0, sizeof(cmd));
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	errno = 0;
+	ok(btmgr_ipc_request(conn, &cmd, NULL, NULL) == -1 &&
+	    errno == EPROTONOSUPPORT,
+	    "and no further request is sent to it");
+
+	teardown(listen_fd, server_fd, conn);
+
+	/* A hello with no proto field at all is equally unusable. */
+	if (connect_pair(&listen_fd, &server_fd, &conn) != 0) {
+		ok(0, "could not set up a third connection");
+		return;
+	}
+	(void)write(server_fd, "{\"event\":\"hello\"}\n", 19);
+	errno = 0;
+	ok(btmgr_ipc_dispatch(conn, NULL, NULL) == -1 &&
+	    errno == EPROTONOSUPPORT,
+	    "a hello with no proto version is refused too");
 
 	teardown(listen_fd, server_fd, conn);
 }
@@ -623,6 +751,8 @@ main(void)
 	test_table_full();
 	test_connection_lost();
 	test_send_failure_fails_all();
+	test_handshake();
+	test_unparseable_line();
 
 	(void)unlink(sockpath);
 	(void)rmdir(dir);

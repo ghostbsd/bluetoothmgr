@@ -89,6 +89,13 @@ int		  btmgr_ipc_request(struct btmgr_ipc *conn,
 int		  btmgr_ipc_dispatch(struct btmgr_ipc *conn,
 		      btmgr_event_fn on_event, void *user_data);
 
+/*
+ * Non-zero once the daemon's hello has arrived and its proto version matched.
+ * btmgr_ipc_request() refuses until then, with ENOTCONN while waiting and
+ * EPROTONOSUPPORT once a version mismatch has been seen. B2.1.
+ */
+int		  btmgr_ipc_is_ready(const struct btmgr_ipc *conn);
+
 /* How many requests are waiting for a reply. */
 int		  btmgr_ipc_pending_count(const struct btmgr_ipc *conn);
 

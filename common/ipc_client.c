@@ -26,11 +26,18 @@ struct pending_request {
 	void		*user_data;
 };
 
+enum handshake {
+	HANDSHAKE_WAITING = 0,
+	HANDSHAKE_AGREED,
+	HANDSHAKE_REFUSED
+};
+
 struct btmgr_ipc {
 	int			 fd;
 	struct linebuf		 buf;
 	struct pending_request	 pending[BTMGR_MAX_PENDING_REQUESTS];
 	unsigned int		 next_request_id;
+	enum handshake		 handshake;
 };
 
 static struct pending_request	*claim_slot(struct btmgr_ipc *conn);
@@ -284,6 +291,16 @@ btmgr_ipc_request(struct btmgr_ipc *conn, struct proto_cmd *cmd,
 		return (-1);
 	}
 
+	/*
+	 * B2.1 again. Sending before the handshake would hand a PIN to a
+	 * daemon whose protocol we have not agreed on.
+	 */
+	if (conn->handshake != HANDSHAKE_AGREED) {
+		errno = conn->handshake == HANDSHAKE_REFUSED ?
+		    EPROTONOSUPPORT : ENOTCONN;
+		return (-1);
+	}
+
 	slot = claim_slot(conn);
 	if (slot == NULL)
 		return (-1);
@@ -348,13 +365,42 @@ btmgr_ipc_dispatch(struct btmgr_ipc *conn, btmgr_event_fn on_event,
 	 * exits right after answering still gets its reply delivered.
 	 */
 	while (btmgr_ipc_next_line(conn, &line, &len) == 1) {
-		if (proto_parse_msg(line, len, &msg) != 0)
-			continue;		/* not ours to understand */
+		/*
+		 * A line that does not parse breaks B1.2, and the reply it may
+		 * have been has now been consumed. Skipping it would leave that
+		 * request pending with nothing left to answer it. An unknown
+		 * event still decodes, so this really is malformed.
+		 */
+		if (proto_parse_msg(line, len, &msg) != 0) {
+			fail_all_pending(conn);
+			errno = EPROTO;
+			return (-1);
+		}
+
+		/*
+		 * B2.1. The connection is marked unusable rather than closed
+		 * here: freeing it would leave the caller holding a dangling
+		 * pointer, and it already closes on any -1 from this call.
+		 */
+		if (msg.kind == PROTO_MSG_EVENT &&
+		    strcmp(msg.event_name, "hello") == 0) {
+			if (!msg.has_proto_version ||
+			    msg.proto_version != BTMGR_PROTO_VERSION)
+				conn->handshake = HANDSHAKE_REFUSED;
+			else
+				conn->handshake = HANDSHAKE_AGREED;
+		}
 
 		if (msg.kind == PROTO_MSG_REPLY)
 			deliver_reply(conn, &msg);
 		else if (on_event != NULL)
 			on_event(&msg, user_data);
+
+		if (conn->handshake == HANDSHAKE_REFUSED) {
+			fail_all_pending(conn);
+			errno = EPROTONOSUPPORT;
+			return (-1);
+		}
 	}
 
 	if (filled != 0) {
@@ -377,4 +423,10 @@ btmgr_ipc_pending_count(const struct btmgr_ipc *conn)
 	}
 
 	return (count);
+}
+
+int
+btmgr_ipc_is_ready(const struct btmgr_ipc *conn)
+{
+	return (conn != NULL && conn->handshake == HANDSHAKE_AGREED);
 }
