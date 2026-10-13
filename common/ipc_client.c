@@ -9,8 +9,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "ipc_client.h"
@@ -22,6 +24,7 @@
 struct pending_request {
 	int		 in_use;
 	int		 request_id;
+	time_t		 deadline;
 	btmgr_reply_fn	 on_reply;
 	void		*user_data;
 };
@@ -38,9 +41,13 @@ struct btmgr_ipc {
 	struct pending_request	 pending[BTMGR_MAX_PENDING_REQUESTS];
 	unsigned int		 next_request_id;
 	enum handshake		 handshake;
+	int			 request_timeout;
 };
 
+static int			 await_connect(int fd);
 static struct pending_request	*claim_slot(struct btmgr_ipc *conn);
+static void			 fail_slot(struct pending_request *slot,
+				     const char *code, const char *detail);
 static void			 fail_all_pending(struct btmgr_ipc *conn);
 static void			 deliver_reply(struct btmgr_ipc *conn,
 				     const struct proto_msg *reply);
@@ -90,38 +97,71 @@ claim_slot(struct btmgr_ipc *conn)
 	return (NULL);
 }
 
+/* Release the slot, then report the failure to whoever registered it. */
+static void
+fail_slot(struct pending_request *slot, const char *code, const char *detail)
+{
+	struct proto_msg	 failure;
+	btmgr_reply_fn		 callback;
+	void			*user_data;
+
+	memset(&failure, 0, sizeof(failure));
+	failure.kind = PROTO_MSG_REPLY;
+	failure.request_id = slot->request_id;
+	failure.succeeded = 0;
+	strlcpy(failure.error_code, code, sizeof(failure.error_code));
+	strlcpy(failure.error_detail, detail, sizeof(failure.error_detail));
+
+	callback = slot->on_reply;
+	user_data = slot->user_data;
+
+	/* Released first, so the callback may issue a new request. */
+	memset(slot, 0, sizeof(*slot));
+
+	if (callback != NULL)
+		callback(&failure, user_data);
+}
+
 static void
 fail_all_pending(struct btmgr_ipc *conn)
 {
-	struct proto_msg	 failure;
-	int			 i;
+	int	 i;
 
 	for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
-		struct pending_request	*slot = &conn->pending[i];
-		btmgr_reply_fn		 callback;
-		void			*user_data;
+		if (conn->pending[i].in_use)
+			fail_slot(&conn->pending[i], "io_error",
+			    "the daemon connection closed");
+	}
+}
 
-		if (!slot->in_use)
+void
+btmgr_ipc_set_request_timeout(struct btmgr_ipc *conn, int seconds)
+{
+	if (conn != NULL && seconds > 0)
+		conn->request_timeout = seconds;
+}
+
+int
+btmgr_ipc_expire_requests(struct btmgr_ipc *conn)
+{
+	time_t	 now;
+	int	 expired = 0, i;
+
+	if (conn == NULL)
+		return (0);
+
+	now = time(NULL);
+	for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
+		struct pending_request	*slot = &conn->pending[i];
+
+		if (!slot->in_use || slot->deadline > now)
 			continue;
 
-		memset(&failure, 0, sizeof(failure));
-		failure.kind = PROTO_MSG_REPLY;
-		failure.request_id = slot->request_id;
-		failure.succeeded = 0;
-		strlcpy(failure.error_code, "io_error",
-		    sizeof(failure.error_code));
-		strlcpy(failure.error_detail, "the daemon connection closed",
-		    sizeof(failure.error_detail));
-
-		callback = slot->on_reply;
-		user_data = slot->user_data;
-
-		/* Released first, so the callback may issue a new request. */
-		memset(slot, 0, sizeof(*slot));
-
-		if (callback != NULL)
-			callback(&failure, user_data);
+		fail_slot(slot, "timeout", "the daemon never answered");
+		expired++;
 	}
+
+	return (expired);
 }
 
 static void
@@ -148,6 +188,44 @@ deliver_reply(struct btmgr_ipc *conn, const struct proto_msg *reply)
 	}
 
 	/* A reply to nothing: a late duplicate, or a daemon bug. Ignore it. */
+}
+
+/*
+ * Wait out an in-progress connect, up to BTMGR_CONNECT_TIMEOUT_MS. Returns 0
+ * once writable and error-free, -1 with errno set otherwise.
+ */
+static int
+await_connect(int fd)
+{
+	struct pollfd	 pfd;
+	socklen_t	 len;
+	int		 err, ready;
+
+	pfd.fd = fd;
+	pfd.events = POLLOUT;
+	pfd.revents = 0;
+
+	do {
+		ready = poll(&pfd, 1, BTMGR_CONNECT_TIMEOUT_MS);
+	} while (ready < 0 && errno == EINTR);
+
+	if (ready == 0) {
+		errno = ETIMEDOUT;
+		return (-1);
+	}
+	if (ready < 0)
+		return (-1);
+
+	/* Writable does not mean connected: the error lands in SO_ERROR. */
+	len = sizeof(err);
+	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0)
+		return (-1);
+	if (err != 0) {
+		errno = err;
+		return (-1);
+	}
+
+	return (0);
 }
 
 struct btmgr_ipc *
@@ -202,14 +280,7 @@ btmgr_ipc_open(const char *path)
 	sa.sun_family = AF_UNIX;
 	strlcpy(sa.sun_path, path, sizeof(sa.sun_path));
 
-	/*
-	 * Connect while still blocking. An AF_UNIX connect to a listening
-	 * socket completes in the kernel and a missing daemon fails at once,
-	 * so the EINPROGRESS dance TCP needs would be dead code. O_NONBLOCK
-	 * goes on after, for the reads and writes that can really block.
-	 */
-	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0 ||
-	    fcntl(fd, F_SETFL, O_NONBLOCK) != 0) {
+	if (fcntl(fd, F_SETFL, O_NONBLOCK) != 0) {
 		saved = errno;
 		(void)close(fd);
 		free(conn);
@@ -217,7 +288,25 @@ btmgr_ipc_open(const char *path)
 		return (NULL);
 	}
 
+	/*
+	 * An AF_UNIX connect either completes in the kernel or fails at once,
+	 * even against a full accept queue, which refuses rather than waits.
+	 * EINPROGRESS is therefore not reached here, but the wait is bounded
+	 * anyway so that a frontend's startup can never hang on it.
+	 */
+	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+		if (errno != EINPROGRESS ||
+		    await_connect(fd) != 0) {
+			saved = errno;
+			(void)close(fd);
+			free(conn);
+			errno = saved;
+			return (NULL);
+		}
+	}
+
 	conn->fd = fd;
+	conn->request_timeout = BTMGR_REQUEST_TIMEOUT_SEC;
 	linebuf_init(&conn->buf);
 
 	return (conn);
@@ -321,6 +410,7 @@ btmgr_ipc_request(struct btmgr_ipc *conn, struct proto_cmd *cmd,
 	slot->in_use = 1;
 	slot->on_reply = on_reply;
 	slot->user_data = user_data;
+	slot->deadline = time(NULL) + conn->request_timeout;
 
 	if (btmgr_ipc_send(conn, line) != 0) {
 		saved = errno;
@@ -356,6 +446,8 @@ btmgr_ipc_dispatch(struct btmgr_ipc *conn, btmgr_event_fn on_event,
 		errno = EINVAL;
 		return (-1);
 	}
+
+	(void)btmgr_ipc_expire_requests(conn);
 
 	filled = btmgr_ipc_fill(conn);
 	saved = errno;

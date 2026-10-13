@@ -24,6 +24,13 @@
 #define	BTMGR_SOCKET_PATH	"/var/run/bluetoothmgr.sock"
 
 /*
+ * A bound on connecting, so a frontend's startup cannot hang. An AF_UNIX
+ * connect does not actually wait, even on a full accept queue, so this is a
+ * backstop rather than an expected path.
+ */
+#define	BTMGR_CONNECT_TIMEOUT_MS	2000
+
+/*
  * A frontend cannot usefully have many commands outstanding, and a bounded
  * table means a buggy one cannot grow this without limit.
  */
@@ -88,6 +95,30 @@ int		  btmgr_ipc_request(struct btmgr_ipc *conn,
  */
 int		  btmgr_ipc_dispatch(struct btmgr_ipc *conn,
 		      btmgr_event_fn on_event, void *user_data);
+
+/*
+ * Longer than the daemon's own longest wait, the 60 second A6 pairing timeout,
+ * so this fires only when a reply was genuinely lost rather than slow.
+ */
+#define	BTMGR_REQUEST_TIMEOUT_SEC	90
+
+/*
+ * Override BTMGR_REQUEST_TIMEOUT_SEC for this connection. It MUST stay above
+ * the daemon's own longest wait, or a legitimately slow pairing is cut off
+ * before the daemon has answered. Affects requests made after the call.
+ */
+void		  btmgr_ipc_set_request_timeout(struct btmgr_ipc *conn, int seconds);
+
+/*
+ * Fail any request whose reply never arrived, reporting "timeout". B3.2 says
+ * the daemon answers exactly once, so this is the backstop for a daemon that
+ * does not: without it a lost reply holds its slot until the connection is
+ * replaced. Call it from the frontend's periodic timer, since a silent daemon
+ * never makes the fd readable. btmgr_ipc_dispatch() also calls it.
+ *
+ * Returns how many were failed.
+ */
+int		  btmgr_ipc_expire_requests(struct btmgr_ipc *conn);
 
 /*
  * Non-zero once the daemon's hello has arrived and its proto version matched.

@@ -728,6 +728,56 @@ test_handshake(void)
 	teardown(listen_fd, server_fd, conn);
 }
 
+/*
+ * B3.2 says the daemon answers exactly once. A daemon that does not would
+ * otherwise hold its slot until the connection is replaced, and with sixteen
+ * of those a frontend is wedged.
+ */
+static void
+test_request_timeout(void)
+{
+	struct btmgr_ipc	*conn;
+	struct proto_cmd	 cmd;
+	struct reply_capture	 cap;
+	int			 listen_fd, server_fd;
+
+	printf("\na reply that never comes\n");
+
+	if (connect_pair(&listen_fd, &server_fd, &conn) != 0) {
+		ok(0, "could not set up a connection");
+		return;
+	}
+	handshake(conn, server_fd);
+
+	memset(&cap, 0, sizeof(cap));
+	memset(&cmd, 0, sizeof(cmd));
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	(void)btmgr_ipc_request(conn, &cmd, capture_reply, &cap);
+
+	/* Nothing is due yet, so a sweep must leave it alone. */
+	ok(btmgr_ipc_expire_requests(conn) == 0,
+	    "a fresh request is not expired");
+	ok(btmgr_ipc_pending_count(conn) == 1, "and stays pending");
+
+	/* A one second timeout on the next request, then outlive it. */
+	btmgr_ipc_set_request_timeout(conn, 1);
+	memset(&cmd, 0, sizeof(cmd));
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+	(void)btmgr_ipc_request(conn, &cmd, capture_reply, &cap);
+	ok(btmgr_ipc_pending_count(conn) == 2, "two are pending");
+
+	sleep(2);
+
+	ok(btmgr_ipc_expire_requests(conn) == 1,
+	    "the one past its deadline is failed");
+	ok(cap.calls == 1, "its callback fired");
+	eq(cap.error_code, "timeout", "reporting timeout, per B6");
+	ok(btmgr_ipc_pending_count(conn) == 1,
+	    "and the other, still in date, is untouched");
+
+	teardown(listen_fd, server_fd, conn);
+}
+
 int
 main(void)
 {
@@ -753,6 +803,7 @@ main(void)
 	test_send_failure_fails_all();
 	test_handshake();
 	test_unparseable_line();
+	test_request_timeout();
 
 	(void)unlink(sockpath);
 	(void)rmdir(dir);
