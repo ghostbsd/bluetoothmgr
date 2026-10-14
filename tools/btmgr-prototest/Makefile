@@ -15,6 +15,8 @@ MAN=
 SRCS=		main.c \
 		proto.c \
 		state.c \
+		sanitise.c \
+		btaddr.c \
 		memcheck.c
 
 CFLAGS+=	-I${.CURDIR}/../../common

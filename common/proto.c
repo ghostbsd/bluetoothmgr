@@ -24,6 +24,7 @@
 
 #include "btmgr.h"
 #include "proto.h"
+#include "sanitise.h"
 #include "state.h"
 
 /*
@@ -108,15 +109,24 @@ static json_t *
 adapter_json(const struct btmgr_adapter *a)
 {
 	char	addr[BTMGR_ADDR_STRSIZE];
+	char	name[BTMGR_NAME_SIZE];
 	json_t	*o;
 
 	o = json_object();
 	if (o == NULL)
 		return (NULL);
 
-	/* a->name is whatever the controller reported, so may not be UTF-8. */
+	/*
+	 * B1.4. a->name is whatever the controller reported. Replacing here
+	 * rather than at the caller means no future filler of this struct can
+	 * reintroduce a name that json_string() refuses, which would discard
+	 * the whole state event and silently stop every client's updates.
+	 */
+	if (btmgr_sanitise_utf8(a->name, name, sizeof(name)) != 0)
+		name[0] = '\0';
+
 	if (set_string(o, "addr", bt_ntoa(&a->bdaddr, addr)) != 0 ||
-	    set_string(o, "name", a->name) != 0 ||
+	    set_string(o, "name", name) != 0 ||
 	    set_string(o, "node", a->node) != 0) {
 		json_decref(o);
 		return (NULL);

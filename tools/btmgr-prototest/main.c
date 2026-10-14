@@ -105,6 +105,19 @@ decode_owned(char *line, struct proto_msg *msg)
 	return (rc);
 }
 
+/* Takes ownership, so each allocation has exactly one free at one point. */
+static void
+line_has(char *line, const char *want, const char *what)
+{
+	if (line == NULL) {
+		ok(0, "%s (the emitter returned NULL)", what);
+		return;
+	}
+
+	ok(strstr(line, want) != NULL, "%s", what);
+	free(line);
+}
+
 /* Assert a line is refused, and refused with the code SPEC.md B6 names. */
 static void
 rejects(const char *line, const char *wantcode, const char *what)
@@ -504,6 +517,8 @@ test_decode(void)
 {
 	struct proto_msg	 msg;
 	struct state		 st;
+	char			 want[BTMGR_NAME_SIZE + 16];
+	size_t			 prefix;
 
 	printf("\nB3.3 decoding replies and events\n");
 
@@ -559,15 +574,42 @@ test_decode(void)
 
 	/*
 	 * The adapter name comes from HCI_Read_Local_Name, so it can be invalid
-	 * UTF-8. An unchecked insertion used to drop the name and still emit a
-	 * state event that looked complete.
+	 * UTF-8. B1.4 requires the bad bytes to be replaced. Returning NULL
+	 * instead, as this used to, stops every client's state updates with no
+	 * error reported anywhere.
 	 */
 	st.adapter_present = 1;
 	st.adapter.name[0] = 'u';
 	st.adapter.name[1] = (char)0xff;
 	st.adapter.name[2] = '\0';
-	ok(proto_state_event(&st) == NULL,
-	    "a non-UTF-8 adapter name fails the whole event, not just the field");
+	line_has(proto_state_event(&st), "\"name\":\"u?\"",
+	    "a non-UTF-8 adapter name is replaced, not fatal, per B1.4");
+
+	/* The longest name a controller can report, every byte of it invalid. */
+	memset(st.adapter.name, 0xff, sizeof(st.adapter.name) - 1);
+	st.adapter.name[sizeof(st.adapter.name) - 1] = '\0';
+
+	/*
+	 * Build the whole field, closing quote included. A prefix of question
+	 * marks would also match an emitter that replaced the first few bytes
+	 * and dropped the rest, so only the exact count proves the length.
+	 */
+	(void)strlcpy(want, "\"name\":\"", sizeof(want));
+	prefix = strlen(want);
+	memset(want + prefix, '?', BTMGR_NAME_SIZE - 1);
+	want[prefix + BTMGR_NAME_SIZE - 1] = '"';
+	want[prefix + BTMGR_NAME_SIZE] = '\0';
+
+	line_has(proto_state_event(&st), want,
+	    "all 248 invalid bytes are replaced, none dropped");
+
+	/*
+	 * A valid multibyte name must survive untouched, as the raw bytes:
+	 * B1.4 says the wire is UTF-8, and we pass no JSON_ENSURE_ASCII.
+	 */
+	(void)strlcpy(st.adapter.name, "caf\xc3\xa9", sizeof(st.adapter.name));
+	line_has(proto_state_event(&st), "\"name\":\"caf\xc3\xa9\"",
+	    "a valid UTF-8 name reaches the wire unescaped");
 
 	printf("\nmalformed and unknown\n");
 

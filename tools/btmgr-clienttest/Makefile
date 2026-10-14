@@ -16,6 +16,8 @@ SRCS=		main.c \
 		ipc_client.c \
 		proto.c \
 		linebuf.c \
+		sanitise.c \
+		btaddr.c \
 		memcheck.c
 
 CFLAGS+=	-I${.CURDIR}/../../common

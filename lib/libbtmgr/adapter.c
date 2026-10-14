@@ -85,8 +85,15 @@ adapter_read_extra(const char *node, struct btmgr_adapter *a)
 	    NG_HCI_OCF_READ_LOCAL_NAME);
 	r.rparam = &name_rp;
 	r.rlen = sizeof(name_rp);
-	if (bt_devreq(s, &r, 3) == 0 && name_rp.status == 0)
-		strlcpy(a->name, (const char *)name_rp.name, sizeof(a->name));
+	/*
+	 * A 248 character name carries no terminator, since the controller only
+	 * NUL pads a shorter one, so strlcpy() would read past name_rp looking
+	 * for one. a->name is one byte longer precisely to hold the terminator.
+	 */
+	if (bt_devreq(s, &r, 3) == 0 && name_rp.status == 0) {
+		memcpy(a->name, name_rp.name, sizeof(name_rp.name));
+		a->name[sizeof(name_rp.name)] = '\0';
+	}
 
 	/*
 	 * Scan enable. Bit 0 is inquiry scan, which is what makes us
