@@ -517,6 +517,8 @@ test_decode(void)
 {
 	struct proto_msg	 msg;
 	struct state		 st;
+	char			 want[BTMGR_NAME_SIZE + 16];
+	size_t			 prefix;
 
 	printf("\nB3.3 decoding replies and events\n");
 
@@ -586,8 +588,20 @@ test_decode(void)
 	/* The longest name a controller can report, every byte of it invalid. */
 	memset(st.adapter.name, 0xff, sizeof(st.adapter.name) - 1);
 	st.adapter.name[sizeof(st.adapter.name) - 1] = '\0';
-	line_has(proto_state_event(&st), "\"name\":\"????",
-	    "a name of 248 invalid bytes still emits");
+
+	/*
+	 * Build the whole field, closing quote included. A prefix of question
+	 * marks would also match an emitter that replaced the first few bytes
+	 * and dropped the rest, so only the exact count proves the length.
+	 */
+	(void)strlcpy(want, "\"name\":\"", sizeof(want));
+	prefix = strlen(want);
+	memset(want + prefix, '?', BTMGR_NAME_SIZE - 1);
+	want[prefix + BTMGR_NAME_SIZE - 1] = '"';
+	want[prefix + BTMGR_NAME_SIZE] = '\0';
+
+	line_has(proto_state_event(&st), want,
+	    "all 248 invalid bytes are replaced, none dropped");
 
 	/*
 	 * A valid multibyte name must survive untouched, as the raw bytes:
