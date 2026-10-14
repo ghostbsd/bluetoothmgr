@@ -5,12 +5,12 @@
  *
  * See listen.h for why this never writes. Two further notes:
  *
- * PLAN.md F2: an unprivileged socket is refused Link_Key_Notification,
+ * SPEC.md C1: an unprivileged socket is refused Link_Key_Notification,
  * Return_Link_Keys and Vendor events by the kernel's security filter. We ask
  * for the first anyway, because as root we want it and as a normal user the
  * kernel simply never delivers it. Asking is not an error.
  *
- * PLAN.md F8: this socket comes from bt_devopen(), which connect()s exactly
+ * SPEC.md C4: this socket comes from bt_devopen(), which connect()s exactly
  * once, so it does not suffer the unwritable-socket defect. We never write to
  * it regardless.
  */
@@ -218,7 +218,7 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 
 		/*
 		 * Observed, never answered. hcsecd replies to these. See
-		 * PLAN.md F3 and F7.
+		 * SPEC.md C2 and A3.4.
 		 */
 		case NG_HCI_EVENT_PIN_CODE_REQ:
 			syslog(LOG_INFO, "PIN code requested, hcsecd is "

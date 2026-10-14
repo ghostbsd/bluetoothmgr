@@ -7,7 +7,7 @@
  * each connected client's readability and writability, the passive HCI event
  * socket, signals, and a periodic reconcile timer.
  *
- * M2 performs no privileged operation at all. Per PLAN.md F2 the entire
+ * M2 performs no privileged operation at all. Per SPEC.md C1 the entire
  * polling path is on the kernel's unprivileged allowlist, so this can and
  * should be developed as an ordinary user:
  *
@@ -53,7 +53,7 @@
 
 #define	DEFAULT_SOCKET	"/var/run/bluetoothmgr.sock"
 #define	SOCKET_MODE	0660
-#define	RECONCILE_MS	5000		/* PLAN.md 4.4: the safety net */
+#define	RECONCILE_MS	5000		/* SPEC.md C2.1: the safety net */
 
 /*
  * Upper bound on a discoverability timeout, one hour. Bluetooth UIs offer
@@ -874,7 +874,7 @@ do_accept(struct daemon *d)
  *
  * Called whenever the adapter appears or goes away, which is how hotplug is
  * handled: devd has already built or torn down the netgraph stack by the time
- * we notice. See PLAN.md F5.
+ * we notice. See SPEC.md C3.
  */
 static void
 refresh_hci(struct daemon *d)
@@ -999,7 +999,7 @@ main(int argc, char *argv[])
 		err(1, "hcsecd_ctl_init");
 
 	/*
-	 * PLAN.md F8. A raw HCI write can return EPIPE unexpectedly, and a
+	 * SPEC.md C4. A raw HCI write can return EPIPE unexpectedly, and a
 	 * root daemon that dies on a signal because of it is unacceptable.
 	 * Ignoring it turns the failure into an errno we can actually handle.
 	 */

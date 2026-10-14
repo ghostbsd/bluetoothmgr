@@ -3,7 +3,7 @@
  *
  * state.c - build a snapshot of the world, and compare two of them.
  *
- * Everything here is unprivileged, per PLAN.md F2. The daemon's entire polling
+ * Everything here is unprivileged, per SPEC.md C1. The daemon's entire polling
  * path needs no root; only M3's operations will.
  */
 

@@ -3,7 +3,7 @@
  *
  * listen.h - passive HCI event listener.
  *
- * A raw HCI socket that only ever reads. PLAN.md F3: the kernel broadcasts
+ * A raw HCI socket that only ever reads. SPEC.md C2: the kernel broadcasts
  * every event to every raw socket whose bind address and filter match, so we
  * can watch exactly what hcsecd watches without disturbing it.
  *

@@ -2,7 +2,7 @@
 #
 # INTERNALLIB means a static libbtmgr.a that gets linked into each consumer
 # and is never installed. There is no shared object and no public ABI to
-# maintain. See PLAN.md 4.1.
+# maintain. See PLAN.md, module layout.
 
 LIB=		btmgr
 INTERNALLIB=

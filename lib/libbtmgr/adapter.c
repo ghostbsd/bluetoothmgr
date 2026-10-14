@@ -5,9 +5,9 @@
  *
  * Everything here works unprivileged. bt_devinfo() is a wrapper over nine
  * read-only ioctls, and the three HCI commands we send below are all on the
- * kernel's unprivileged allowlist. See PLAN.md F2.
+ * kernel's unprivileged allowlist. See SPEC.md C1.
  *
- * One trap worth knowing about, see PLAN.md F8: the socket bt_devenum() hands
+ * One trap worth knowing about, see SPEC.md C4: the socket bt_devenum() hands
  * to its callback can be read and ioctl'd but NEVER written to. bt_devenum()
  * connect()s that socket once per adapter, and a second connect() on a
  * non-PR_CONNREQUIRED socket makes the kernel sodisconnect() first, which sets

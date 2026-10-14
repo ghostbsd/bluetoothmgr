@@ -13,7 +13,7 @@
  *
  * With no argument it runs the three read-only views.
  *
- * The last three need root, per PLAN.md F2. They exist so the privileged
+ * The last three need root, per SPEC.md C1. They exist so the privileged
  * operations can be debugged without the daemon in the way.
  */
 

@@ -5,7 +5,7 @@
  *
  * Built on jansson. Chosen over json-glib because it is plain C with no GLib
  * dependency, which lets this file link into the GLib-free daemon and the GTK
- * clients alike. See PLAN.md section 7.
+ * clients alike. See PLAN.md, dependencies.
  *
  * A note on jansson's reference counting, since it is the one thing that
  * surprises people. json_object_set_new() and json_array_append_new() steal

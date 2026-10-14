@@ -25,18 +25,18 @@ in syslog.
 
 That is invisible from the command line and it is deterministic, not flaky.
 Getting the ordering right automatically is the single most useful thing this
-project does. Reproduced on hardware. See `PLAN.md` F7.
+project does. Reproduced on hardware. See `SPEC.md` A3.4.
 
 ## Documents
 
 | File | Contents |
 |---|---|
-| [`PLAN.md`](PLAN.md) | Research findings, architecture, build order, risks, and a C learning track |
-| [`SPEC.md`](SPEC.md) | The contract. Part A (files and ordering) is normative; Part B (IPC) is v0 and provisional |
+| [`PLAN.md`](PLAN.md) | Toolchain, dependencies, module layout, and the build order as a checklist |
+| [`SPEC.md`](SPEC.md) | The contract. Part A (files and ordering) and Part C (platform constraints) are normative; Part B (IPC) is v0 and provisional |
 
-Read `PLAN.md` sections 1 to 3 first. They are the measured ground truth, and
-three of the findings there invalidate assumptions that seem reasonable from
-the outside.
+Read `SPEC.md` Part C first. It is the measured ground truth of the base
+Bluetooth stack, and several of its constraints invalidate assumptions that
+seem reasonable from the outside.
 
 ## Probes
 
@@ -56,7 +56,7 @@ one exception is `SIOC_HCI_RAW_NODE_SET_DEBUG` in `probe2`, which must fail with
 `EPERM`, because that is the boundary being measured.
 
 If you are reproducing the datapoint on different hardware, the output of these
-three is what to compare against `PLAN.md` section 1.
+three is what to compare against `SPEC.md` C1.
 
 ## Target
 

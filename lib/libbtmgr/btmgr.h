@@ -5,7 +5,7 @@
  *
  * This is the read-only half of the project. Everything declared here works
  * as an ordinary user: enumeration, adapter state, the connection list and
- * inquiry are all on the kernel's unprivileged allowlist. See PLAN.md F2.
+ * inquiry are all on the kernel's unprivileged allowlist. See SPEC.md C1.
  *
  * Conventions used throughout, fixed here and followed by every later module:
  *
@@ -130,7 +130,7 @@ const char	*btmgr_type_name(enum btmgr_type);
 
 /*
  * ops.c - privileged. Every one of these needs root; the kernel's security
- * filter refuses them to an ordinary user. See PLAN.md F2.
+ * filter refuses them to an ordinary user. See SPEC.md C1.
  *
  * The two _start() calls hand the command to the controller and return
  * without waiting for it to finish, because Create_Connection can take the

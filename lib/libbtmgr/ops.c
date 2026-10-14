@@ -3,7 +3,7 @@
  *
  * ops.c - privileged HCI operations.
  *
- * Everything here needs root. Per PLAN.md F2 the kernel's security filter
+ * Everything here needs root. Per SPEC.md C1 the kernel's security filter
  * allows unprivileged sockets only Read_* commands plus inquiry and remote
  * name resolution; every command below is a write and returns EPERM to a
  * normal user.

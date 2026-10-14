@@ -1,7 +1,7 @@
 # BluetoothMgr — Specification
 
-Companion to `PLAN.md`. The plan carries the research and the reasoning. This
-document carries only the contract.
+Companion to `PLAN.md`. The plan carries the build order. This document carries
+the contract, and the platform constraints that contract rests on.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be interpreted
 as described in RFC 2119.
@@ -10,6 +10,7 @@ as described in RFC 2119.
 |---|---|---|
 | A | On-disk files and operation ordering | **Normative.** Verified against `../ghostbsd-src`. Stable. |
 | B | IPC protocol | **v0, provisional.** Freezes at M2 when `ipc.c` exists. |
+| C | Platform constraints of the base Bluetooth stack | **Normative.** Verified against `../ghostbsd-src` and by measurement. |
 
 Out of scope by design: applet UI behaviour, audio integration, SSP. Those are
 M6 and M7 and speccing them now would be writing fiction.
@@ -508,3 +509,91 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
 - **B7.1** The daemon MUST coalesce. It MUST NOT emit a `state` event when
   nothing changed, which is the point of the reconcile timer being a fallback
   rather than the driver.
+
+---
+
+# Part C — Platform constraints (normative)
+
+Properties of FreeBSD's Bluetooth stack, not of BluetoothMgr. They are here
+because the design rests on them and the code cites them.
+
+## C1. The privilege boundary is reads versus writes
+
+`ng_btsocket_hci_raw.c` flags a socket `PRIVILEGED` at creation from
+`priv_check(td, PRIV_NETBLUETOOTH_RAW)`. An unprivileged socket is then checked
+against the static allowlist `ng_btsocket_hci_raw_sec_filter`.
+
+- **C1.1** The allowlist covers every `Read_*` command plus `Inquiry`,
+  `Inquiry_Cancel`, `Periodic_Inquiry`, `Remote_Name_Request`,
+  `Read_Remote_Features`, `Role_Discovery` and the LE scan commands. Every
+  `Write_*`, `Create_Connection`, `Disconnect` and every `SET` ioctl requires
+  root. Measured as an ordinary user, `SIOC_HCI_RAW_NODE_SET_DEBUG` is the
+  first call to return `EPERM`.
+- **C1.2** The filter clears `Return_Link_Keys`, `Link_Key_Notification` and
+  `Vendor` for unprivileged sockets, so key material is unreadable without
+  root.
+- **C1.3** Adapter enumeration, the connection list, name resolution and
+  inquiry therefore need no privilege. The daemon holds root only for
+  `connect`, `disconnect`, `Write_Scan_Enable` and its config writes, and the
+  design MUST NOT foreclose a later split into a root helper plus an
+  unprivileged poller.
+
+## C2. HCI events are broadcast
+
+`ng_btsocket_hci_raw_data_input()` walks the socket list and delivers an
+`m_dup()` copy of each packet to every socket whose bind address and filter
+match. It is a broadcast, not a handoff.
+
+- **C2.1** The daemon MAY watch the same events `hcsecd` sees, including
+  `Connection_Complete`, `Disconnection_Complete`, `PIN_Code_Request` and
+  `Authentication_Complete`, without disturbing it. Events drive state, so the
+  reconcile timer is a fallback and not the primary mechanism.
+- **C2.2** The daemon MUST NOT answer a pairing event while `hcsecd` is
+  running. Both would send a `PIN_Code_Reply` for the same request and the
+  second receives `Command_Disallowed`. Two agents cannot both answer, which is
+  why `hcsecd` remains the pairing agent and is driven through its config per
+  A1 and A8.
+
+## C3. Hotplug belongs to devd
+
+`/etc/devd/bluetooth.conf` matches USB attach and detach for `ubt[0-9]+` and
+runs `service bluetooth quietstart` and `quietstop`.
+
+- **C3.1** The netgraph stack is built before a user could notice, so the
+  daemon MUST NOT create nodes. It observes and reports.
+- **C3.2** Polling `bt_devenum()` on the reconcile timer is sufficient.
+  `/var/run/devd.seqpacket.pipe` would give instant notification and MAY be
+  added if the latency matters.
+
+## C4. The `bt_devenum()` callback socket cannot be written to
+
+`bt_devenum()` connects its socket to a dummy node, then re-connects that same
+socket to each real node inside the loop. Raw HCI is not `PR_CONNREQUIRED`, so
+`soconnectat()` calls `sodisconnect()` first, which sets `SS_CANTSENDMORE`, and
+the following `soisconnected()` restores `SS_ISCONNECTED` without clearing it.
+The socket is connected and permanently unwritable. Reads and ioctls still
+work, which is why it goes unnoticed until the first HCI command.
+
+- **C4.1** Code inside a `bt_devenum()` callback that must send an HCI command
+  MUST open its own socket with `bt_devopen()`.
+- **C4.2** The daemon MUST install `signal(SIGPIPE, SIG_IGN)` at startup. A
+  long-lived root daemon that dies on an unexpected `EPIPE` is unacceptable,
+  and this is not the only socket it holds.
+
+This is a defect in the base system rather than in `libbluetooth`'s caller, and
+is worth an upstream report.
+
+## C5. Secure Simple Pairing is absent from the base system
+
+- **C5.1** Nothing in the tree implements SSP. `hcsecd` listens for
+  `PIN_Code_Request`, `Link_Key_Request` and `Link_Key_Notification` only. The
+  kernel files `IO_CAPABILITY_REQUEST` and `SIMPLE_PAIRING_COMPLETE` under
+  events needing no post-processing and nothing replies.
+  `NG_HCI_IO_CAPABILITY_REQUEST_REPLY` and
+  `NG_HCI_USER_CONFIRMATION_REQUEST_REPLY` are `#define`s referenced by no code
+  in `sys/`, `lib/` or `usr.sbin/`. Nothing sends
+  `Write_Simple_Pairing_Mode`, so the controller falls back to legacy PIN
+  pairing.
+- **C5.2** Every link key on such a system is therefore a legacy pairing key.
+  A report of SSP keys not persisting is describing A3.4, which has a separate
+  and concrete cause. The two MUST be kept apart when debugging.
