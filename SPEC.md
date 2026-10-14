@@ -175,33 +175,28 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
   authorization boundary; A5.3 is.
 - **A5.2** The daemon MUST `unlink()` a stale socket at startup, and MUST remove
   it on clean shutdown.
-- **A5.3** State-changing commands MUST be refused unless the peer is root or
-  has an active GUI session. Read-only commands MAY be served to any peer that
-  got through the filesystem permissions.
+- **A5.3** Every command MUST be refused unless the peer is root, or the peer
+  process belongs to an active GUI session as A9 defines one. This is a desktop
+  application, so a peer that is not in a GUI session has no business on this
+  socket at all, read-only commands included.
+
+  Several GUI sessions MAY be active at once. A peer in any of them is allowed,
+  with no further distinction between users.
+
+  A uid matching a GUI session's user is NOT sufficient. The test is on the
+  peer process, per A9.4, so a peer on `ssh` or a text console is refused even
+  while that same user is logged into the GUI at that moment.
 
   Peer uid and pid come from `getsockopt(LOCAL_PEERCRED)`, since `struct xucred`
-  carries `cr_pid`. Sessions come from `getutxent()` over `/var/run/utx.active`,
-  which only root can write.
-
-  A GUI session is a `USER_PROCESS` record whose `ut_line` or `ut_host` begins
-  with `:`. Both fields matter: lightdm's record is on line `:0`, while the
-  session leader `mate-session` is on line `ttyv8` with host `:0`. A console
-  login with no host is not a GUI session, and `ssh` on `pts/N` is not either.
-
-  The peer's uid MUST match such a session's user AND its pid MUST descend from
-  that session's pid, walked with `sysctl kern.proc.pid`. Uid alone would
-  authorize the same user's ssh session.
-
-  The daemon MUST confirm the session process still exists and started no later
-  than the record's login time, since a crashed display manager can leave a
-  record behind and the pid can be reused.
+  carries `cr_pid`. `getpeereid()` reports uid and gid only, so it cannot
+  supply the pid A9.4 needs.
 
 ## A6. Pairing sequence (the ordering constraint)
 
 This is the single most important rule in Part A. It follows from `hcsecd`
 calling `get_key(bdaddr, 1)` with exact matching in its
 `Link_Key_Notification` handler, while the PIN and link-key *request* handlers
-use `0` and fall back to the default entry. See `PLAN.md` F7.
+use `0` and fall back to the default entry. See A3.4.
 
 A device with no block in `hcsecd.conf` will **appear** to pair, because the
 default entry answers the PIN request. The resulting link key is then discarded,
@@ -312,6 +307,33 @@ strict grammars, plus syslog.
   tears down the netgraph stack. This is not equivalent to BlueZ's adapter
   power-off and the UI MUST make the difference visible.
 
+## A9. `/var/run/utx.active`
+
+The utmpx database of current logins, read with `getutxent(3)`. Mode `0644`,
+owner `root:wheel`, so only root can write it. Not ours: `login(1)`, `sshd` and
+the display manager write it. This file is the input to A5.3.
+
+- **A9.1** GhostBSD writes two records for one graphical login: `lightdm` on
+  line `:0`, and the session leader `mate-session` on line `ttyv8` with host
+  `:0`.
+- **A9.2** A GUI session is a `USER_PROCESS` record whose `ut_line` **or**
+  `ut_host` begins with `:`. Both fields are required by A9.1: matching
+  `ut_line` alone misses `mate-session`, which is the record that carries the
+  logged-in user.
+- **A9.3** A text console login, which has no host, is not a GUI session.
+  Neither is `ssh` on `pts/N`.
+- **A9.4** The peer's pid MUST descend from the `ut_pid` of a GUI session
+  record, walked with `sysctl kern.proc.pid`. This is what refuses `ssh` and
+  console peers, since a uid test cannot: a user at the GUI who also logs in
+  over `ssh` presents the same uid on both.
+- **A9.5** The daemon MUST confirm the session process still exists and started
+  no later than the record's `ut_tv`. A crashed display manager leaves a record
+  behind and the pid can be reused.
+- **A9.6** If the file is absent, empty or unreadable, the daemon MUST refuse
+  every command. A file it cannot read MUST NOT read as no restriction.
+- **A9.7** The check MUST run per command, not once on accept. A session can
+  end while a client stays connected.
+
 ---
 
 # Part B — IPC protocol v0 (provisional)
@@ -375,21 +397,22 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
 
 ## B4. Commands
 
-| `cmd` | Fields | Privileged | Notes |
-|---|---|---|---|
-| `get_state` | | no | Full snapshot, same shape as the `state` event |
-| `scan` | `action`: `start`\|`stop`, `duration` | no | Inquiry. Results arrive as `device_found` events |
-| `connect` | `addr` | yes | |
-| `disconnect` | `addr` | yes | |
-| `pair` | `addr`, `pin` | yes | Executes A6 in full |
-| `remove` | `addr` | yes | Drops the `hcsecd.conf` block, the key, and the store entry |
-| `set_power` | `on` | yes | See A8.5 |
-| `set_discoverable` | `timeout` or `on` | yes | `Write_Scan_Enable`. `timeout` 0 means off. At least one field MUST be present: a request carrying neither is `bad_json`, not "off". `timeout` MUST be 0..3600, checked before the millisecond conversion |
-| `set_alias` | `addr`, `alias` | yes | Subject to A2.3 |
-| `set_trusted` | `addr`, `trusted` | yes | Store only, no HCI effect |
+| `cmd` | Fields | Notes |
+|---|---|---|
+| `get_state` | | Full snapshot, same shape as the `state` event |
+| `scan` | `action`: `start`\|`stop`, `duration` | Inquiry. Results arrive as `device_found` events |
+| `connect` | `addr` | |
+| `disconnect` | `addr` | |
+| `pair` | `addr`, `pin` | Executes A6 in full |
+| `remove` | `addr` | Drops the `hcsecd.conf` block, the key, and the store entry |
+| `set_power` | `on` | See A8.5 |
+| `set_discoverable` | `timeout` or `on` | `Write_Scan_Enable`. `timeout` 0 means off. At least one field MUST be present: a request carrying neither is `bad_json`, not "off". `timeout` MUST be 0..3600, checked before the millisecond conversion |
+| `set_alias` | `addr`, `alias` | Subject to A2.3 |
+| `set_trusted` | `addr`, `trusted` | Store only, no HCI effect |
 
-- **B4.1** Commands marked privileged MUST be refused per A5.3 with error
-  `not_permitted`.
+- **B4.1** Every command MUST be refused per A5.3 with error `not_permitted`.
+  There is no unprivileged subset: A5.3 admits only root and a GUI session
+  peer, and both may use the whole command set.
 - **B4.2** `scan` while a scan is running MUST be idempotent, not an error.
 - **B4.3** Several requests MAY be outstanding for the same device. One
   completion event is the answer to all of them, so the daemon MUST fan the
