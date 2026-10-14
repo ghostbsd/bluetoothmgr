@@ -17,6 +17,7 @@
 #include "btaddr.h"
 #include "sanitise.h"
 
+static size_t	 utf8_sequence_len(const unsigned char *s, size_t avail);
 static int	 alias_byte_ok(unsigned char c);
 static int	 is_separator(unsigned char c);
 static int	 is_alnum(unsigned char c);
@@ -55,6 +56,101 @@ trim_separators(char *s, size_t len)
 	s[len] = '\0';
 
 	return (len);
+}
+
+/*
+ * How many bytes of a valid UTF-8 sequence start at s, or 0 if none does.
+ *
+ * The ranges are RFC 3629's, not the naive "lead byte says the length": an
+ * overlong encoding, a surrogate half and anything above U+10FFFF are all
+ * rejected here, because jansson rejects them too. A sanitiser that let them
+ * through would still produce a name json_string() refuses.
+ */
+static size_t
+utf8_sequence_len(const unsigned char *s, size_t avail)
+{
+	unsigned char	 lead, second_low, second_high;
+	size_t		 len, i;
+
+	if (avail == 0)
+		return (0);
+
+	lead = s[0];
+
+	if (lead <= 0x7f)
+		return (1);
+
+	/* Continuation bytes and the always-invalid leads cannot start one. */
+	if (lead <= 0xc1 || lead >= 0xf5)
+		return (0);
+
+	second_low = 0x80;
+	second_high = 0xbf;
+
+	if (lead <= 0xdf) {
+		len = 2;
+	} else if (lead <= 0xef) {
+		len = 3;
+		if (lead == 0xe0)
+			second_low = 0xa0;	/* else overlong */
+		else if (lead == 0xed)
+			second_high = 0x9f;	/* else a surrogate half */
+	} else {
+		len = 4;
+		if (lead == 0xf0)
+			second_low = 0x90;	/* else overlong */
+		else if (lead == 0xf4)
+			second_high = 0x8f;	/* else above U+10FFFF */
+	}
+
+	if (avail < len)
+		return (0);
+
+	if (s[1] < second_low || s[1] > second_high)
+		return (0);
+
+	for (i = 2; i < len; i++) {
+		if (s[i] < 0x80 || s[i] > 0xbf)
+			return (0);
+	}
+
+	return (len);
+}
+
+/* B1.4. */
+int
+btmgr_sanitise_utf8(const char *in, char *out, size_t outlen)
+{
+	const unsigned char	*bytes;
+	size_t			 i, len, seq;
+
+	if (in == NULL || out == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+
+	len = strlen(in);
+	if (outlen < len + 1) {
+		errno = ENAMETOOLONG;
+		return (-1);
+	}
+
+	bytes = (const unsigned char *)in;
+
+	for (i = 0; i < len; ) {
+		seq = utf8_sequence_len(bytes + i, len - i);
+		if (seq == 0) {
+			out[i] = '?';
+			i++;
+			continue;
+		}
+
+		memcpy(out + i, bytes + i, seq);
+		i += seq;
+	}
+	out[len] = '\0';
+
+	return (0);
 }
 
 /* A7.1. */

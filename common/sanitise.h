@@ -28,6 +28,14 @@
 int	btmgr_sanitise_quoted(const char *in, char *out, size_t outlen);
 
 /*
+ * B1.4. Replace every byte that is not part of a valid UTF-8 sequence with
+ * '?', so a name the controller reported can be emitted as JSON. Output is
+ * never longer than the input, so outlen of strlen(in) + 1 suffices. Returns
+ * 0, or -1 with EINVAL or ENAMETOOLONG.
+ */
+int	btmgr_sanitise_utf8(const char *in, char *out, size_t outlen);
+
+/*
  * A7.2, A7.4, A2.3. Transliterate name to [A-Za-z0-9._-], collapse runs of
  * '_', trim leading and trailing separators, truncate to BTMGR_ALIAS_MAX. If
  * no letter or digit survives, fall back to "bt-" plus the last three octets.

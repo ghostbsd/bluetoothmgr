@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <jansson.h>
+
 #include "sanitise.h"
 
 /* Must come after the system headers: it redefines malloc and friends. */
@@ -31,6 +33,7 @@ static void	 quoted_eq(const char *in, const char *want, const char *what);
 static void	 alias_eq(const char *name, const char *want, const char *what);
 static void	 suffix_eq(const char *stem, unsigned int n, const char *want,
 		     const char *what);
+static void	 utf8_eq(const char *in, const char *want, const char *what);
 
 static void
 ok(int cond, const char *fmt, ...)
@@ -129,6 +132,38 @@ suffix_eq(const char *stem, unsigned int n, const char *want, const char *what)
 		return;
 	}
 	eq(out, want, what);
+}
+
+/*
+ * Sanitise, then require that jansson itself accepts the result. Our table and
+ * jansson's validator have to agree: if ours is the more permissive, the name
+ * still kills the state event, which is the whole bug B1.4 describes.
+ */
+static void
+utf8_eq(const char *in, const char *want, const char *what)
+{
+	char	 out[512];
+	json_t	*str;
+
+	poison(out, sizeof(out));
+
+	if (btmgr_sanitise_utf8(in, out, sizeof(out)) != 0) {
+		ok(0, "%s (call failed: %s)", what, strerror(errno));
+		return;
+	}
+	if (strcmp(out, want) != 0) {
+		eq(out, want, what);
+		return;
+	}
+
+	str = json_string(out);
+	if (str == NULL) {
+		ok(0, "%s (jansson still refuses the output)", what);
+		return;
+	}
+	json_decref(str);
+
+	ok(1, "%s", what);
 }
 
 static void
@@ -328,6 +363,59 @@ test_valid(void)
 	ok(!btmgr_alias_is_valid("1:2:3:4:5:6"), "an address-like alias is not");
 }
 
+static void
+test_utf8(void)
+{
+	char	 out[8];
+
+	printf("\nB1.4 UTF-8 in reported names\n");
+
+	utf8_eq("speaker", "speaker", "ASCII passes through");
+	utf8_eq("", "", "the empty name is left empty");
+	utf8_eq("caf\xc3\xa9", "caf\xc3\xa9", "a 2 byte sequence survives");
+	utf8_eq("20\xe2\x82\xac", "20\xe2\x82\xac", "a 3 byte sequence survives");
+	utf8_eq("\xf0\x9d\x84\x9e", "\xf0\x9d\x84\x9e",
+	    "a 4 byte sequence survives");
+
+	/* One replacement per bad byte, so a good sequence after one resyncs. */
+	utf8_eq("\x80""ok", "?ok", "a lone continuation byte is replaced");
+	utf8_eq("a\xff""b", "a?b", "0xff can never appear in UTF-8");
+	utf8_eq("caf\xc3", "caf?", "a 2 byte sequence cut short by the NUL");
+	utf8_eq("\xe2\x82", "??", "a 3 byte sequence cut short");
+	utf8_eq("\xc3""x", "?x", "a lead byte whose continuation is ASCII");
+
+	/*
+	 * The cases a length-only reading of the lead byte would accept.
+	 * jansson rejects all four, so we must too.
+	 */
+	utf8_eq("\xc0\x80", "??", "an overlong 2 byte NUL is refused");
+	utf8_eq("\xe0\x80\x80", "???", "an overlong 3 byte form is refused");
+	utf8_eq("\xed\xa0\x80", "???", "a surrogate half is refused");
+	utf8_eq("\xf4\x90\x80\x80", "????",
+	    "a code point above U+10FFFF is refused");
+	utf8_eq("\xf5\x80\x80\x80", "????", "so is a lead byte above 0xf4");
+
+	/* The boundaries themselves, which must still pass. */
+	utf8_eq("\xc2\x80", "\xc2\x80", "U+0080, the lowest 2 byte form");
+	utf8_eq("\xe0\xa0\x80", "\xe0\xa0\x80", "U+0800, the lowest 3 byte form");
+	utf8_eq("\xed\x9f\xbf", "\xed\x9f\xbf", "U+D7FF, just below the surrogates");
+	utf8_eq("\xee\x80\x80", "\xee\x80\x80", "U+E000, just above them");
+	utf8_eq("\xf0\x90\x80\x80", "\xf0\x90\x80\x80",
+	    "U+10000, the lowest 4 byte form");
+	utf8_eq("\xf4\x8f\xbf\xbf", "\xf4\x8f\xbf\xbf", "U+10FFFF, the highest");
+
+	/* A7.1 leaves control bytes alone to this function's eye. */
+	utf8_eq("a\tb", "a\tb", "a control character is not this function's job");
+
+	poison(out, sizeof(out));
+	ok(btmgr_sanitise_utf8("abcdefgh", out, sizeof(out)) == -1 &&
+	    errno == ENAMETOOLONG, "a name that will not fit is refused");
+	ok(btmgr_sanitise_utf8(NULL, out, sizeof(out)) == -1 &&
+	    errno == EINVAL, "a NULL name is refused");
+	ok(btmgr_sanitise_utf8("a", NULL, sizeof(out)) == -1 &&
+	    errno == EINVAL, "a NULL output is refused");
+}
+
 int
 main(void)
 {
@@ -337,6 +425,7 @@ main(void)
 	test_suffix();
 	test_addrlike();
 	test_valid();
+	test_utf8();
 
 	printf("\n%d checks, %d failures\n", checks, failures);
 

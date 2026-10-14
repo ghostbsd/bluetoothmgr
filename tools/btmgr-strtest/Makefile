@@ -15,11 +15,15 @@ SRCS=		main.c \
 		memcheck.c
 
 CFLAGS+=	-I${.CURDIR}/../../common
+CFLAGS+=	-I/usr/local/include
 CFLAGS+=	-Wall -Wextra
 
 # See daemon/Makefile: a command-line CFLAGS assignment would replace the
 # whole variable and silently drop every -I above.
 CFLAGS+=	${BTMGR_CFLAGS}
+
+# The B1.4 checks cross-check our UTF-8 table against jansson's validator.
+LDADD=		-L/usr/local/lib -ljansson
 
 # A test harness, not something to install.
 BINDIR?=	/usr/local/bin
