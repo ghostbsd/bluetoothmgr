@@ -19,6 +19,7 @@
 
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/ucred.h>
 #include <sys/un.h>
 
 #include <errno.h>
@@ -38,6 +39,7 @@
 #include "memcheck.h"	/* IWYU pragma: keep */
 
 static int	set_nonblock(int fd);
+static void	read_peer_cred(struct client *c);
 static int	buf_append(char **buf, size_t *len, size_t *cap,
 		    const char *data, size_t n, size_t limit);
 
@@ -93,6 +95,39 @@ buf_append(char **buf, size_t *len, size_t *cap, const char *data, size_t n,
 	*len += n;
 
 	return (0);
+}
+
+/*
+ * A5.3 needs the peer's pid, which getpeereid() does not report. xucred keeps
+ * cr_pid in a union with an old unused pointer, so cr_version has to be right
+ * before the pid means anything.
+ *
+ * On failure the fields are left unusable rather than zeroed: uid 0 and pid 0
+ * would both read as privileged.
+ */
+static void
+read_peer_cred(struct client *c)
+{
+	struct xucred	cred;
+	socklen_t	len;
+
+	c->uid = (uid_t)-1;
+	c->gid = (gid_t)-1;
+	c->pid = -1;
+
+	len = sizeof(cred);
+	if (getsockopt(c->fd, SOL_LOCAL, LOCAL_PEERCRED, &cred, &len) < 0)
+		return;
+
+	if (len != sizeof(cred) || cred.cr_version != XUCRED_VERSION)
+		return;
+
+	c->uid = cred.cr_uid;
+	c->gid = cred.cr_gid;
+
+	/* pid 0 is the kernel, so it is never a real peer. */
+	if (cred.cr_pid > 0)
+		c->pid = cred.cr_pid;
 }
 
 int
@@ -170,14 +205,7 @@ ipc_accept(int lfd)
 
 	c->fd = fd;
 
-	/*
-	 * SPEC.md A5.3. Recorded now so M3 can refuse state-changing commands
-	 * from a peer that is neither root nor in the socket's group.
-	 */
-	if (getpeereid(fd, &c->uid, &c->gid) < 0) {
-		c->uid = (uid_t)-1;
-		c->gid = (gid_t)-1;
-	}
+	read_peer_cred(c);
 
 	return (c);
 }

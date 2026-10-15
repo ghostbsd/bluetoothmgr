@@ -20,6 +20,7 @@ SRCS=		main.c \
 		store.c \
 		btaddr.c \
 		sanitise.c \
+		session.c \
 		memcheck.c
 
 LIBBTMGR_DIR=	${.CURDIR}/../lib/libbtmgr

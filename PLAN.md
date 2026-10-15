@@ -152,7 +152,8 @@ B5.2. That difference is the A3.4 failure mode.
 ## M4: MATE panel applet
 
 - [x] `common/ipc_client.c`, the client half of the protocol, with `common/linebuf.c` underneath it
-- [ ] A5.3 and A9: refuse every command unless the peer is root or its process belongs to a GUI session, from `getsockopt(LOCAL_PEERCRED)` and `getutxent()`. Replaces the socket-group check M3a built
+- [x] A5.3 and A9: refuse every command unless the peer is root or its process belongs to a GUI session, from `getsockopt(LOCAL_PEERCRED)` and `getutxent()`. Replaces the socket-group check M3a built
+- [x] Verified on hardware: a GUI terminal as an ordinary user is served, a console login is refused with `not_permitted` and gets no `state` event, root is served from anywhere
 - [ ] Decode the `connections` array in `proto_parse_msg()`, which today counts it and discards it, so a frontend can list devices
 - [ ] Applet skeleton, popup, icon states: absent, off, on, connected
 - [ ] Show and hide driven by `adapter_present`

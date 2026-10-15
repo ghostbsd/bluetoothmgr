@@ -34,8 +34,11 @@ struct client {
 	size_t		 out_cap;
 
 	int		 want_write;	/* EVFILT_WRITE is currently enabled */
-	uid_t		 uid;		/* peer, from getpeereid() */
+
+	/* Peer credentials, from LOCAL_PEERCRED. A5.3 needs the pid. */
+	uid_t		 uid;
 	gid_t		 gid;
+	pid_t		 pid;		/* -1 when the kernel did not report one */
 
 	struct client	*next;
 };
