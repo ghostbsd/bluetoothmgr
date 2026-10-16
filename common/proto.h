@@ -79,14 +79,30 @@ enum proto_msg_kind {
 	PROTO_MSG_EVENT
 };
 
-/* The scalars of a state event. B5's arrays wait for a UI that shows them. */
+/* One live connection from a state event, mirroring struct btmgr_conn. */
+struct proto_connection {
+	bdaddr_t	addr;
+	int		handle;
+	int		acl;		/* link "acl", otherwise "sco" */
+	int		encrypted;
+	int		master;		/* role "master", otherwise "slave" */
+};
+
 struct proto_adapter_state {
 	int	adapter_present;
 	int	powered;
 	int	discoverable;
 	int	scanning;
 	int	config_readable;
+
+	/*
+	 * How many of connections[] were decoded, which is the array's length
+	 * capped at BTMGR_MAX_CONNS. The daemon cannot report more than that,
+	 * so a longer array means a daemon we do not understand, and dropping
+	 * the tail beats discarding the event.
+	 */
 	int	connection_count;
+	struct proto_connection connections[BTMGR_MAX_CONNS];
 };
 
 struct proto_msg {
