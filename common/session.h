@@ -21,11 +21,10 @@
 struct utmpx;
 
 /*
- * How far up the parent chain to look for the session leader. A desktop puts a
- * handful of processes between a session leader and an application; the bound
- * is only here so a malformed chain cannot loop forever.
+ * Loop protection, not a policy limit: the walk ends at init long before this.
+ * No legitimate chain is refused for being deep.
  */
-#define	BTMGR_SESSION_MAX_DEPTH	64
+#define	BTMGR_SESSION_MAX_DEPTH	1024
 
 /*
  * Non-zero when the peer may use the socket: root, or a process descended from
