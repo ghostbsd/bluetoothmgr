@@ -33,17 +33,14 @@ struct utmpx;
  */
 int	btmgr_session_peer_allowed(uid_t peer_uid, pid_t peer_pid);
 
-/* Non-zero if pid is ancestor, or descends from it. */
-int	btmgr_session_descends_from(pid_t pid, pid_t ancestor);
+/* A9.4. Non-zero if pid is in the session led by leader. */
+int	btmgr_session_belongs_to(pid_t pid, pid_t leader);
 
 /* A9.2. */
 int	btmgr_session_record_is_gui(const struct utmpx *ut);
 
 /* A9.5, and the record's leader must run as peer_uid. */
 int	btmgr_session_leader_matches(const struct utmpx *ut, uid_t peer_uid);
-
-/* A5.4. Taken at accept, checked again later, since pids are reused. */
-int	btmgr_session_peer_start(pid_t pid, struct timeval *out);
 
 /*
  * Read the utmpx database from path instead of /var/run/utx.active. For tests

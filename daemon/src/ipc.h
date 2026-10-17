@@ -41,9 +41,9 @@ struct client {
 	gid_t		 gid;
 	pid_t		 pid;		/* -1 when the kernel did not report one */
 
-	/* A5.4. The peer's start time at accept, to pin the pid to a process. */
-	struct timeval	 start;
-	int		 have_start;
+	/* A5.5. Who sent the bytes now buffered, from SCM_CREDS2. */
+	pid_t		 send_pid;
+	int		 send_mixed;	/* more than one sender in one line */
 
 	struct client	*next;
 };

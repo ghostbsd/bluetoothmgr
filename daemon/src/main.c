@@ -135,7 +135,6 @@ static void	reconcile(struct daemon *d);
 static void	refresh_hci(struct daemon *d);
 static void	reply(struct daemon *d, struct client *c, char *line);
 static int	blocked_while_pairing(const char *cmd);
-static int	peer_unchanged(const struct client *c);
 static int	client_count(const struct daemon *d);
 static struct pair_ops	pair_ops_for(struct daemon *d);
 static void	finish_pairing(struct daemon *d, const bdaddr_t *addr);
@@ -198,13 +197,7 @@ broadcast(struct daemon *d, const char *line)
 	for (c = d->clients; c != NULL; c = next) {
 		next = c->next;
 
-		/* A5.4, as in handle_line(): the pid may be somebody else now. */
-		if (!peer_unchanged(c)) {
-			drop_client(d, c);
-			continue;
-		}
-
-		/* A5.5. Dropped, not skipped: queued state would flush later. */
+		/* A5.4. Dropped, not skipped: queued state would flush later. */
 		if (!btmgr_session_peer_allowed(c->uid, c->pid)) {
 			drop_client(d, c);
 			continue;
@@ -291,28 +284,6 @@ reply(struct daemon *d, struct client *c, char *line)
 
 	if (c->want_write)
 		(void)kq_add(d->kq, (uintptr_t)c->fd, EVFILT_WRITE, c);
-}
-
-/*
- * A5.4. Still the same process behind that pid? A pid alone identifies nothing
- * once its process exits, and the next use of it could be a GUI descendant.
- */
-static int
-peer_unchanged(const struct client *c)
-{
-	struct timeval	 now;
-
-	if (c->uid == 0)
-		return (1);
-
-	if (!c->have_start)
-		return (0);
-
-	if (btmgr_session_peer_start(c->pid, &now) != 0)
-		return (0);
-
-	return (now.tv_sec == c->start.tv_sec &&
-	    now.tv_usec == c->start.tv_usec);
 }
 
 /*
@@ -602,8 +573,10 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 	char			 code[32];
 	int			 parsed;
 
-	/* A5.4. The process behind that pid has gone, so the socket is not its. */
-	if (!peer_unchanged(c)) {
+	/* A5.5. Two senders in one line is one splicing into the other. */
+	if (c->send_mixed) {
+		syslog(LOG_WARNING, "dropping client uid %d: one line, "
+		    "more than one sending process", (int)c->uid);
 		drop_client(d, c);
 		return;
 	}
@@ -612,7 +585,7 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 	parsed = proto_parse_cmd(line, len, &cmd, code, sizeof(code));
 
 	/* A5.3, re-checked per command per A9.7: a session can end mid-connection. */
-	if (!btmgr_session_peer_allowed(c->uid, c->pid)) {
+	if (!btmgr_session_peer_allowed(c->uid, c->send_pid)) {
 		reply(d, c, proto_error(cmd.id, "not_permitted",
 		    "not root and not in a GUI session"));
 		return;

@@ -191,18 +191,17 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
   Peer uid and pid come from `getsockopt(LOCAL_PEERCRED)`, since `struct xucred`
   carries `cr_pid`. `getpeereid()` reports uid and gid only, so it cannot
   supply the pid A9.4 needs.
-- **A5.4** The daemon MUST record the peer's start time when it accepts the
-  connection and MUST confirm it still matches before authorizing, since a pid
-  identifies a process only while that process lives. On a mismatch it MUST
-  drop the connection rather than refuse the command, so a client reconnects
-  and is judged afresh.
-- **A5.5** Unsolicited events are subject to A5.3 as well. The daemon MUST NOT
+- **A5.4** Unsolicited events are subject to A5.3 as well. The daemon MUST NOT
   send the `state` event on accept, nor any broadcast, to a peer A5.3 would
-  refuse.
-- **A5.6** *Known limitation.* `LOCAL_PEERCRED` is cached at connect, so an
-  authorized process that passes its connected descriptor to another process
-  hands over its authorization with it. A5.4 stops the pid-reuse case but not a
-  live cooperating sender, and no peer-credential scheme can.
+  refuse. An event has no sender, so it is judged on the connecting peer.
+- **A5.5** For a command the peer is the process that sent it, not the one that
+  connected. The daemon MUST set `LOCAL_CREDS_PERSISTENT` on each accepted
+  socket before its first read and take the sender from `sc_pid` of the
+  `SCM_CREDS2` message the kernel attaches to every send. A message carrying no
+  such credentials MUST authorize nothing. A5.3 and A9.4 apply to that pid.
+
+  A line assembled from sends with differing `sc_pid` MUST close the
+  connection: a second sender is splicing into an authorized stream.
 
 ## A6. Pairing sequence (the ordering constraint)
 
@@ -340,10 +339,16 @@ the display manager write it. This file is the input to A5.3.
   be bounded by the field size, which carries no terminator when full.
 - **A9.3** A text console login, which has no host, is not a GUI session.
   Neither is `ssh` on `pts/N`.
-- **A9.4** The peer's pid MUST descend from the `ut_pid` of a GUI session
-  record, walked with `sysctl kern.proc.pid`. This is what refuses `ssh` and
-  console peers, since a uid test cannot: a user at the GUI who also logs in
-  over `ssh` presents the same uid on both.
+- **A9.4** The peer MUST belong to the session a GUI record names: walking its
+  parent chain with `sysctl kern.proc.pid`, either a pid equals the record's
+  `ut_pid` or a `ki_sid` does. This is what refuses `ssh` and console peers,
+  since a uid test cannot: a user at the GUI who also logs in over `ssh`
+  presents the same uid on both.
+
+  The session id is required, not the parent chain alone. A terminal emulator
+  or an IDE is reparented to init but keeps the session it was started in,
+  while a shell calls `setsid()` and takes its own, so a descent test refuses
+  every client launched from a terminal.
 - **A9.5** The daemon MUST confirm the session process still exists and runs as
   the peer's uid, so a peer that reached the session tree through `su` or a
   setuid binary is not the GUI user.

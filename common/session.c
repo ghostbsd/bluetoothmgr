@@ -51,17 +51,22 @@ proc_info(pid_t pid, struct kinfo_proc *out)
 	return (0);
 }
 
+/*
+ * A9.4. The session id, not just the parent chain: a terminal or an IDE is
+ * reparented to init but keeps the session it was started in, while a shell
+ * calls setsid() and gets its own, so the walk has to continue past it.
+ */
 int
-btmgr_session_descends_from(pid_t pid, pid_t ancestor)
+btmgr_session_belongs_to(pid_t pid, pid_t leader)
 {
 	struct kinfo_proc	 kp;
 	int			 depth;
 
-	if (pid <= 0 || ancestor <= 0)
+	if (pid <= 0 || leader <= 0)
 		return (0);
 
 	for (depth = 0; depth < BTMGR_SESSION_MAX_DEPTH; depth++) {
-		if (pid == ancestor)
+		if (pid == leader)
 			return (1);
 
 		/* init and the kernel have no useful parent to follow. */
@@ -70,6 +75,9 @@ btmgr_session_descends_from(pid_t pid, pid_t ancestor)
 
 		if (proc_info(pid, &kp) != 0)
 			return (0);
+
+		if (kp.ki_sid == leader)
+			return (1);
 
 		pid = kp.ki_ppid;
 	}
@@ -138,20 +146,6 @@ btmgr_session_leader_matches(const struct utmpx *ut, uid_t peer_uid)
 	return (kp.ki_uid == peer_uid);
 }
 
-/* A5.4. */
-int
-btmgr_session_peer_start(pid_t pid, struct timeval *out)
-{
-	struct kinfo_proc	 kp;
-
-	if (out == NULL || proc_info(pid, &kp) != 0)
-		return (-1);
-
-	*out = kp.ki_start;
-
-	return (0);
-}
-
 int
 btmgr_session_peer_allowed(uid_t peer_uid, pid_t peer_pid)
 {
@@ -177,7 +171,7 @@ btmgr_session_peer_allowed(uid_t peer_uid, pid_t peer_pid)
 		    !btmgr_session_leader_matches(ut, peer_uid))
 			continue;
 
-		if (btmgr_session_descends_from(peer_pid, ut->ut_pid)) {
+		if (btmgr_session_belongs_to(peer_pid, ut->ut_pid)) {
 			allowed = 1;
 			break;
 		}
