@@ -39,6 +39,7 @@ static int	 parse(const char *line, struct proto_cmd *cmd, char *code,
 		     size_t codelen);
 static void	 rejects(const char *line, const char *wantcode,
 		     const char *what);
+static void	 rejects_msg(const char *line, const char *what);
 
 static void
 ok(int cond, const char *fmt, ...)
@@ -116,6 +117,15 @@ line_has(char *line, const char *want, const char *what)
 
 	ok(strstr(line, want) != NULL, "%s", what);
 	free(line);
+}
+
+/* Assert proto_parse_msg() refuses a line outright. */
+static void
+rejects_msg(const char *line, const char *what)
+{
+	struct proto_msg	 msg;
+
+	ok(decode(line, &msg) == -1, "%s", what);
 }
 
 /* Assert a line is refused, and refused with the code SPEC.md B6 names. */
@@ -571,6 +581,113 @@ test_decode(void)
 	ok(decode_owned(proto_state_event(&st), &msg) == 0,
 	    "a state event with a connection decodes");
 	ok(msg.state.connection_count == 1, "and counts it");
+
+	/*
+	 * Round trip every connection field through the daemon's own emitter,
+	 * so the two halves cannot drift. The applet's device list is built
+	 * from exactly these.
+	 */
+	printf("\nB5 decoding the connections array\n");
+
+	memset(&st, 0, sizeof(st));
+	st.adapter_present = 1;
+	st.nconns = 2;
+	(void)bt_aton("aa:bb:cc:11:22:01", &st.conns[0].bdaddr);
+	st.conns[0].handle = 72;
+	st.conns[0].acl = 1;
+	st.conns[0].encrypted = 1;
+	st.conns[0].master = 1;
+	(void)bt_aton("aa:bb:cc:11:22:02", &st.conns[1].bdaddr);
+	st.conns[1].handle = 65535;
+	st.conns[1].acl = 0;
+	st.conns[1].encrypted = 0;
+	st.conns[1].master = 0;
+
+	ok(decode_owned(proto_state_event(&st), &msg) == 0,
+	    "two connections decode");
+	ok(msg.state.connection_count == 2, "both are counted");
+	ok(bdaddr_same(&msg.state.connections[0].addr, &st.conns[0].bdaddr),
+	    "the first address survives");
+	ok(bdaddr_same(&msg.state.connections[1].addr, &st.conns[1].bdaddr),
+	    "so does the second, in order");
+	ok(msg.state.connections[0].handle == 72, "the handle survives");
+	ok(msg.state.connections[1].handle == 65535,
+	    "including the largest a uint16 holds");
+	ok(msg.state.connections[0].acl == 1, "an ACL link decodes as acl");
+	ok(msg.state.connections[1].acl == 0, "and a SCO link as sco");
+	ok(msg.state.connections[0].encrypted == 1, "encrypted true survives");
+	ok(msg.state.connections[1].encrypted == 0,
+	    "encrypted false survives, not defaulted");
+	ok(msg.state.connections[0].master == 1, "the master role survives");
+	ok(msg.state.connections[1].master == 0, "and the slave role");
+
+	/*
+	 * More connections than the array holds. Without the clamp this writes
+	 * past connections[], so this checks the overrun as much as the count.
+	 */
+	{
+		char	 line[8192];
+		size_t	 used;
+		int	 i, extra;
+
+		extra = BTMGR_MAX_CONNS + 8;
+		used = (size_t)snprintf(line, sizeof(line),
+		    "{\"event\":\"state\",\"adapter_present\":true,"
+		    "\"powered\":true,\"discoverable\":false,"
+		    "\"scanning\":false,\"config_readable\":true,"
+		    "\"devices\":[],\"connections\":[");
+
+		for (i = 0; i < extra && used < sizeof(line) / 2; i++)
+			used += (size_t)snprintf(line + used,
+			    sizeof(line) - used,
+			    "%s{\"addr\":\"1:2:3:4:5:%x\",\"handle\":%d,"
+			    "\"link\":\"acl\",\"encrypted\":false,"
+			    "\"role\":\"master\"}", i == 0 ? "" : ",",
+			    i & 0xf, i);
+
+		(void)snprintf(line + used, sizeof(line) - used, "]}");
+
+		ok(i == extra, "the oversized line was built in full");
+		ok(decode(line, &msg) == 0,
+		    "a state event with more connections than the cap decodes");
+		ok(msg.state.connection_count == BTMGR_MAX_CONNS,
+		    "and stops at BTMGR_MAX_CONNS instead of overrunning");
+	}
+
+	/* A connection missing any field would be shown as something invented. */
+	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
+	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
+	    "\"config_readable\":true,\"connections\":[{}],\"devices\":[]}",
+	    "a connection with no fields is refused");
+	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
+	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
+	    "\"config_readable\":true,\"connections\":[{\"addr\":\"nonsense\","
+	    "\"handle\":1,\"link\":\"acl\",\"encrypted\":false,"
+	    "\"role\":\"master\"}],\"devices\":[]}",
+	    "an unparseable connection address is refused");
+	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
+	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
+	    "\"config_readable\":true,\"connections\":[{\"addr\":\"1:2:3:4:5:6\","
+	    "\"handle\":1,\"link\":\"usb\",\"encrypted\":false,"
+	    "\"role\":\"master\"}],\"devices\":[]}",
+	    "a link type that is neither acl nor sco is refused");
+	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
+	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
+	    "\"config_readable\":true,\"connections\":[{\"addr\":\"1:2:3:4:5:6\","
+	    "\"handle\":1,\"link\":\"acl\",\"encrypted\":false,"
+	    "\"role\":\"peer\"}],\"devices\":[]}",
+	    "a role that is neither master nor slave is refused");
+	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
+	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
+	    "\"config_readable\":true,\"connections\":[{\"addr\":\"1:2:3:4:5:6\","
+	    "\"handle\":65536,\"link\":\"acl\",\"encrypted\":false,"
+	    "\"role\":\"master\"}],\"devices\":[]}",
+	    "a handle wider than a uint16 is refused, not narrowed");
+	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
+	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
+	    "\"config_readable\":true,\"connections\":[\"not an object\"],"
+	    "\"devices\":[]}",
+	    "a connections entry that is not an object is refused");
 
 	/*
 	 * The adapter name comes from HCI_Read_Local_Name, so it can be invalid

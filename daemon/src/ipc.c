@@ -19,6 +19,7 @@
 
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/ucred.h>
 #include <sys/un.h>
 
 #include <errno.h>
@@ -29,6 +30,7 @@
 
 #include "ipc.h"
 #include "proto.h"
+#include "session.h"
 
 /*
  * Must come after the system headers: it redefines malloc and friends. The
@@ -38,6 +40,8 @@
 #include "memcheck.h"	/* IWYU pragma: keep */
 
 static int	set_nonblock(int fd);
+static void	read_peer_cred(struct client *c);
+static pid_t	read_sender(struct msghdr *msg);
 static int	buf_append(char **buf, size_t *len, size_t *cap,
 		    const char *data, size_t n, size_t limit);
 
@@ -95,6 +99,67 @@ buf_append(char **buf, size_t *len, size_t *cap, const char *data, size_t n,
 	return (0);
 }
 
+/*
+ * A5.3 needs the peer's pid, which getpeereid() does not report. xucred keeps
+ * cr_pid in a union with an old unused pointer, so cr_version has to be right
+ * before the pid means anything.
+ *
+ * On failure the fields are left unusable rather than zeroed: uid 0 and pid 0
+ * would both read as privileged.
+ */
+static void
+read_peer_cred(struct client *c)
+{
+	struct xucred	cred;
+	socklen_t	len;
+
+	c->uid = (uid_t)-1;
+	c->gid = (gid_t)-1;
+	c->pid = -1;
+
+	len = sizeof(cred);
+	if (getsockopt(c->fd, SOL_LOCAL, LOCAL_PEERCRED, &cred, &len) < 0)
+		return;
+
+	if (len != sizeof(cred) || cred.cr_version != XUCRED_VERSION)
+		return;
+
+	c->uid = cred.cr_uid;
+	c->gid = cred.cr_gid;
+
+	/* pid 0 is the kernel, so it is never a real peer. */
+	if (cred.cr_pid > 0)
+		c->pid = cred.cr_pid;
+}
+
+/*
+ * A5.5. The sending process, which the kernel fills in per message once the
+ * socket carries LOCAL_CREDS_PERSISTENT. -1 when absent, which authorizes
+ * nothing.
+ */
+static pid_t
+read_sender(struct msghdr *msg)
+{
+	struct cmsghdr		*cm;
+	const struct sockcred2	*sc;
+
+	if ((msg->msg_flags & MSG_CTRUNC) != 0)
+		return (-1);
+
+	for (cm = CMSG_FIRSTHDR(msg); cm != NULL; cm = CMSG_NXTHDR(msg, cm)) {
+		if (cm->cmsg_level != SOL_SOCKET ||
+		    cm->cmsg_type != SCM_CREDS2 ||
+		    cm->cmsg_len < CMSG_LEN(sizeof(*sc)))
+			continue;
+
+		sc = (const void *)CMSG_DATA(cm);
+		if (sc->sc_pid > 0)
+			return (sc->sc_pid);
+	}
+
+	return (-1);
+}
+
 int
 ipc_listen(const char *path, mode_t mode)
 {
@@ -147,7 +212,7 @@ struct client *
 ipc_accept(int lfd)
 {
 	struct client	*c;
-	int		 fd, saved;
+	int		 fd, on, saved;
 
 	/* accept() does not inherit SOCK_CLOEXEC from the listener. */
 	fd = accept4(lfd, NULL, NULL, SOCK_CLOEXEC);
@@ -169,14 +234,21 @@ ipc_accept(int lfd)
 	}
 
 	c->fd = fd;
+	c->send_pid = -1;
+
+	read_peer_cred(c);
 
 	/*
-	 * SPEC.md A5.3. Recorded now so M3 can refuse state-changing commands
-	 * from a peer that is neither root nor in the socket's group.
+	 * A5.5, before any read: without it the kernel attaches no sender to
+	 * the first message and we could not authorize it.
 	 */
-	if (getpeereid(fd, &c->uid, &c->gid) < 0) {
-		c->uid = (uid_t)-1;
-		c->gid = (gid_t)-1;
+	on = 1;
+	if (setsockopt(fd, SOL_LOCAL, LOCAL_CREDS_PERSISTENT, &on,
+	    sizeof(on)) < 0) {
+		saved = errno;
+		ipc_client_free(c);
+		errno = saved;
+		return (NULL);
 	}
 
 	return (c);
@@ -199,11 +271,27 @@ ipc_client_free(struct client *c)
 int
 ipc_client_read(struct client *c)
 {
-	char	buf[4096];
-	ssize_t	n;
+	union {
+		struct cmsghdr	hdr;
+		char		buf[CMSG_SPACE(SOCKCRED2SIZE(CMGROUP_MAX))];
+	} control;
+	struct msghdr	 msg;
+	struct iovec	 iov;
+	char		 buf[4096];
+	ssize_t		 n;
+	pid_t		 sender;
 
 	for (;;) {
-		n = read(c->fd, buf, sizeof(buf));
+		iov.iov_base = buf;
+		iov.iov_len = sizeof(buf);
+
+		memset(&msg, 0, sizeof(msg));
+		msg.msg_iov = &iov;
+		msg.msg_iovlen = 1;
+		msg.msg_control = control.buf;
+		msg.msg_controllen = sizeof(control.buf);
+
+		n = recvmsg(c->fd, &msg, 0);
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
@@ -213,6 +301,20 @@ ipc_client_read(struct client *c)
 		}
 		if (n == 0)
 			return (-1);		/* peer closed */
+
+		/* A5.5. No credentials means no sender we can authorize. */
+		sender = read_sender(&msg);
+
+		/*
+		 * A5.5. Bytes still waiting to complete a line came from
+		 * send_pid; a different sender now is splicing into them.
+		 */
+		if (c->in_len == c->in_taken) {
+			c->send_pid = sender;
+			c->send_mixed = 0;
+		} else if (sender != c->send_pid) {
+			c->send_mixed = 1;
+		}
 
 		/*
 		 * SPEC.md B1.3: a line longer than the cap closes the

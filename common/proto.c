@@ -16,6 +16,7 @@
  */
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,8 @@
 static int	 pin_is_sendable(const char *pin);
 static int	 set_string(json_t *obj, const char *key, const char *value);
 static int	 read_boolean(json_t *obj, const char *key, int *out);
+static int	 json_string_is(json_t *value, const char *want);
+static int	 read_connection(json_t *obj, struct proto_connection *out);
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
@@ -158,6 +161,65 @@ conn_json(const struct btmgr_conn *c)
 	return (o);
 }
 
+/* Length included, so a NUL inside the string cannot truncate the test. */
+static int
+json_string_is(json_t *value, const char *want)
+{
+	size_t	 len = strlen(want);
+
+	return (json_string_length(value) == len &&
+	    memcmp(json_string_value(value), want, len) == 0);
+}
+
+/*
+ * One connection object. Every field is required: a frontend that showed a
+ * connection with a defaulted role or handle would be inventing it.
+ */
+static int
+read_connection(json_t *obj, struct proto_connection *out)
+{
+	json_t		*value;
+	json_int_t	 handle;
+
+	if (!json_is_object(obj))
+		return (-1);
+
+	value = json_object_get(obj, "addr");
+	if (!json_is_string(value) ||
+	    !bt_aton(json_string_value(value), &out->addr))
+		return (-1);
+
+	value = json_object_get(obj, "handle");
+	if (!json_is_integer(value))
+		return (-1);
+	handle = json_integer_value(value);
+	if (handle < 0 || handle > UINT16_MAX)
+		return (-1);
+	out->handle = (int)handle;
+
+	value = json_object_get(obj, "link");
+	if (!json_is_string(value))
+		return (-1);
+	if (json_string_is(value, "acl"))
+		out->acl = 1;
+	else if (json_string_is(value, "sco"))
+		out->acl = 0;
+	else
+		return (-1);
+
+	value = json_object_get(obj, "role");
+	if (!json_is_string(value))
+		return (-1);
+	if (json_string_is(value, "master"))
+		out->master = 1;
+	else if (json_string_is(value, "slave"))
+		out->master = 0;
+	else
+		return (-1);
+
+	return (read_boolean(obj, "encrypted", &out->encrypted));
+}
+
 /* A missing or non-boolean key is a malformed message, not a false. */
 static int
 read_boolean(json_t *obj, const char *key, int *out)
@@ -177,6 +239,7 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 {
 	json_error_t	 err;
 	json_t		*root, *value;
+	size_t		 i, n;
 
 	memset(out, 0, sizeof(*out));
 
@@ -267,7 +330,19 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 			return (-1);
 		}
 
-		out->state.connection_count = (int)json_array_size(value);
+		n = json_array_size(value);
+		if (n > BTMGR_MAX_CONNS)
+			n = BTMGR_MAX_CONNS;
+
+		for (i = 0; i < n; i++) {
+			if (read_connection(json_array_get(value, i),
+			    &out->state.connections[i]) != 0) {
+				json_decref(root);
+				return (-1);
+			}
+		}
+
+		out->state.connection_count = (int)n;
 		out->has_state = 1;
 	}
 

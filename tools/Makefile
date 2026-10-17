@@ -13,6 +13,7 @@ SUBDIR=		btmgr-clienttest \
 		btmgr-probe \
 		btmgr-prototest \
 		btmgr-secdtest \
+		btmgr-sesstest \
 		btmgr-storetest \
 		btmgr-strtest
 

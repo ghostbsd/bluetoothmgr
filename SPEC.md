@@ -191,6 +191,17 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
   Peer uid and pid come from `getsockopt(LOCAL_PEERCRED)`, since `struct xucred`
   carries `cr_pid`. `getpeereid()` reports uid and gid only, so it cannot
   supply the pid A9.4 needs.
+- **A5.4** Unsolicited events are subject to A5.3 as well. The daemon MUST NOT
+  send the `state` event on accept, nor any broadcast, to a peer A5.3 would
+  refuse. An event has no sender, so it is judged on the connecting peer.
+- **A5.5** For a command the peer is the process that sent it, not the one that
+  connected. The daemon MUST set `LOCAL_CREDS_PERSISTENT` on each accepted
+  socket before its first read and take the sender from `sc_pid` of the
+  `SCM_CREDS2` message the kernel attaches to every send. A message carrying no
+  such credentials MUST authorize nothing. A5.3 and A9.4 apply to that pid.
+
+  A line assembled from sends with differing `sc_pid` MUST close the
+  connection: a second sender is splicing into an authorized stream.
 
 ## A6. Pairing sequence (the ordering constraint)
 
@@ -318,18 +329,34 @@ the display manager write it. This file is the input to A5.3.
   line `:0`, and the session leader `mate-session` on line `ttyv8` with host
   `:0`.
 - **A9.2** A GUI session is a `USER_PROCESS` record whose `ut_line` **or**
-  `ut_host` begins with `:`. Both fields are required by A9.1: matching
-  `ut_line` alone misses `mate-session`, which is the record that carries the
+  `ut_host` is a display: `:` followed by a decimal display number, optionally
+  `.` and a screen number. Both fields are required by A9.1, since matching
+  `ut_line` alone misses `mate-session`, which is the record carrying the
   logged-in user.
+
+  A leading `:` alone MUST NOT be accepted: `ut_host` carries the client
+  address of an `ssh` login, and `::1` would read as a display. The test MUST
+  be bounded by the field size, which carries no terminator when full.
 - **A9.3** A text console login, which has no host, is not a GUI session.
   Neither is `ssh` on `pts/N`.
-- **A9.4** The peer's pid MUST descend from the `ut_pid` of a GUI session
-  record, walked with `sysctl kern.proc.pid`. This is what refuses `ssh` and
-  console peers, since a uid test cannot: a user at the GUI who also logs in
-  over `ssh` presents the same uid on both.
-- **A9.5** The daemon MUST confirm the session process still exists and started
-  no later than the record's `ut_tv`. A crashed display manager leaves a record
-  behind and the pid can be reused.
+- **A9.4** The peer MUST belong to the session a GUI record names: walking its
+  parent chain with `sysctl kern.proc.pid`, either a pid equals the record's
+  `ut_pid` or a `ki_sid` does. This is what refuses `ssh` and console peers,
+  since a uid test cannot: a user at the GUI who also logs in over `ssh`
+  presents the same uid on both.
+
+  The session id is required, not the parent chain alone. A terminal emulator
+  or an IDE is reparented to init but keeps the session it was started in,
+  while a shell calls `setsid()` and takes its own, so a descent test refuses
+  every client launched from a terminal.
+- **A9.5** The daemon MUST confirm the session process still exists and runs as
+  the peer's uid, so a peer that reached the session tree through `su` or a
+  setuid binary is not the GUI user.
+
+  It MUST NOT compare the leader's start time against the record's `ut_tv`:
+  `ki_start` is derived from a boot time a suspend re-estimates, so that test
+  refuses every session on a machine that has slept. A9.4 and A5.4 carry the
+  pid-reuse defence instead.
 - **A9.6** If the file is absent, empty or unreadable, the daemon MUST refuse
   every command. A file it cannot read MUST NOT read as no restriction.
 - **A9.7** The check MUST run per command, not once on accept. A session can

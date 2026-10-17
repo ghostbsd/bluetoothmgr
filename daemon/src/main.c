@@ -23,8 +23,6 @@
 
 #include <err.h>
 #include <errno.h>
-#include <grp.h>
-#include <pwd.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,6 +40,7 @@
 #include "ipc.h"
 #include "listen.h"
 #include "proto.h"
+#include "session.h"
 #include "state.h"
 
 /*
@@ -52,7 +51,13 @@
 #include "memcheck.h"	/* IWYU pragma: keep */
 
 #define	DEFAULT_SOCKET	"/var/run/bluetoothmgr.sock"
-#define	SOCKET_MODE	0660
+
+/*
+ * A5.1: the mode is not the authorization boundary, A5.3 is. A narrower mode
+ * would refuse a GUI user at connect() for not sharing the socket's group,
+ * which is the group test A5.3 exists to replace.
+ */
+#define	SOCKET_MODE	0666
 #define	RECONCILE_MS	5000		/* SPEC.md C2.1: the safety net */
 
 /*
@@ -62,6 +67,9 @@
  */
 #define	BTMGR_DISCOVER_MAX_SEC	3600
 #define	MAX_EVENTS	32
+
+/* A5.1 leaves the socket open to any local user. 32 * 320 KiB of buffer. */
+#define	MAX_CLIENTS	32
 
 /*
  * How long a parked pairing waits for Link_Key_Notification. The user has to
@@ -105,12 +113,11 @@ struct daemon {
 	struct state	 last;		/* last snapshot sent to clients */
 	int		 have_last;
 	int		 dirty;
-	uid_t		 sockuid;	/* SPEC.md A5.3 */
-	gid_t		 sockgid;
 	struct btmgr_paths paths;	/* where the config files are */
 	struct inflight_table	pending;
 	struct hcsecd_ctl	hcsecd;		/* A8.1, the real pair_ops */
 	struct parked_pairing	pairing;
+	int		 clients_full;	/* so a connection flood logs once */
 	volatile int	 quit;
 };
 
@@ -127,8 +134,8 @@ static void	do_accept(struct daemon *d);
 static void	reconcile(struct daemon *d);
 static void	refresh_hci(struct daemon *d);
 static void	reply(struct daemon *d, struct client *c, char *line);
-static int	may_change(const struct daemon *d, const struct client *c);
 static int	blocked_while_pairing(const char *cmd);
+static int	client_count(const struct daemon *d);
 static struct pair_ops	pair_ops_for(struct daemon *d);
 static void	finish_pairing(struct daemon *d, const bdaddr_t *addr);
 static void	abandon_pairing(struct daemon *d, const char *code,
@@ -190,6 +197,12 @@ broadcast(struct daemon *d, const char *line)
 	for (c = d->clients; c != NULL; c = next) {
 		next = c->next;
 
+		/* A5.4. Dropped, not skipped: queued state would flush later. */
+		if (!btmgr_session_peer_allowed(c->uid, c->pid)) {
+			drop_client(d, c);
+			continue;
+		}
+
 		if (ipc_client_send(c, line) < 0) {
 			drop_client(d, c);
 			continue;
@@ -197,6 +210,19 @@ broadcast(struct daemon *d, const char *line)
 		if (c->want_write)
 			(void)kq_add(d->kq, (uintptr_t)c->fd, EVFILT_WRITE, c);
 	}
+}
+
+/* Walked rather than counted, so there is no tally to keep in step. */
+static int
+client_count(const struct daemon *d)
+{
+	const struct client	*c;
+	int			 n = 0;
+
+	for (c = d->clients; c != NULL; c = c->next)
+		n++;
+
+	return (n);
 }
 
 static void
@@ -258,53 +284,6 @@ reply(struct daemon *d, struct client *c, char *line)
 
 	if (c->want_write)
 		(void)kq_add(d->kq, (uintptr_t)c->fd, EVFILT_WRITE, c);
-}
-
-/*
- * SPEC.md A5.3: state-changing commands require root or membership of the
- * socket's group. Read-only commands stay open to anyone who got past the
- * filesystem permissions.
- *
- * The supplementary group check is not optional. getpeereid() reports only
- * the peer's PRIMARY gid, but the kernel admits a connection on the strength
- * of any of the peer's groups. Checking the primary gid alone would therefore
- * refuse exactly the intended deployment, where the socket is group operator
- * and users are added to operator as a supplementary group.
- */
-static int
-may_change(const struct daemon *d, const struct client *c)
-{
-	struct passwd	*pw;
-	struct group	*gr;
-	int		 i;
-
-	if (c->uid == 0)
-		return (1);
-
-	/*
-	 * The socket's owner. In production that is root, already covered
-	 * above; during development it is whoever started the daemon, which
-	 * makes the -s override usable without a special case.
-	 */
-	if (d->sockuid != (uid_t)-1 && c->uid == d->sockuid)
-		return (1);
-
-	if (d->sockgid == (gid_t)-1)
-		return (0);
-
-	if (c->gid == d->sockgid)
-		return (1);
-
-	pw = getpwuid(c->uid);
-	gr = getgrgid(d->sockgid);
-	if (pw == NULL || gr == NULL || gr->gr_mem == NULL)
-		return (0);
-
-	for (i = 0; gr->gr_mem[i] != NULL; i++)
-		if (strcmp(gr->gr_mem[i], pw->pw_name) == 0)
-			return (1);
-
-	return (0);
 }
 
 /*
@@ -592,8 +571,27 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 {
 	struct proto_cmd	 cmd;
 	char			 code[32];
+	int			 parsed;
 
-	if (proto_parse_cmd(line, len, &cmd, code, sizeof(code)) < 0) {
+	/* A5.5. Two senders in one line is one splicing into the other. */
+	if (c->send_mixed) {
+		syslog(LOG_WARNING, "dropping client uid %d: one line, "
+		    "more than one sending process", (int)c->uid);
+		drop_client(d, c);
+		return;
+	}
+
+	/* Parsed only for the id, per B3.1; not acted on until A5.3 passes. */
+	parsed = proto_parse_cmd(line, len, &cmd, code, sizeof(code));
+
+	/* A5.3, re-checked per command per A9.7: a session can end mid-connection. */
+	if (!btmgr_session_peer_allowed(c->uid, c->send_pid)) {
+		reply(d, c, proto_error(cmd.id, "not_permitted",
+		    "not root and not in a GUI session"));
+		return;
+	}
+
+	if (parsed < 0) {
 		reply(d, c, proto_error(cmd.id, code, NULL));
 		return;
 	}
@@ -608,13 +606,6 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		if (!client_alive(d, c))
 			return;
 		reply(d, c, proto_state_event(&d->last));
-		return;
-	}
-
-	/* Everything below changes state and needs the privilege check. */
-	if (!may_change(d, c)) {
-		reply(d, c, proto_error(cmd.id, "not_permitted",
-		    "not root and not in the socket's group"));
 		return;
 	}
 
@@ -839,6 +830,18 @@ do_accept(struct daemon *d)
 			return;
 		}
 
+		/* Logged once per episode, or a flood becomes a syslog flood. */
+		if (client_count(d) >= MAX_CLIENTS) {
+			if (!d->clients_full) {
+				syslog(LOG_WARNING, "refusing connections: "
+				    "%d clients already attached", MAX_CLIENTS);
+				d->clients_full = 1;
+			}
+			ipc_client_free(c);
+			continue;
+		}
+		d->clients_full = 0;
+
 		c->next = d->clients;
 		d->clients = c;
 
@@ -855,11 +858,18 @@ do_accept(struct daemon *d)
 			free(hello);
 		}
 
-		/* Then the current state, so a client starts up in sync. */
-		st = proto_state_event(&d->last);
-		if (st != NULL) {
-			(void)ipc_client_send(c, st);
-			free(st);
+		/*
+		 * Then the current state, so a client starts up in sync. Only
+		 * for a peer A5.3 admits: hello carries nothing but the
+		 * protocol version, the state carries the adapter and every
+		 * connection.
+		 */
+		if (btmgr_session_peer_allowed(c->uid, c->pid)) {
+			st = proto_state_event(&d->last);
+			if (st != NULL) {
+				(void)ipc_client_send(c, st);
+				free(st);
+			}
 		}
 
 		if (c->want_write)
@@ -1029,22 +1039,6 @@ main(int argc, char *argv[])
 
 	if (kq_add(d.kq, (uintptr_t)d.lfd, EVFILT_READ, &tag_listen_sock) < 0)
 		err(1, "kevent add listener");
-
-	/*
-	 * SPEC.md A5.3. Whoever shares the socket's group may change state.
-	 * Reading it back from the socket rather than hardcoding a name means
-	 * the -s override works for development without a special case.
-	 */
-	{
-		struct stat	sb;
-
-		d.sockuid = (uid_t)-1;
-		d.sockgid = (gid_t)-1;
-		if (stat(d.sockpath, &sb) == 0) {
-			d.sockuid = sb.st_uid;
-			d.sockgid = sb.st_gid;
-		}
-	}
 
 	if (kq_add(d.kq, SIGTERM, EVFILT_SIGNAL, NULL) < 0 ||
 	    kq_add(d.kq, SIGINT, EVFILT_SIGNAL, NULL) < 0 ||
