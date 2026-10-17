@@ -30,6 +30,7 @@
 
 #include "ipc.h"
 #include "proto.h"
+#include "session.h"
 
 /*
  * Must come after the system headers: it redefines malloc and friends. The
@@ -128,6 +129,10 @@ read_peer_cred(struct client *c)
 	/* pid 0 is the kernel, so it is never a real peer. */
 	if (cred.cr_pid > 0)
 		c->pid = cred.cr_pid;
+
+	/* A5.4. Bind the pid to one process for the life of the connection. */
+	if (c->pid > 0 && btmgr_session_peer_start(c->pid, &c->start) == 0)
+		c->have_start = 1;
 }
 
 int

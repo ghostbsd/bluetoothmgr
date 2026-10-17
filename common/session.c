@@ -8,13 +8,16 @@
 #include <sys/sysctl.h>
 #include <sys/user.h>
 
+#include <syslog.h>
 #include <utmpx.h>
 
 #include "session.h"
 
 static const char	*utmpx_db;	/* NULL selects the system default */
+static int		 db_warned;	/* so one outage logs once */
 
 static int	 proc_info(pid_t pid, struct kinfo_proc *out);
+static int	 is_display_spec(const char *field, size_t size);
 
 void
 btmgr_session_set_db(const char *path)
@@ -74,6 +77,39 @@ btmgr_session_descends_from(pid_t pid, pid_t ancestor)
 	return (0);
 }
 
+/*
+ * A9.2. ":0" or ":0.0", not merely a leading colon: ut_host carries the client
+ * address of an ssh login, and "::1" would otherwise read as a display.
+ *
+ * size, not strlen: these fields need no terminator when full.
+ */
+static int
+is_display_spec(const char *field, size_t size)
+{
+	size_t	 i, digits;
+
+	if (size == 0 || field[0] != ':')
+		return (0);
+
+	for (i = 1, digits = 0; i < size && field[i] >= '0' &&
+	    field[i] <= '9'; i++)
+		digits++;
+
+	if (digits == 0)
+		return (0);
+
+	if (i < size && field[i] == '.') {
+		for (i++, digits = 0; i < size && field[i] >= '0' &&
+		    field[i] <= '9'; i++)
+			digits++;
+
+		if (digits == 0)
+			return (0);
+	}
+
+	return (i == size || field[i] == '\0');
+}
+
 /* Both fields matter, per A9.1. */
 int
 btmgr_session_record_is_gui(const struct utmpx *ut)
@@ -82,14 +118,14 @@ btmgr_session_record_is_gui(const struct utmpx *ut)
 	if (ut->ut_type != USER_PROCESS)
 		return (0);
 
-	return (ut->ut_line[0] == ':' || ut->ut_host[0] == ':');
+	return (is_display_spec(ut->ut_line, sizeof(ut->ut_line)) ||
+	    is_display_spec(ut->ut_host, sizeof(ut->ut_host)));
 }
 
 /*
- * A9.5, plus a uid match. A leader that started after its own login record is
- * a different process wearing a reused pid, and a peer running as another user
- * inside the session tree, by su or a setuid binary, is not the GUI user even
- * though it descends from the leader.
+ * A9.5. No comparison against ut_tv: ki_start is derived from a boot time a
+ * suspend re-estimates, so every leader on a slept machine looks younger than
+ * its own login record.
  */
 int
 btmgr_session_leader_matches(const struct utmpx *ut, uid_t peer_uid)
@@ -99,10 +135,21 @@ btmgr_session_leader_matches(const struct utmpx *ut, uid_t peer_uid)
 	if (proc_info(ut->ut_pid, &kp) != 0)
 		return (0);
 
-	if (kp.ki_start.tv_sec > ut->ut_tv.tv_sec)
-		return (0);
-
 	return (kp.ki_uid == peer_uid);
+}
+
+/* A5.4. */
+int
+btmgr_session_peer_start(pid_t pid, struct timeval *out)
+{
+	struct kinfo_proc	 kp;
+
+	if (out == NULL || proc_info(pid, &kp) != 0)
+		return (-1);
+
+	*out = kp.ki_start;
+
+	return (0);
 }
 
 int
@@ -114,8 +161,15 @@ btmgr_session_peer_allowed(uid_t peer_uid, pid_t peer_pid)
 	if (peer_uid == 0)
 		return (1);
 
-	if (setutxdb(UTXDB_ACTIVE, utmpx_db) != 0)
+	if (setutxdb(UTXDB_ACTIVE, utmpx_db) != 0) {
+		/* Warn once, or an unreadable db just looks like a denial. */
+		if (!db_warned) {
+			syslog(LOG_ERR, "cannot read the session database: %m");
+			db_warned = 1;
+		}
 		return (0);
+	}
+	db_warned = 0;
 
 	allowed = 0;
 	while ((ut = getutxent()) != NULL) {

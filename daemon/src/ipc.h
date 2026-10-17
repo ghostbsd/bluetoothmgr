@@ -10,6 +10,7 @@
 #ifndef BTMGRD_IPC_H_
 #define	BTMGRD_IPC_H_
 
+#include <sys/time.h>
 #include <sys/types.h>
 
 #include <stddef.h>
@@ -39,6 +40,10 @@ struct client {
 	uid_t		 uid;
 	gid_t		 gid;
 	pid_t		 pid;		/* -1 when the kernel did not report one */
+
+	/* A5.4. The peer's start time at accept, to pin the pid to a process. */
+	struct timeval	 start;
+	int		 have_start;
 
 	struct client	*next;
 };

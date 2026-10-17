@@ -68,6 +68,9 @@
 #define	BTMGR_DISCOVER_MAX_SEC	3600
 #define	MAX_EVENTS	32
 
+/* A5.1 leaves the socket open to any local user. 32 * 320 KiB of buffer. */
+#define	MAX_CLIENTS	32
+
 /*
  * How long a parked pairing waits for Link_Key_Notification. The user has to
  * read a PIN off a screen and type it on the device, so this is generous
@@ -114,6 +117,7 @@ struct daemon {
 	struct inflight_table	pending;
 	struct hcsecd_ctl	hcsecd;		/* A8.1, the real pair_ops */
 	struct parked_pairing	pairing;
+	int		 clients_full;	/* so a connection flood logs once */
 	volatile int	 quit;
 };
 
@@ -131,6 +135,8 @@ static void	reconcile(struct daemon *d);
 static void	refresh_hci(struct daemon *d);
 static void	reply(struct daemon *d, struct client *c, char *line);
 static int	blocked_while_pairing(const char *cmd);
+static int	peer_unchanged(const struct client *c);
+static int	client_count(const struct daemon *d);
 static struct pair_ops	pair_ops_for(struct daemon *d);
 static void	finish_pairing(struct daemon *d, const bdaddr_t *addr);
 static void	abandon_pairing(struct daemon *d, const char *code,
@@ -192,13 +198,17 @@ broadcast(struct daemon *d, const char *line)
 	for (c = d->clients; c != NULL; c = next) {
 		next = c->next;
 
-		/*
-		 * A5.3. An unauthorized peer is refused every command, so it
-		 * must not be handed the state it was refused permission to
-		 * ask for either.
-		 */
-		if (!btmgr_session_peer_allowed(c->uid, c->pid))
+		/* A5.4, as in handle_line(): the pid may be somebody else now. */
+		if (!peer_unchanged(c)) {
+			drop_client(d, c);
 			continue;
+		}
+
+		/* A5.5. Dropped, not skipped: queued state would flush later. */
+		if (!btmgr_session_peer_allowed(c->uid, c->pid)) {
+			drop_client(d, c);
+			continue;
+		}
 
 		if (ipc_client_send(c, line) < 0) {
 			drop_client(d, c);
@@ -207,6 +217,19 @@ broadcast(struct daemon *d, const char *line)
 		if (c->want_write)
 			(void)kq_add(d->kq, (uintptr_t)c->fd, EVFILT_WRITE, c);
 	}
+}
+
+/* Walked rather than counted, so there is no tally to keep in step. */
+static int
+client_count(const struct daemon *d)
+{
+	const struct client	*c;
+	int			 n = 0;
+
+	for (c = d->clients; c != NULL; c = c->next)
+		n++;
+
+	return (n);
 }
 
 static void
@@ -268,6 +291,28 @@ reply(struct daemon *d, struct client *c, char *line)
 
 	if (c->want_write)
 		(void)kq_add(d->kq, (uintptr_t)c->fd, EVFILT_WRITE, c);
+}
+
+/*
+ * A5.4. Still the same process behind that pid? A pid alone identifies nothing
+ * once its process exits, and the next use of it could be a GUI descendant.
+ */
+static int
+peer_unchanged(const struct client *c)
+{
+	struct timeval	 now;
+
+	if (c->uid == 0)
+		return (1);
+
+	if (!c->have_start)
+		return (0);
+
+	if (btmgr_session_peer_start(c->pid, &now) != 0)
+		return (0);
+
+	return (now.tv_sec == c->start.tv_sec &&
+	    now.tv_usec == c->start.tv_usec);
 }
 
 /*
@@ -555,19 +600,26 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 {
 	struct proto_cmd	 cmd;
 	char			 code[32];
+	int			 parsed;
 
-	if (proto_parse_cmd(line, len, &cmd, code, sizeof(code)) < 0) {
-		reply(d, c, proto_error(cmd.id, code, NULL));
+	/* A5.4. The process behind that pid has gone, so the socket is not its. */
+	if (!peer_unchanged(c)) {
+		drop_client(d, c);
 		return;
 	}
 
-	/*
-	 * SPEC.md A5.3, re-checked per command per A9.7: a session can end
-	 * while a client stays connected.
-	 */
+	/* Parsed only for the id, per B3.1; not acted on until A5.3 passes. */
+	parsed = proto_parse_cmd(line, len, &cmd, code, sizeof(code));
+
+	/* A5.3, re-checked per command per A9.7: a session can end mid-connection. */
 	if (!btmgr_session_peer_allowed(c->uid, c->pid)) {
 		reply(d, c, proto_error(cmd.id, "not_permitted",
 		    "not root and not in a GUI session"));
+		return;
+	}
+
+	if (parsed < 0) {
+		reply(d, c, proto_error(cmd.id, code, NULL));
 		return;
 	}
 
@@ -804,6 +856,18 @@ do_accept(struct daemon *d)
 			syslog(LOG_ERR, "accept: %m");
 			return;
 		}
+
+		/* Logged once per episode, or a flood becomes a syslog flood. */
+		if (client_count(d) >= MAX_CLIENTS) {
+			if (!d->clients_full) {
+				syslog(LOG_WARNING, "refusing connections: "
+				    "%d clients already attached", MAX_CLIENTS);
+				d->clients_full = 1;
+			}
+			ipc_client_free(c);
+			continue;
+		}
+		d->clients_full = 0;
 
 		c->next = d->clients;
 		d->clients = c;

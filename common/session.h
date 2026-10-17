@@ -16,6 +16,7 @@
 #define	BTMGR_SESSION_H_
 
 #include <sys/types.h>
+#include <sys/time.h>
 
 struct utmpx;
 
@@ -41,6 +42,9 @@ int	btmgr_session_record_is_gui(const struct utmpx *ut);
 
 /* A9.5, and the record's leader must run as peer_uid. */
 int	btmgr_session_leader_matches(const struct utmpx *ut, uid_t peer_uid);
+
+/* A5.4. Taken at accept, checked again later, since pids are reused. */
+int	btmgr_session_peer_start(pid_t pid, struct timeval *out);
 
 /*
  * Read the utmpx database from path instead of /var/run/utx.active. For tests

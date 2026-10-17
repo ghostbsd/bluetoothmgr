@@ -27,6 +27,7 @@ static int	 checks;
 static void	 ok(int cond, const char *fmt, ...) __printflike(2, 3);
 static void	 gui_record(struct utmpx *ut, const char *line,
 		     const char *host);
+static void	 test_peer_start(void);
 
 static void
 ok(int cond, const char *fmt, ...)
@@ -46,10 +47,7 @@ ok(int cond, const char *fmt, ...)
 	va_end(ap);
 }
 
-/*
- * A record naming this process as its session leader. The login time is now,
- * which is after this process started, so A9.5 passes.
- */
+/* A record naming this process as its session leader, logged in now. */
 static void
 gui_record(struct utmpx *ut, const char *line, const char *host)
 {
@@ -125,6 +123,41 @@ test_record(void)
 	ok(!btmgr_session_record_is_gui(&ut),
 	    "nor is a pts line with no host at all");
 
+	/*
+	 * A colon after the first character must not count. ut_host carries the
+	 * client address of an ssh login, and an IPv6 one is full of colons.
+	 */
+	gui_record(&ut, "pts/0", "::1");
+	ok(!btmgr_session_record_is_gui(&ut),
+	    "ssh from IPv6 loopback is not a GUI session");
+	gui_record(&ut, "pts/0", "2001:db8::1");
+	ok(!btmgr_session_record_is_gui(&ut),
+	    "nor is ssh from any other IPv6 address");
+	gui_record(&ut, "pts/0", "fe80::1%em0");
+	ok(!btmgr_session_record_is_gui(&ut),
+	    "nor one with a scope id");
+	gui_record(&ut, "a:0", "b:0");
+	ok(!btmgr_session_record_is_gui(&ut),
+	    "a colon in the middle of either field is not a display");
+
+	/* The display number itself has to be a number. */
+	gui_record(&ut, ":", "");
+	ok(!btmgr_session_record_is_gui(&ut), "a bare colon is not a display");
+	gui_record(&ut, ":a", "");
+	ok(!btmgr_session_record_is_gui(&ut), "nor is a non-numeric display");
+	gui_record(&ut, "::", "");
+	ok(!btmgr_session_record_is_gui(&ut), "nor two colons alone");
+	gui_record(&ut, ":0:", "");
+	ok(!btmgr_session_record_is_gui(&ut), "nor a trailing colon");
+	gui_record(&ut, ":0.", "");
+	ok(!btmgr_session_record_is_gui(&ut), "nor a screen number left empty");
+
+	/* The forms that are real displays. */
+	gui_record(&ut, ":10", "");
+	ok(btmgr_session_record_is_gui(&ut), "a two digit display counts");
+	gui_record(&ut, ":0.0", "");
+	ok(btmgr_session_record_is_gui(&ut), "so does one with a screen number");
+
 	/* Only a live login counts, not a boot time or a dead slot. */
 	gui_record(&ut, ":0", "");
 	ut.ut_type = BOOT_TIME;
@@ -153,13 +186,14 @@ test_leader(void)
 	    "a leader running as another user does not match");
 
 	/*
-	 * A reused pid. The record claims a login before this process started,
-	 * so the pid now belongs to something else.
+	 * An old login time must NOT reject a live leader. ki_start is derived
+	 * from a boot time that a suspend re-estimates, so on a machine that
+	 * has slept every real leader looks younger than its own record.
 	 */
 	gui_record(&ut, ":0", "");
 	ut.ut_tv.tv_sec = 1;
-	ok(!btmgr_session_leader_matches(&ut, getuid()),
-	    "a leader that started after its own login record is a reused pid");
+	ok(btmgr_session_leader_matches(&ut, getuid()),
+	    "a login record older than the leader is still accepted, per A9.5");
 
 	/* A record pointing at nothing. */
 	gui_record(&ut, ":0", "");
@@ -169,6 +203,35 @@ test_leader(void)
 	ut.ut_pid = 0;
 	ok(!btmgr_session_leader_matches(&ut, getuid()),
 	    "nor does a record with no pid");
+}
+
+static void
+test_peer_start(void)
+{
+	struct timeval	 mine, again;
+
+	printf("\nA5.4 binding a pid to one process\n");
+
+	ok(btmgr_session_peer_start(getpid(), &mine) == 0,
+	    "our own start time reads back");
+	ok(mine.tv_sec > 0, "and is not zero");
+
+	ok(btmgr_session_peer_start(getpid(), &again) == 0 &&
+	    again.tv_sec == mine.tv_sec && again.tv_usec == mine.tv_usec,
+	    "and is stable across two reads, which is what the binding needs");
+
+	ok(btmgr_session_peer_start(999999, &mine) == -1,
+	    "a pid that does not exist has no start time");
+	ok(btmgr_session_peer_start(0, &mine) == -1, "nor does pid 0");
+	ok(btmgr_session_peer_start(-1, &mine) == -1, "nor a negative pid");
+	ok(btmgr_session_peer_start(getpid(), NULL) == -1,
+	    "a NULL destination is refused");
+
+	/* init is not us, so its start time must differ from ours. */
+	ok(btmgr_session_peer_start(getpid(), &mine) == 0 &&
+	    btmgr_session_peer_start(1, &again) == 0 &&
+	    (again.tv_sec != mine.tv_sec || again.tv_usec != mine.tv_usec),
+	    "a different process reports a different start time");
 }
 
 static void
@@ -200,6 +263,7 @@ main(void)
 	test_descent();
 	test_record();
 	test_leader();
+	test_peer_start();
 	test_allowed();
 
 	printf("\n%d checks, %d failures\n", checks, failures);
