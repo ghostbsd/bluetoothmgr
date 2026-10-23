@@ -164,7 +164,7 @@ int
 ipc_listen(const char *path, mode_t mode)
 {
 	struct sockaddr_un	sa;
-	int			fd, saved;
+	int			fd, on, saved;
 
 	if (strlen(path) >= sizeof(sa.sun_path)) {
 		errno = ENAMETOOLONG;
@@ -192,6 +192,17 @@ ipc_listen(const char *path, mode_t mode)
 	if (chmod(path, mode) < 0)
 		goto fail;
 
+	/*
+	 * A5.5, on the listener: unp_connect() copies UNP_WANTCRED from the
+	 * listening socket to the new one, so an accepted socket already has
+	 * it. Setting it after accept() is too late for a client that writes
+	 * the moment connect() returns.
+	 */
+	on = 1;
+	if (setsockopt(fd, SOL_LOCAL, LOCAL_CREDS_PERSISTENT, &on,
+	    sizeof(on)) < 0)
+		goto fail;
+
 	if (listen(fd, 8) < 0)
 		goto fail;
 
@@ -212,7 +223,7 @@ struct client *
 ipc_accept(int lfd)
 {
 	struct client	*c;
-	int		 fd, on, saved;
+	int		 fd, saved;
 
 	/* accept() does not inherit SOCK_CLOEXEC from the listener. */
 	fd = accept4(lfd, NULL, NULL, SOCK_CLOEXEC);
@@ -237,19 +248,6 @@ ipc_accept(int lfd)
 	c->send_pid = -1;
 
 	read_peer_cred(c);
-
-	/*
-	 * A5.5, before any read: without it the kernel attaches no sender to
-	 * the first message and we could not authorize it.
-	 */
-	on = 1;
-	if (setsockopt(fd, SOL_LOCAL, LOCAL_CREDS_PERSISTENT, &on,
-	    sizeof(on)) < 0) {
-		saved = errno;
-		ipc_client_free(c);
-		errno = saved;
-		return (NULL);
-	}
 
 	return (c);
 }

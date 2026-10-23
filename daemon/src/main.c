@@ -3,18 +3,12 @@
  *
  * bluetoothmgrd - BluetoothMgr daemon.
  *
- * One kqueue loop watching five kinds of thing at once: the listening socket,
- * each connected client's readability and writability, the passive HCI event
- * socket, signals, and a periodic reconcile timer.
- *
- * M2 performs no privileged operation at all. Per SPEC.md C1 the entire
- * polling path is on the kernel's unprivileged allowlist, so this can and
- * should be developed as an ordinary user:
+ * One kqueue loop over the listening socket, each client, the passive HCI
+ * socket and signals. The tick is kevent()'s timeout, not an EVFILT_TIMER,
+ * which stops firing across a suspend.
  *
  *	./bluetoothmgrd -f -s /tmp/btmgr.sock
  *	nc -U /tmp/btmgr.sock
- *
- * The privileged half arrives in M3.
  */
 
 #include <sys/types.h>
@@ -23,6 +17,7 @@
 
 #include <err.h>
 #include <errno.h>
+#include <libutil.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,28 +38,17 @@
 #include "session.h"
 #include "state.h"
 
-/*
- * Must come after the system headers: it redefines malloc and friends. The
- * pragma says so to clang-include-cleaner, which sees no direct use of this
- * header because the use is macro replacement of malloc(), not a symbol.
- */
+/* After the system headers: it redefines malloc. */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
 #define	DEFAULT_SOCKET	"/var/run/bluetoothmgr.sock"
+#define	DEFAULT_PIDFILE	"/var/run/bluetoothmgrd.pid"
 
-/*
- * A5.1: the mode is not the authorization boundary, A5.3 is. A narrower mode
- * would refuse a GUI user at connect() for not sharing the socket's group,
- * which is the group test A5.3 exists to replace.
- */
+/* A5.1: the mode is not the boundary, A5.3 is. Narrower refuses a GUI user. */
 #define	SOCKET_MODE	0666
-#define	RECONCILE_MS	5000		/* SPEC.md C2.1: the safety net */
+#define	RECONCILE_SEC	5		/* SPEC.md C2.1: the safety net */
 
-/*
- * Upper bound on a discoverability timeout, one hour. Bluetooth UIs offer
- * minutes, so this is generous; its job is to keep a client from reaching
- * integer overflow in the millisecond conversion.
- */
+/* An hour. Generous for a UI that offers minutes, and bounds the arithmetic. */
 #define	BTMGR_DISCOVER_MAX_SEC	3600
 #define	MAX_EVENTS	32
 
@@ -78,22 +62,11 @@
  */
 #define	PAIRING_TIMEOUT_SEC	60
 
-/*
- * udata tags. kqueue hands back whatever pointer we registered, so a distinct
- * address per source tells the handler what fired without a lookup table. For
- * clients we register the struct client * itself, which is the real payoff:
- * the event arrives with our own state already attached.
- */
+/* kqueue returns the pointer we registered, so an address names a source. */
 static int	tag_listen_sock;	/* the IPC listening socket */
 static int	tag_hci;		/* the passive HCI event socket */
-static int	tag_timer;
-static int	tag_discoverable;
 
-/*
- * A6: one pairing at a time, because A6.2 forbids the reload a second one's
- * step 4 would need. client may die before the key arrives, so every use goes
- * through client_alive().
- */
+/* A6.2 allows one at a time. client may die first, so use client_alive(). */
 struct parked_pairing {
 	struct pair_state	 state;
 	struct client		*client;
@@ -118,6 +91,7 @@ struct daemon {
 	struct hcsecd_ctl	hcsecd;		/* A8.1, the real pair_ops */
 	struct parked_pairing	pairing;
 	int		 clients_full;	/* so a connection flood logs once */
+	time_t		 discoverable_until;	/* 0 when not reverting */
 	volatile int	 quit;
 };
 
@@ -136,6 +110,7 @@ static void	refresh_hci(struct daemon *d);
 static void	reply(struct daemon *d, struct client *c, char *line);
 static int	blocked_while_pairing(const char *cmd);
 static int	client_count(const struct daemon *d);
+static void	tick(struct daemon *d, time_t now);
 static struct pair_ops	pair_ops_for(struct daemon *d);
 static void	finish_pairing(struct daemon *d, const bdaddr_t *addr);
 static void	abandon_pairing(struct daemon *d, const char *code,
@@ -149,8 +124,11 @@ static void
 usage(void)
 {
 	(void)fprintf(stderr,
-	    "usage: bluetoothmgrd [-f] [-n] [-r root] [-s socket]\n"
+	    "usage: bluetoothmgrd [-f] [-n] [-p pidfile] [-r root] "
+	    "[-s socket]\n"
 	    "\t-n\tdry run: report what would be written, write nothing\n"
+	    "\t-p\tpidfile, " DEFAULT_PIDFILE " by default. Its lock is what\n"
+	    "\t\tkeeps a second daemon from taking over the socket.\n"
 	    "\t-r\twrite the config files under root instead of /, for a\n"
 	    "\t\ttrial against copies. Use " BTMGR_SANDBOX ", never a\n"
 	    "\t\tworld-writable directory: a sandbox copy of hcsecd.conf\n"
@@ -210,6 +188,30 @@ broadcast(struct daemon *d, const char *line)
 		if (c->want_write)
 			(void)kq_add(d->kq, (uintptr_t)c->fd, EVFILT_WRITE, c);
 	}
+}
+
+/*
+ * Everything that happens on a schedule. Deadlines are timestamps checked
+ * here rather than kernel timers, so a clock jump makes them fire late rather
+ * than never.
+ */
+static void
+tick(struct daemon *d, time_t now)
+{
+
+	inflight_expire(&d->pending, now, on_expired, d);
+
+	if (d->pairing.state.active && now >= d->pairing.deadline)
+		abandon_pairing(d, "timeout", "no link key arrived");
+
+	if (d->discoverable_until != 0 && now >= d->discoverable_until) {
+		syslog(LOG_INFO, "discoverable timeout");
+		d->discoverable_until = 0;
+		if (d->last.adapter_present)
+			(void)btmgr_set_scan(d->last.adapter.node, 0, 1);
+	}
+
+	d->dirty = 1;
 }
 
 /* Walked rather than counted, so there is no tally to keep in step. */
@@ -749,23 +751,10 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		 * off. EV_ONESHOT deletes the registration once it fires, so
 		 * there is nothing to clean up afterwards.
 		 */
-		if (on && cmd.has_timeout && cmd.timeout > 0) {
-			struct kevent	kev;
-			int64_t		ms;
-
-			/*
-			 * Widen before multiplying. The range check above
-			 * already bounds this, but doing the arithmetic in
-			 * int64_t means the safety does not depend on
-			 * remembering that.
-			 */
-			ms = (int64_t)cmd.timeout * 1000;
-
-			EV_SET(&kev, 2, EVFILT_TIMER,
-			    EV_ADD | EV_ENABLE | EV_ONESHOT, 0, ms,
-			    &tag_discoverable);
-			(void)kevent(d->kq, &kev, 1, NULL, 0, NULL);
-		}
+		/* A deadline on the tick, for the same reason as the tick. */
+		d->discoverable_until = 0;
+		if (on && cmd.has_timeout && cmd.timeout > 0)
+			d->discoverable_until = time(NULL) + cmd.timeout;
 
 		d->dirty = 1;
 		reply(d, c, proto_ok(cmd.id));
@@ -966,7 +955,11 @@ main(int argc, char *argv[])
 	struct daemon	 d;
 	struct kevent	 events[MAX_EVENTS];
 	struct client	*c;
+	struct pidfh	*pfh;
 	const char	*root = NULL;
+	const char	*pidpath = DEFAULT_PIDFILE;
+	pid_t		 other;
+	time_t		 last_tick;
 	int		 ch, foreground = 0, dry_run = 0, i, n;
 
 	memset(&d, 0, sizeof(d));
@@ -975,13 +968,16 @@ main(int argc, char *argv[])
 	d.hci = -1;
 	d.sockpath = DEFAULT_SOCKET;
 
-	while ((ch = getopt(argc, argv, "fnr:s:")) != -1) {
+	while ((ch = getopt(argc, argv, "fnp:r:s:")) != -1) {
 		switch (ch) {
 		case 'f':
 			foreground = 1;
 			break;
 		case 'n':
 			dry_run = 1;
+			break;
+		case 'p':
+			pidpath = optarg;
 			break;
 		case 'r':
 			root = optarg;
@@ -1029,42 +1025,92 @@ main(int argc, char *argv[])
 	openlog("bluetoothmgrd", LOG_PID | (foreground ? LOG_PERROR : 0),
 	    LOG_DAEMON);
 
-	d.kq = kqueue();
-	if (d.kq < 0)
-		err(1, "kqueue");
+	/*
+	 * Before the socket: the lock is what stops a second daemon from
+	 * unlinking the first one's socket on its way to binding its own.
+	 */
+	pfh = pidfile_open(pidpath, 0600, &other);
+	if (pfh == NULL) {
+		if (errno == EEXIST)
+			errx(1, "already running as pid %d", (int)other);
+		err(1, "pidfile %s", pidpath);
+	}
 
+	/*
+	 * Bound before daemonising, since a socket that cannot be bound is the
+	 * likeliest startup failure and err(3) still reaches the terminal
+	 * here. An ordinary descriptor survives the fork.
+	 */
 	d.lfd = ipc_listen(d.sockpath, SOCKET_MODE);
-	if (d.lfd < 0)
+	if (d.lfd < 0) {
+		pidfile_remove(pfh);
 		err(1, "ipc_listen %s", d.sockpath);
+	}
 
-	if (kq_add(d.kq, (uintptr_t)d.lfd, EVFILT_READ, &tag_listen_sock) < 0)
-		err(1, "kevent add listener");
+	if (!foreground && daemon(0, 0) < 0) {
+		pidfile_remove(pfh);
+		err(1, "daemon");
+	}
+
+	/* After the fork, so the pid written is the one rc.subr will signal. */
+	pidfile_write(pfh);
+
+	/*
+	 * After the fork, never before: kqueue(2) says the queue is not
+	 * inherited by a child created with fork(2), so a queue made up here
+	 * would leave every later kevent() failing with EINVAL.
+	 *
+	 * Past this point stderr is gone, so failures go to syslog.
+	 */
+	d.kq = kqueue();
+	if (d.kq < 0) {
+		syslog(LOG_ERR, "kqueue: %m");
+		exit(1);
+	}
+
+	if (kq_add(d.kq, (uintptr_t)d.lfd, EVFILT_READ, &tag_listen_sock) < 0) {
+		syslog(LOG_ERR, "kevent add listener: %m");
+		exit(1);
+	}
 
 	if (kq_add(d.kq, SIGTERM, EVFILT_SIGNAL, NULL) < 0 ||
 	    kq_add(d.kq, SIGINT, EVFILT_SIGNAL, NULL) < 0 ||
-	    kq_add(d.kq, SIGHUP, EVFILT_SIGNAL, NULL) < 0)
-		err(1, "kevent add signals");
-
-	/* EVFILT_TIMER data is milliseconds by default. */
-	{
-		struct kevent	kev;
-
-		EV_SET(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ENABLE, 0,
-		    RECONCILE_MS, &tag_timer);
-		if (kevent(d.kq, &kev, 1, NULL, 0, NULL) < 0)
-			err(1, "kevent add timer");
+	    kq_add(d.kq, SIGHUP, EVFILT_SIGNAL, NULL) < 0) {
+		syslog(LOG_ERR, "kevent add signals: %m");
+		exit(1);
 	}
-
-	if (!foreground && daemon(0, 0) < 0)
-		err(1, "daemon");
 
 	syslog(LOG_INFO, "started, socket %s", d.sockpath);
 
 	/* Prime the state before the first client can ask for it. */
 	reconcile(&d);
 
+	last_tick = time(NULL);
+
 	while (!d.quit) {
-		n = kevent(d.kq, NULL, 0, events, MAX_EVENTS, NULL);
+		struct timespec	 wait;
+		time_t		 now, since;
+
+		/*
+		 * The tick is a kevent() timeout rather than an EVFILT_TIMER.
+		 * A periodic EVFILT_TIMER stops firing across a suspend and
+		 * resume, measured here: the daemon kept serving requests with
+		 * a snapshot frozen at the moment it went to sleep. Elapsed
+		 * time cannot be lost the same way, and a resume shows up as a
+		 * large gap that ticks immediately.
+		 */
+		now = time(NULL);
+		since = now - last_tick;
+		if (since < 0 || since >= RECONCILE_SEC) {
+			tick(&d, now);
+			last_tick = now;
+			since = 0;
+		}
+
+		wait.tv_sec = RECONCILE_SEC - since;
+		wait.tv_nsec = 0;
+
+		n = kevent(d.kq, NULL, 0, events, MAX_EVENTS, &wait);
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
@@ -1083,33 +1129,6 @@ main(int argc, char *argv[])
 					syslog(LOG_INFO, "shutting down");
 					d.quit = 1;
 				}
-				continue;
-			}
-
-			if (ev->udata == &tag_timer) {
-				/*
-				 * The tick doubles as the deadline check for
-				 * in-flight operations, so no extra timer is
-				 * needed for them.
-				 */
-				inflight_expire(&d.pending, time(NULL),
-				    on_expired, &d);
-
-				if (d.pairing.state.active &&
-				    time(NULL) >= d.pairing.deadline)
-					abandon_pairing(&d, "timeout",
-					    "no link key arrived");
-
-				d.dirty = 1;
-				continue;
-			}
-
-			if (ev->udata == &tag_discoverable) {
-				syslog(LOG_INFO, "discoverable timeout");
-				if (d.last.adapter_present)
-					(void)btmgr_set_scan(
-					    d.last.adapter.node, 0, 1);
-				d.dirty = 1;
 				continue;
 			}
 
@@ -1175,6 +1194,8 @@ main(int argc, char *argv[])
 	(void)unlink(d.sockpath);		/* SPEC.md A5.2 */
 	if (d.kq >= 0)
 		close(d.kq);
+
+	pidfile_remove(pfh);
 
 	syslog(LOG_INFO, "stopped");
 	closelog();
