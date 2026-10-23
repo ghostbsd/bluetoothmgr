@@ -5,8 +5,9 @@
 # "analyze: clean" whatever it found. WarningsAsErrors below makes "make tidy" a
 # gate instead of a suggestion.
 #
-# The rule here is to fix the code, not the config. Exactly one check is
-# disabled, and only because no code change can satisfy it on FreeBSD.
+# The rule here is to fix the code, not the config. Four checks are disabled,
+# each with its reason at the foot of this file, and each only because no code
+# change here can satisfy it.
 
 Checks: >
   -*,
@@ -19,7 +20,8 @@ Checks: >
   portability-*,
   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
   -misc-include-cleaner,
-  -bugprone-easily-swappable-parameters
+  -bugprone-easily-swappable-parameters,
+  -bugprone-casting-through-void
 
 # Our own headers only. A pattern like '.*/(src|include)/.*' looks right and is
 # not: it matches /usr/local/include, which buries us in findings from
@@ -36,7 +38,14 @@ WarningsAsErrors: '*'
 # --fix formats its edits with our .clang-format rather than LLVM defaults.
 FormatStyle: file
 
-# The three checks not in the standard, and why:
+# The four checks not in the standard, and why:
+#
+# bugprone-casting-through-void
+#   Fires inside GTK's own macros. GTK_WIDGET() and GTK_CONTAINER() expand to
+#   G_TYPE_CHECK_INSTANCE_CAST, which casts through void * by design, so every
+#   GTK program trips it and no edit to applet/src/*.c can help. Casting
+#   directly instead would silence it by discarding GLib's runtime type check,
+#   which trades a real safety net for a clean lint run.
 #
 # clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
 #   Demands snprintf_s, memcpy_s and memset_s from C11 Annex K. Annex K is

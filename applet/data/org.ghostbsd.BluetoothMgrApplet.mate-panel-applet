@@ -1,0 +1,11 @@
+[Applet Factory]
+Id=BluetoothMgrAppletFactory
+InProcess=true
+Location=/usr/local/lib/mate-panel/libbluetoothmgr-applet.so
+Name=BluetoothMgr Factory
+Description=Factory for BluetoothMgr
+
+[BluetoothMgrApplet]
+Name=Bluetooth
+Description=Manage Bluetooth adapters and devices
+Icon=bluetooth
