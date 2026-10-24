@@ -141,3 +141,19 @@ inflight_shift(struct inflight_table *t, time_t delta)
 			t->e[i].deadline -= delta;
 	}
 }
+
+time_t
+inflight_next_deadline(const struct inflight_table *t)
+{
+	time_t	earliest = 0;
+	int	i;
+
+	for (i = 0; i < INFLIGHT_MAX; i++) {
+		if (!t->e[i].used)
+			continue;
+		if (earliest == 0 || t->e[i].deadline < earliest)
+			earliest = t->e[i].deadline;
+	}
+
+	return (earliest);
+}

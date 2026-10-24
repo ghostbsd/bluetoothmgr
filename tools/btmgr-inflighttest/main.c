@@ -25,6 +25,7 @@ static void	 test_table_full(void);
 static void	 test_drop_client(void);
 static void	 test_expire(void);
 static void	 test_shift(void);
+static void	 test_next_deadline(void);
 
 static void
 ok(int cond, const char *fmt, ...)
@@ -230,6 +231,36 @@ test_shift(void)
 	ok(n == 1, "and leaves the original deadline in place");
 }
 
+static void
+test_next_deadline(void)
+{
+	struct inflight_table	 t;
+	bdaddr_t		 a = addr_of(9), b = addr_of(10);
+	time_t			 first;
+
+	printf("\nthe nearest deadline\n");
+
+	memset(&t, 0, sizeof(t));
+	ok(inflight_next_deadline(&t) == 0, "an empty table has none");
+
+	(void)inflight_add(&t, INFLIGHT_CONNECT, 6, NULL, &a, 0);
+	first = inflight_next_deadline(&t);
+	ok(first != 0, "one entry reports its own");
+
+	/* Parked later, so it must not become the answer. */
+	(void)inflight_add(&t, INFLIGHT_CONNECT, 7, NULL, &b, 0);
+	t.e[1].deadline = first + 100;
+	ok(inflight_next_deadline(&t) == first, "the earlier of two wins");
+
+	t.e[1].deadline = first - 100;
+	ok(inflight_next_deadline(&t) == first - 100,
+	    "whichever slot it is in");
+
+	(void)inflight_take(&t, INFLIGHT_CONNECT, &b);
+	ok(inflight_next_deadline(&t) == first,
+	    "taking the earlier one falls back to the later");
+}
+
 int
 main(void)
 {
@@ -242,6 +273,7 @@ main(void)
 	test_drop_client();
 	test_expire();
 	test_shift();
+	test_next_deadline();
 
 	printf("\n%d checks, %d failures\n", checks, failures);
 

@@ -102,4 +102,7 @@ void	inflight_drop_client(struct inflight_table *t, const struct client *c);
 /* Pull every deadline back by delta, after the clock stepped backwards. */
 void	inflight_shift(struct inflight_table *t, time_t delta);
 
+/* The earliest deadline in the table, or 0 when it is empty. */
+time_t	inflight_next_deadline(const struct inflight_table *t);
+
 #endif /* !BTMGRD_INFLIGHT_H_ */

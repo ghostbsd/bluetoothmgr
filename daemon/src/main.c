@@ -115,6 +115,7 @@ static void	reply(struct daemon *d, struct client *c, char *line);
 static int	blocked_while_pairing(const char *cmd);
 static int	client_count(const struct daemon *d);
 static int	unadmitted_client_count(const struct daemon *d);
+static time_t	next_deadline(const struct daemon *d);
 static void	tick(struct daemon *d, time_t now);
 static struct pair_ops	pair_ops_for(struct daemon *d);
 static void	finish_pairing(struct daemon *d, const bdaddr_t *addr);
@@ -238,6 +239,29 @@ clock_stepped_back(struct daemon *d, time_t delta)
 		d->discoverable_until -= delta;
 
 	inflight_shift(&d->pending, delta);
+}
+
+/*
+ * The earliest deadline the tick has to act on, or 0 when there is none. The
+ * reconcile interval alone is too coarse: a two second discoverable window
+ * would otherwise run until the next tick.
+ */
+static time_t
+next_deadline(const struct daemon *d)
+{
+	time_t	earliest, candidate;
+
+	earliest = inflight_next_deadline(&d->pending);
+
+	candidate = d->pairing.state.active ? d->pairing.deadline : 0;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	candidate = d->discoverable_until;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	return (earliest);
 }
 
 /* Walked rather than counted, so there is no tally to keep in step. */
@@ -1013,7 +1037,8 @@ main(int argc, char *argv[])
 	const char	*root = NULL;
 	const char	*pidpath = DEFAULT_PIDFILE;
 	pid_t		 other;
-	time_t		 last_tick;
+	time_t		 last_tick, prev_wall;
+	struct timespec	 prev_mono;
 	int		 ch, foreground = 0, dry_run = 0, i, n;
 
 	memset(&d, 0, sizeof(d));
@@ -1045,6 +1070,16 @@ main(int argc, char *argv[])
 	}
 	if (optind != argc)
 		usage();
+
+	/*
+	 * daemon(3) moves us to /, and a client only honours an absolute
+	 * $BTMGR_SOCKET, so a relative path binds somewhere nothing can reach.
+	 */
+	if (d.sockpath[0] != '/')
+		errx(1, "socket path must be absolute: %s", d.sockpath);
+
+	if (pidpath[0] != '/')
+		errx(1, "pidfile path must be absolute: %s", pidpath);
 
 	/*
 	 * Resolve the config paths before anything else, so a bad -r is a
@@ -1144,10 +1179,12 @@ main(int argc, char *argv[])
 	reconcile(&d);
 
 	last_tick = time(NULL);
+	prev_wall = last_tick;
+	(void)clock_gettime(CLOCK_MONOTONIC, &prev_mono);
 
 	while (!d.quit) {
-		struct timespec	 wait;
-		time_t		 now, since;
+		struct timespec	 wait, mono;
+		time_t		 now, since, elapsed, step, deadline, until;
 
 		/*
 		 * The tick is a kevent() timeout rather than an EVFILT_TIMER.
@@ -1158,17 +1195,45 @@ main(int argc, char *argv[])
 		 * large gap that ticks immediately.
 		 */
 		now = time(NULL);
+
+		/*
+		 * A monotonic reference beside the wall clock. Comparing the
+		 * two deltas catches a correction smaller than the time since
+		 * the last pass, which "now < last_tick" alone cannot see.
+		 * CLOCK_MONOTONIC does not cover a suspend, so a resume reads
+		 * as the wall clock running ahead and is left alone.
+		 */
+		(void)clock_gettime(CLOCK_MONOTONIC, &mono);
+		elapsed = mono.tv_sec - prev_mono.tv_sec;
+		if (elapsed > now - prev_wall) {
+			step = elapsed - (now - prev_wall);
+			clock_stepped_back(&d, step);
+			last_tick -= step;
+		}
+		prev_wall = now;
+		prev_mono = mono;
+
 		since = now - last_tick;
-		if (since < 0)
-			clock_stepped_back(&d, -since);
 		if (since < 0 || since >= RECONCILE_SEC) {
 			tick(&d, now);
 			last_tick = now;
 			since = 0;
 		}
 
+		/* Before blocking, or a tick's changes wait for the next pass. */
+		if (d.dirty)
+			reconcile(&d);
+
 		wait.tv_sec = RECONCILE_SEC - since;
 		wait.tv_nsec = 0;
+
+		/* Wake on the nearest deadline when it falls sooner. */
+		deadline = next_deadline(&d);
+		if (deadline != 0) {
+			until = deadline > now ? deadline - now : 0;
+			if (until < wait.tv_sec)
+				wait.tv_sec = until;
+		}
 
 		n = kevent(d.kq, NULL, 0, events, MAX_EVENTS, &wait);
 		if (n < 0) {
