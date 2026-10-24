@@ -1,4 +1,4 @@
-# bluetoothmgr-applet - the MATE panel applet (PLAN.md M4).
+# bluetoothmgr-applet - the MATE panel applet (PLAN.md M6).
 #
 # A module the panel dlopens, not a program. See src/main.c for why it is not
 # out of process.
