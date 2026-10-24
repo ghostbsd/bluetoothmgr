@@ -44,7 +44,7 @@
 
 static int	set_nonblock(int fd);
 static void	read_peer_cred(struct client *c);
-static pid_t	read_sender(struct msghdr *msg);
+static pid_t	read_sender(struct msghdr *msg, uid_t *uid);
 static int	buf_append(char **buf, size_t *len, size_t *cap,
 		    const char *data, size_t n, size_t limit);
 
@@ -141,10 +141,12 @@ read_peer_cred(struct client *c)
  * nothing.
  */
 static pid_t
-read_sender(struct msghdr *msg)
+read_sender(struct msghdr *msg, uid_t *uid)
 {
 	struct cmsghdr		*cm;
 	const struct sockcred2	*sc;
+
+	*uid = (uid_t)-1;
 
 	if ((msg->msg_flags & MSG_CTRUNC) != 0)
 		return (-1);
@@ -156,8 +158,10 @@ read_sender(struct msghdr *msg)
 			continue;
 
 		sc = (const void *)CMSG_DATA(cm);
-		if (sc->sc_pid > 0)
+		if (sc->sc_pid > 0) {
+			*uid = sc->sc_euid;
 			return (sc->sc_pid);
+		}
 	}
 
 	return (-1);
@@ -167,20 +171,15 @@ read_sender(struct msghdr *msg)
 static int	path_lock = -1;
 
 /*
- * Take exclusive ownership of a socket path before touching it.
- *
- * Probing with connect() cannot work: a live listener with a full backlog
- * refuses just like a socket nobody is on, so a busy daemon reads as stale.
- * A lock also closes the window where two starts both probe, both find
- * nothing, and both bind.
- *
- * Returns 0 with the lock held, or -1, EADDRINUSE when another daemon owns it.
+ * Own the path before touching it. 0, or -1 with EADDRINUSE if another daemon
+ * holds it. A connect() probe cannot tell a full backlog from a dead socket.
  */
 static int
 claim_socket_path(const char *path)
 {
-	char	lockpath[PATH_MAX];
-	int	fd, saved;
+	struct stat	sb, named;
+	char		lockpath[PATH_MAX];
+	int		fd, saved;
 
 	if (snprintf(lockpath, sizeof(lockpath), "%s.lock", path) >=
 	    (int)sizeof(lockpath)) {
@@ -188,14 +187,34 @@ claim_socket_path(const char *path)
 		return (-1);
 	}
 
-	fd = open(lockpath, O_CREAT | O_RDONLY | O_CLOEXEC, 0600);
+	/*
+	 * O_NOFOLLOW and O_NONBLOCK because the socket directory may be
+	 * writable in a -r run: a symlink or a FIFO left at this name would
+	 * otherwise redirect us or block open() forever.
+	 */
+	fd = open(lockpath, O_CREAT | O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
+	    O_NONBLOCK, 0600);
 	if (fd < 0)
 		return (-1);
+
+	if (fstat(fd, &sb) < 0 || !S_ISREG(sb.st_mode)) {
+		(void)close(fd);
+		errno = EFTYPE;
+		return (-1);
+	}
 
 	if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
 		saved = errno;
 		(void)close(fd);
 		errno = (saved == EWOULDBLOCK) ? EADDRINUSE : saved;
+		return (-1);
+	}
+
+	/* The name must still be the inode we locked, or we locked nothing. */
+	if (stat(lockpath, &named) < 0 || named.st_dev != sb.st_dev ||
+	    named.st_ino != sb.st_ino) {
+		(void)close(fd);
+		errno = EADDRINUSE;
 		return (-1);
 	}
 
@@ -219,10 +238,7 @@ ipc_listen(const char *path, mode_t mode)
 	 * SOCK_CLOEXEC: nothing here spawns today, but a child inheriting the
 	 * listening socket would hold the channel that A5.3 authorizes on.
 	 */
-	/*
-	 * SPEC.md A5.2 says stale, not live. Every unlink below is guarded by
-	 * this lock, so we only ever remove a path no other daemon owns.
-	 */
+	/* A5.2 says stale, not live. The lock guards every unlink below. */
 	if (claim_socket_path(path) < 0)
 		return (-1);
 
@@ -296,6 +312,7 @@ ipc_accept(int lfd)
 
 	c->fd = fd;
 	c->send_pid = -1;
+	c->send_uid = (uid_t)-1;
 
 	read_peer_cred(c);
 
@@ -328,6 +345,7 @@ ipc_client_read(struct client *c)
 	char		 buf[4096];
 	ssize_t		 n;
 	pid_t		 sender;
+	uid_t		 sender_uid;
 
 	for (;;) {
 		iov.iov_base = buf;
@@ -351,7 +369,7 @@ ipc_client_read(struct client *c)
 			return (-1);		/* peer closed */
 
 		/* A5.5. No credentials means no sender we can authorize. */
-		sender = read_sender(&msg);
+		sender = read_sender(&msg, &sender_uid);
 
 		/*
 		 * A5.5. Bytes still waiting to complete a line came from
@@ -359,8 +377,9 @@ ipc_client_read(struct client *c)
 		 */
 		if (c->in_len == c->in_taken) {
 			c->send_pid = sender;
+			c->send_uid = sender_uid;
 			c->send_mixed = 0;
-		} else if (sender != c->send_pid) {
+		} else if (sender != c->send_pid || sender_uid != c->send_uid) {
 			c->send_mixed = 1;
 		}
 

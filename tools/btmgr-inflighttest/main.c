@@ -13,6 +13,8 @@
 #include "btmgr.h"
 #include "inflight.h"
 
+#define	BASE	((time_t)1000000)
+
 static int	 checks;
 static int	 failures;
 
@@ -24,7 +26,6 @@ static void	 test_take_by_handle(void);
 static void	 test_table_full(void);
 static void	 test_drop_client(void);
 static void	 test_expire(void);
-static void	 test_shift(void);
 static void	 test_next_deadline(void);
 
 static void
@@ -74,9 +75,9 @@ test_add_and_take(void)
 
 	memset(&t, 0, sizeof(t));
 
-	ok(inflight_add(&t, INFLIGHT_CONNECT, 7, NULL, &a, 0) == 0,
+	ok(inflight_add(&t, INFLIGHT_CONNECT, 7, NULL, &a, 0, BASE) == 0,
 	    "a connect parks");
-	ok(inflight_add(&t, INFLIGHT_CONNECT, 8, NULL, &b, 0) == 0,
+	ok(inflight_add(&t, INFLIGHT_CONNECT, 8, NULL, &b, 0, BASE) == 0,
 	    "a second, for another address");
 
 	got = inflight_take(&t, INFLIGHT_CONNECT, &a);
@@ -102,7 +103,7 @@ test_take_by_handle(void)
 	printf("\ntake by handle\n");
 
 	memset(&t, 0, sizeof(t));
-	(void)inflight_add(&t, INFLIGHT_DISCONNECT, 11, NULL, &a, 0x2a);
+	(void)inflight_add(&t, INFLIGHT_DISCONNECT, 11, NULL, &a, 0x2a, BASE);
 
 	ok(inflight_take_handle(&t, INFLIGHT_DISCONNECT, 0x2b) == NULL,
 	    "a handle that was never parked matches nothing");
@@ -124,13 +125,14 @@ test_table_full(void)
 
 	for (i = 0; i < INFLIGHT_MAX; i++) {
 		a = addr_of((uint8_t)(0x40 + i));
-		if (inflight_add(&t, INFLIGHT_CONNECT, i, NULL, &a, 0) == 0)
+		if (inflight_add(&t, INFLIGHT_CONNECT, i, NULL, &a, 0,
+		    BASE) == 0)
 			added++;
 	}
 	ok(added == INFLIGHT_MAX, "%d entries fit", INFLIGHT_MAX);
 
 	a = addr_of(0xfe);
-	ok(inflight_add(&t, INFLIGHT_CONNECT, 99, NULL, &a, 0) == -1,
+	ok(inflight_add(&t, INFLIGHT_CONNECT, 99, NULL, &a, 0, BASE) == -1,
 	    "one more is refused, which the daemon reports as busy");
 }
 
@@ -145,8 +147,8 @@ test_drop_client(void)
 	printf("\ndropping a client\n");
 
 	memset(&t, 0, sizeof(t));
-	(void)inflight_add(&t, INFLIGHT_CONNECT, 1, mine, &a, 0);
-	(void)inflight_add(&t, INFLIGHT_CONNECT, 2, NULL, &b, 0);
+	(void)inflight_add(&t, INFLIGHT_CONNECT, 1, mine, &a, 0, BASE);
+	(void)inflight_add(&t, INFLIGHT_CONNECT, 2, NULL, &b, 0, BASE);
 
 	inflight_drop_client(&t, mine);
 
@@ -161,74 +163,23 @@ test_expire(void)
 {
 	struct inflight_table	 t;
 	bdaddr_t		 a = addr_of(7);
-	time_t			 base;
 	int			 n = 0;
 
 	printf("\nexpiry\n");
 
 	memset(&t, 0, sizeof(t));
+	(void)inflight_add(&t, INFLIGHT_CONNECT, 3, NULL, &a, 0, BASE);
 
-	/* inflight_add() stamps the deadline from time(NULL), not from us. */
-	base = time(NULL);
-	(void)inflight_add(&t, INFLIGHT_CONNECT, 3, NULL, &a, 0);
-
-	inflight_expire(&t, base, count_expired, &n);
-	ok(n == 0, "nothing expires before the deadline");
+	inflight_expire(&t, BASE + INFLIGHT_TIMEOUT_SEC - 1, count_expired, &n);
+	ok(n == 0, "nothing expires a second before the deadline");
 
 	n = 0;
-	inflight_expire(&t, base + INFLIGHT_TIMEOUT_SEC + 1, count_expired, &n);
-	ok(n == 1, "the entry expires once past it");
+	inflight_expire(&t, BASE + INFLIGHT_TIMEOUT_SEC, count_expired, &n);
+	ok(n == 1, "it expires exactly on it");
 
 	n = 0;
-	inflight_expire(&t, base + INFLIGHT_TIMEOUT_SEC + 1, count_expired, &n);
+	inflight_expire(&t, BASE + INFLIGHT_TIMEOUT_SEC, count_expired, &n);
 	ok(n == 0, "and is not reported twice");
-}
-
-/*
- * The deadlines are wall-clock, so a backwards step would extend them. This
- * is what keeps a discoverable window from outlasting its timeout.
- */
-static void
-test_shift(void)
-{
-	struct inflight_table	 t;
-	bdaddr_t		 a = addr_of(8);
-	time_t			 base;
-	int			 n;
-
-	printf("\nrebasing after the clock steps back\n");
-
-	memset(&t, 0, sizeof(t));
-	base = time(NULL);
-	(void)inflight_add(&t, INFLIGHT_CONNECT, 4, NULL, &a, 0);
-
-	/* An hour backwards. Unshifted, the entry would gain an hour of life. */
-	inflight_shift(&t, 3600);
-
-	n = 0;
-	inflight_expire(&t, base - 3600 + INFLIGHT_TIMEOUT_SEC - 2,
-	    count_expired, &n);
-	ok(n == 0, "the wait that was asked for is still honoured");
-
-	n = 0;
-	inflight_expire(&t, base - 3600 + INFLIGHT_TIMEOUT_SEC + 1,
-	    count_expired, &n);
-	ok(n == 1, "and it expires on the rebased deadline, not an hour later");
-
-	memset(&t, 0, sizeof(t));
-	base = time(NULL);
-	(void)inflight_add(&t, INFLIGHT_CONNECT, 5, NULL, &a, 0);
-	inflight_shift(&t, 0);
-	inflight_shift(&t, -60);
-
-	n = 0;
-	inflight_expire(&t, base + INFLIGHT_TIMEOUT_SEC - 2, count_expired, &n);
-	ok(n == 0, "a zero or backward delta does not expire it early");
-
-	/* Without the guard, a negative delta would push the deadline out. */
-	n = 0;
-	inflight_expire(&t, base + INFLIGHT_TIMEOUT_SEC + 1, count_expired, &n);
-	ok(n == 1, "and leaves the original deadline in place");
 }
 
 static void
@@ -236,29 +187,29 @@ test_next_deadline(void)
 {
 	struct inflight_table	 t;
 	bdaddr_t		 a = addr_of(9), b = addr_of(10);
-	time_t			 first;
 
 	printf("\nthe nearest deadline\n");
 
 	memset(&t, 0, sizeof(t));
 	ok(inflight_next_deadline(&t) == 0, "an empty table has none");
 
-	(void)inflight_add(&t, INFLIGHT_CONNECT, 6, NULL, &a, 0);
-	first = inflight_next_deadline(&t);
-	ok(first != 0, "one entry reports its own");
+	(void)inflight_add(&t, INFLIGHT_CONNECT, 6, NULL, &a, 0, BASE);
+	ok(inflight_next_deadline(&t) == BASE + INFLIGHT_TIMEOUT_SEC,
+	    "one entry reports its own");
 
-	/* Parked later, so it must not become the answer. */
-	(void)inflight_add(&t, INFLIGHT_CONNECT, 7, NULL, &b, 0);
-	t.e[1].deadline = first + 100;
-	ok(inflight_next_deadline(&t) == first, "the earlier of two wins");
+	(void)inflight_add(&t, INFLIGHT_CONNECT, 7, NULL, &b, 0, BASE + 100);
+	ok(inflight_next_deadline(&t) == BASE + INFLIGHT_TIMEOUT_SEC,
+	    "a later entry does not become the answer");
 
-	t.e[1].deadline = first - 100;
-	ok(inflight_next_deadline(&t) == first - 100,
-	    "whichever slot it is in");
-
-	(void)inflight_take(&t, INFLIGHT_CONNECT, &b);
-	ok(inflight_next_deadline(&t) == first,
+	(void)inflight_take(&t, INFLIGHT_CONNECT, &a);
+	ok(inflight_next_deadline(&t) == BASE + 100 + INFLIGHT_TIMEOUT_SEC,
 	    "taking the earlier one falls back to the later");
+
+	memset(&t, 0, sizeof(t));
+	(void)inflight_add(&t, INFLIGHT_CONNECT, 8, NULL, &a, 0, BASE + 100);
+	(void)inflight_add(&t, INFLIGHT_CONNECT, 9, NULL, &b, 0, BASE);
+	ok(inflight_next_deadline(&t) == BASE + INFLIGHT_TIMEOUT_SEC,
+	    "whichever slot it is in");
 }
 
 int
@@ -272,7 +223,6 @@ main(void)
 	test_table_full();
 	test_drop_client();
 	test_expire();
-	test_shift();
 	test_next_deadline();
 
 	printf("\n%d checks, %d failures\n", checks, failures);

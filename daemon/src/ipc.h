@@ -43,6 +43,7 @@ struct client {
 
 	/* A5.5. Who sent the bytes now buffered, from SCM_CREDS2. */
 	pid_t		 send_pid;
+	uid_t		 send_uid;	/* (uid_t)-1 when none was reported */
 	int		 send_mixed;	/* more than one sender in one line */
 
 	/* The A5.3 verdict at accept, for the cap only. Commands recheck. */

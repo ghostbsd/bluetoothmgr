@@ -72,7 +72,8 @@ struct inflight_table {
  * caller should report as "busy" per SPEC.md B6.
  */
 int	inflight_add(struct inflight_table *t, enum inflight_kind kind,
-	    int id, struct client *c, const bdaddr_t *addr, uint16_t handle);
+	    int id, struct client *c, const bdaddr_t *addr, uint16_t handle,
+	    time_t now);
 
 /*
  * Find and remove the entry matching this address and kind.
@@ -98,9 +99,6 @@ void	inflight_expire(struct inflight_table *t, time_t now,
  * completion arriving later does not write to freed memory.
  */
 void	inflight_drop_client(struct inflight_table *t, const struct client *c);
-
-/* Pull every deadline back by delta, after the clock stepped backwards. */
-void	inflight_shift(struct inflight_table *t, time_t delta);
 
 /* The earliest deadline in the table, or 0 when it is empty. */
 time_t	inflight_next_deadline(const struct inflight_table *t);

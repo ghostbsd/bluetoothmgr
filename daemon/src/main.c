@@ -113,6 +113,7 @@ static void	reconcile(struct daemon *d);
 static void	refresh_hci(struct daemon *d);
 static void	reply(struct daemon *d, struct client *c, char *line);
 static int	blocked_while_pairing(const char *cmd);
+static int	client_allowed(const struct client *c);
 static int	client_count(const struct daemon *d);
 static int	unadmitted_client_count(const struct daemon *d);
 static time_t	next_deadline(const struct daemon *d);
@@ -163,6 +164,17 @@ kq_del(int kq, uintptr_t ident, short filter)
 	return (kevent(kq, &kev, 1, NULL, 0, NULL));
 }
 
+/* The sender once one is known, otherwise whoever connected. */
+static int
+client_allowed(const struct client *c)
+{
+
+	if (c->send_uid != (uid_t)-1)
+		return (btmgr_session_peer_allowed(c->send_uid, c->send_pid));
+
+	return (btmgr_session_peer_allowed(c->uid, c->pid));
+}
+
 /*
  * Send a line to every client, dropping any that cannot take it.
  *
@@ -182,7 +194,7 @@ broadcast(struct daemon *d, const char *line)
 		next = c->next;
 
 		/* A5.4. Dropped, not skipped: queued state would flush later. */
-		if (!btmgr_session_peer_allowed(c->uid, c->pid)) {
+		if (!client_allowed(c)) {
 			drop_client(d, c);
 			continue;
 		}
@@ -196,11 +208,7 @@ broadcast(struct daemon *d, const char *line)
 	}
 }
 
-/*
- * Everything that happens on a schedule. Deadlines are timestamps checked
- * here rather than kernel timers, so a clock jump makes them fire late rather
- * than never.
- */
+/* Everything on a schedule. now is monotonic, see now_mono(). */
 static void
 tick(struct daemon *d, time_t now)
 {
@@ -220,32 +228,19 @@ tick(struct daemon *d, time_t now)
 	d->dirty = 1;
 }
 
-/*
- * The deadlines are wall-clock timestamps, so a backwards step would extend
- * every one of them. Pulling them back preserves the wait that was asked for,
- * which matters most for discoverability: A8 should not outlast its timeout
- * because someone corrected the clock.
- */
-static void
-clock_stepped_back(struct daemon *d, time_t delta)
+/* Every deadline uses this. CLOCK_MONOTONIC covers a suspend on FreeBSD. */
+static time_t
+now_mono(void)
 {
+	struct timespec	 ts;
 
-	syslog(LOG_NOTICE, "clock went back %lld seconds, rebasing deadlines",
-	    (long long)delta);
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+		return (time(NULL));
 
-	if (d->pairing.state.active)
-		d->pairing.deadline -= delta;
-	if (d->discoverable_until != 0)
-		d->discoverable_until -= delta;
-
-	inflight_shift(&d->pending, delta);
+	return (ts.tv_sec);
 }
 
-/*
- * The earliest deadline the tick has to act on, or 0 when there is none. The
- * reconcile interval alone is too coarse: a two second discoverable window
- * would otherwise run until the next tick.
- */
+/* The earliest deadline to wake for, or 0. The tick alone is too coarse. */
 static time_t
 next_deadline(const struct daemon *d)
 {
@@ -595,7 +590,7 @@ do_pair(struct daemon *d, struct client *c, const struct proto_cmd *cmd)
 
 	d->pairing.client = c;
 	d->pairing.id = cmd->id;
-	d->pairing.deadline = time(NULL) + PAIRING_TIMEOUT_SEC;
+	d->pairing.deadline = now_mono() + PAIRING_TIMEOUT_SEC;
 	if (cmd->has_device_name)
 		(void)strlcpy(d->pairing.name, cmd->device_name,
 		    sizeof(d->pairing.name));
@@ -649,8 +644,11 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 	/* Parsed only for the id, per B3.1; not acted on until A5.3 passes. */
 	parsed = proto_parse_cmd(line, len, &cmd, code, sizeof(code));
 
-	/* A5.3, re-checked per command per A9.7: a session can end mid-connection. */
-	if (!btmgr_session_peer_allowed(c->uid, c->send_pid)) {
+	/*
+	 * A5.3, re-checked per command per A9.7. The sender's own uid, not the
+	 * one that connected: a root process can pass the socket on.
+	 */
+	if (!btmgr_session_peer_allowed(c->send_uid, c->send_pid)) {
 		reply(d, c, proto_error(cmd.id, "not_permitted",
 		    "not root and not in a GUI session"));
 		return;
@@ -703,7 +701,7 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		 * arrives implausibly fast still finds someone waiting.
 		 */
 		if (inflight_add(&d->pending, INFLIGHT_CONNECT, cmd.id, c,
-		    &cmd.addr, 0) < 0) {
+		    &cmd.addr, 0, now_mono()) < 0) {
 			reply(d, c, proto_error(cmd.id, "busy",
 			    "too many operations in flight"));
 			return;
@@ -747,7 +745,7 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		}
 
 		if (inflight_add(&d->pending, INFLIGHT_DISCONNECT, cmd.id, c,
-		    &cmd.addr, handle) < 0) {
+		    &cmd.addr, handle, now_mono()) < 0) {
 			reply(d, c, proto_error(cmd.id, "busy", NULL));
 			return;
 		}
@@ -817,7 +815,7 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		/* A deadline on the tick, for the same reason as the tick. */
 		d->discoverable_until = 0;
 		if (on && cmd.has_timeout && cmd.timeout > 0)
-			d->discoverable_until = time(NULL) + cmd.timeout;
+			d->discoverable_until = now_mono() + cmd.timeout;
 
 		d->dirty = 1;
 		reply(d, c, proto_ok(cmd.id));
@@ -1037,8 +1035,7 @@ main(int argc, char *argv[])
 	const char	*root = NULL;
 	const char	*pidpath = DEFAULT_PIDFILE;
 	pid_t		 other;
-	time_t		 last_tick, prev_wall;
-	struct timespec	 prev_mono;
+	time_t		 last_tick;
 	int		 ch, foreground = 0, dry_run = 0, i, n;
 
 	memset(&d, 0, sizeof(d));
@@ -1071,10 +1068,7 @@ main(int argc, char *argv[])
 	if (optind != argc)
 		usage();
 
-	/*
-	 * daemon(3) moves us to /, and a client only honours an absolute
-	 * $BTMGR_SOCKET, so a relative path binds somewhere nothing can reach.
-	 */
+	/* daemon(3) moves us to /, so a relative path binds out of reach. */
 	if (d.sockpath[0] != '/')
 		errx(1, "socket path must be absolute: %s", d.sockpath);
 
@@ -1141,13 +1135,6 @@ main(int argc, char *argv[])
 		err(1, "daemon");
 	}
 
-	/* After the fork, so the pid written is the one rc.subr will signal. */
-	if (pidfile_write(pfh) < 0) {
-		syslog(LOG_ERR, "pidfile %s: %m", pidpath);
-		pidfile_remove(pfh);
-		exit(1);
-	}
-
 	/*
 	 * After the fork, never before: kqueue(2) says the queue is not
 	 * inherited by a child created with fork(2), so a queue made up here
@@ -1173,18 +1160,27 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
+	/*
+	 * Last: the pid is the forked one, and SIGTERM is ignored until the
+	 * filters above exist, so publishing earlier loses a stop sent in
+	 * between.
+	 */
+	if (pidfile_write(pfh) < 0) {
+		syslog(LOG_ERR, "pidfile %s: %m", pidpath);
+		pidfile_remove(pfh);
+		exit(1);
+	}
+
 	syslog(LOG_INFO, "started, socket %s", d.sockpath);
 
 	/* Prime the state before the first client can ask for it. */
 	reconcile(&d);
 
-	last_tick = time(NULL);
-	prev_wall = last_tick;
-	(void)clock_gettime(CLOCK_MONOTONIC, &prev_mono);
+	last_tick = now_mono();
 
 	while (!d.quit) {
-		struct timespec	 wait, mono;
-		time_t		 now, since, elapsed, step, deadline, until;
+		struct timespec	 wait;
+		time_t		 now, since, deadline, until;
 
 		/*
 		 * The tick is a kevent() timeout rather than an EVFILT_TIMER.
@@ -1194,25 +1190,7 @@ main(int argc, char *argv[])
 		 * time cannot be lost the same way, and a resume shows up as a
 		 * large gap that ticks immediately.
 		 */
-		now = time(NULL);
-
-		/*
-		 * A monotonic reference beside the wall clock. Comparing the
-		 * two deltas catches a correction smaller than the time since
-		 * the last pass, which "now < last_tick" alone cannot see.
-		 * CLOCK_MONOTONIC does not cover a suspend, so a resume reads
-		 * as the wall clock running ahead and is left alone.
-		 */
-		(void)clock_gettime(CLOCK_MONOTONIC, &mono);
-		elapsed = mono.tv_sec - prev_mono.tv_sec;
-		if (elapsed > now - prev_wall) {
-			step = elapsed - (now - prev_wall);
-			clock_stepped_back(&d, step);
-			last_tick -= step;
-		}
-		prev_wall = now;
-		prev_mono = mono;
-
+		now = now_mono();
 		since = now - last_tick;
 		if (since < 0 || since >= RECONCILE_SEC) {
 			tick(&d, now);
