@@ -23,6 +23,13 @@
 /* How often to retry a daemon that is not running, in seconds. */
 #define	RETRY_SECONDS	5
 
+/*
+ * common/ipc_client.c only expires a request from inside its dispatch, which
+ * runs when the fd is readable. A daemon that accepts the probe and then goes
+ * quiet never makes it readable, so the deadline needs a timer of its own.
+ */
+#define	EXPIRY_SECONDS	(BTMGR_REQUEST_TIMEOUT_SEC + 1)
+
 enum applet_state {
 	APPLET_ABSENT = 0,	/* no adapter, or no daemon */
 	APPLET_OFF,		/* adapter present, stack down */
@@ -36,7 +43,10 @@ struct applet_ui {
 	struct btmgr_ipc	*conn;
 	guint			 watch;		/* fd source, 0 when none */
 	guint			 retry;		/* timer source, 0 when none */
+	guint			 expiry;	/* probe deadline, 0 when none */
 	int			 asked;		/* get_state already sent */
+	int			 probe_failed;	/* act once dispatch has returned */
+	char			 failure[128];	/* why, for the tooltip */
 	enum applet_state	 state;
 };
 
@@ -50,6 +60,7 @@ static void	 on_reply(const struct proto_msg *reply, void *data);
 static void	 on_event(const struct proto_msg *event, void *data);
 static gboolean	 on_readable(gint fd, GIOCondition cond, gpointer data);
 static gboolean	 on_retry(gpointer data);
+static gboolean	 on_expiry(gpointer data);
 static void	 connect_daemon(struct applet_ui *ui);
 static void	 on_change_size(MatePanelApplet *applet, guint size,
 		     gpointer data);
@@ -106,11 +117,16 @@ disconnect(struct applet_ui *ui, const char *why)
 		g_source_remove(ui->watch);
 		ui->watch = 0;
 	}
+	if (ui->expiry != 0) {
+		g_source_remove(ui->expiry);
+		ui->expiry = 0;
+	}
 	if (ui->conn != NULL) {
 		btmgr_ipc_close(ui->conn);
 		ui->conn = NULL;
 	}
 	ui->asked = 0;
+	ui->probe_failed = 0;
 
 	set_state(ui, APPLET_ABSENT, why);
 
@@ -134,21 +150,36 @@ ask_state(struct applet_ui *ui)
 	memset(&cmd, 0, sizeof(cmd));
 	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
 
-	if (btmgr_ipc_request(ui->conn, &cmd, on_reply, ui) == 0)
-		ui->asked = 1;
+	if (btmgr_ipc_request(ui->conn, &cmd, on_reply, ui) != 0)
+		return;
+
+	ui->asked = 1;
+	if (ui->expiry == 0)
+		ui->expiry = g_timeout_add_seconds(EXPIRY_SECONDS, on_expiry, ui);
 }
 
+/*
+ * Cannot close the connection here: ipc_client.h forbids it from a callback,
+ * because the dispatch loop is still walking this connection. The caller
+ * disconnects once it has returned, which puts the retry back on one path.
+ */
 static void
 on_reply(const struct proto_msg *reply, void *data)
 {
 	struct applet_ui	*ui = data;
+	const char		*why;
 
 	if (reply->succeeded)
 		return;
 
 	/* A5.3. Worth saying out loud: the icon alone cannot show it. */
-	set_state(ui, APPLET_ABSENT, reply->error_detail[0] != '\0' ?
-	    reply->error_detail : reply->error_code);
+	why = reply->error_detail[0] != '\0' ? reply->error_detail :
+	    reply->error_code;
+
+	(void)g_strlcpy(ui->failure, why, sizeof(ui->failure));
+	ui->probe_failed = 1;
+
+	set_state(ui, APPLET_ABSENT, ui->failure);
 }
 
 static void
@@ -193,6 +224,16 @@ on_readable(gint fd, GIOCondition cond, gpointer data)
 		return (G_SOURCE_REMOVE);
 	}
 
+	/*
+	 * A refusal is not permanent: it reflects whether our session was
+	 * recognised at the moment we asked. Reconnecting re-probes it.
+	 */
+	if (ui->probe_failed) {
+		ui->watch = 0;
+		disconnect(ui, ui->failure);
+		return (G_SOURCE_REMOVE);
+	}
+
 	ask_state(ui);
 
 	return (G_SOURCE_CONTINUE);
@@ -205,6 +246,21 @@ on_retry(gpointer data)
 
 	ui->retry = 0;
 	connect_daemon(ui);
+
+	return (G_SOURCE_REMOVE);
+}
+
+static gboolean
+on_expiry(gpointer data)
+{
+	struct applet_ui	*ui = data;
+
+	/* Cleared first: disconnect() must not remove a source mid-callback. */
+	ui->expiry = 0;
+
+	/* expire_requests() calls on_reply, so the flag is set by now. */
+	if (btmgr_ipc_expire_requests(ui->conn) > 0 && ui->probe_failed)
+		disconnect(ui, ui->failure);
 
 	return (G_SOURCE_REMOVE);
 }
@@ -244,6 +300,8 @@ on_destroy(GtkWidget *widget, gpointer data)
 		g_source_remove(ui->retry);
 	if (ui->watch != 0)
 		g_source_remove(ui->watch);
+	if (ui->expiry != 0)
+		g_source_remove(ui->expiry);
 	if (ui->conn != NULL)
 		btmgr_ipc_close(ui->conn);
 
