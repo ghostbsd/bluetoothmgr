@@ -127,3 +127,17 @@ inflight_drop_client(struct inflight_table *t, const struct client *c)
 			t->e[i].used = 0;
 	}
 }
+
+void
+inflight_shift(struct inflight_table *t, time_t delta)
+{
+	int	i;
+
+	if (delta <= 0)
+		return;
+
+	for (i = 0; i < INFLIGHT_MAX; i++) {
+		if (t->e[i].used)
+			t->e[i].deadline -= delta;
+	}
+}

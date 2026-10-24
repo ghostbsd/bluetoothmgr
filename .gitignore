@@ -86,6 +86,7 @@ tools/btmgr-prototest/btmgr-prototest
 tools/btmgr-linetest/btmgr-linetest
 tools/btmgr-clienttest/btmgr-clienttest
 tools/btmgr-sesstest/btmgr-sesstest
+tools/btmgr-inflighttest/btmgr-inflighttest
 
 daemon/bluetoothmgrd
 

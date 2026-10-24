@@ -219,6 +219,27 @@ tick(struct daemon *d, time_t now)
 	d->dirty = 1;
 }
 
+/*
+ * The deadlines are wall-clock timestamps, so a backwards step would extend
+ * every one of them. Pulling them back preserves the wait that was asked for,
+ * which matters most for discoverability: A8 should not outlast its timeout
+ * because someone corrected the clock.
+ */
+static void
+clock_stepped_back(struct daemon *d, time_t delta)
+{
+
+	syslog(LOG_NOTICE, "clock went back %lld seconds, rebasing deadlines",
+	    (long long)delta);
+
+	if (d->pairing.state.active)
+		d->pairing.deadline -= delta;
+	if (d->discoverable_until != 0)
+		d->discoverable_until -= delta;
+
+	inflight_shift(&d->pending, delta);
+}
+
 /* Walked rather than counted, so there is no tally to keep in step. */
 static int
 client_count(const struct daemon *d)
@@ -1138,6 +1159,8 @@ main(int argc, char *argv[])
 		 */
 		now = time(NULL);
 		since = now - last_tick;
+		if (since < 0)
+			clock_stepped_back(&d, -since);
 		if (since < 0 || since >= RECONCILE_SEC) {
 			tick(&d, now);
 			last_tick = now;
