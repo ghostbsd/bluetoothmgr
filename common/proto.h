@@ -95,6 +95,11 @@ struct proto_adapter_state {
 	int	scanning;
 	int	config_readable;
 
+	/* The adapter object, present only while adapter_present. */
+	bdaddr_t	addr;
+	char		name[BTMGR_NAME_SIZE];
+	char		node[HCI_DEVNAME_SIZE];
+
 	/*
 	 * How many of connections[] were decoded, which is the array's length
 	 * capped at BTMGR_MAX_CONNS. The daemon cannot report more than that,

@@ -39,6 +39,7 @@ static int	 pin_is_sendable(const char *pin);
 static int	 set_string(json_t *obj, const char *key, const char *value);
 static int	 read_boolean(json_t *obj, const char *key, int *out);
 static int	 json_string_is(json_t *value, const char *want);
+static int	 read_adapter(json_t *obj, struct proto_adapter_state *out);
 static int	 read_connection(json_t *obj, struct proto_connection *out);
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
@@ -169,6 +170,35 @@ json_string_is(json_t *value, const char *want)
 
 	return (json_string_length(value) == len &&
 	    memcmp(json_string_value(value), want, len) == 0);
+}
+
+/* The adapter object. Every field is required, as in a connection. */
+static int
+read_adapter(json_t *obj, struct proto_adapter_state *out)
+{
+	json_t	*value;
+
+	if (!json_is_object(obj))
+		return (-1);
+
+	value = json_object_get(obj, "addr");
+	if (!json_is_string(value) ||
+	    !bt_aton(json_string_value(value), &out->addr))
+		return (-1);
+
+	value = json_object_get(obj, "name");
+	if (!json_is_string(value) ||
+	    strlcpy(out->name, json_string_value(value), sizeof(out->name)) >=
+	    sizeof(out->name))
+		return (-1);
+
+	value = json_object_get(obj, "node");
+	if (!json_is_string(value) ||
+	    strlcpy(out->node, json_string_value(value), sizeof(out->node)) >=
+	    sizeof(out->node))
+		return (-1);
+
+	return (0);
 }
 
 /*
@@ -340,6 +370,13 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 				json_decref(root);
 				return (-1);
 			}
+		}
+	    
+		value = json_object_get(root, "adapter");
+		if (out->state.adapter_present &&
+		    read_adapter(value, &out->state) != 0) {
+			json_decref(root);
+			return (-1);
 		}
 
 		out->state.connection_count = (int)n;

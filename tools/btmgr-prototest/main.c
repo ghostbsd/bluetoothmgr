@@ -30,6 +30,14 @@
 /* Must come after the system headers: it redefines malloc and friends. */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
+/* A valid state envelope up to "connections", so a fixture adds only its own. */
+#define	STATE_HEAD \
+	"{\"event\":\"state\",\"adapter_present\":true," \
+	"\"powered\":true,\"discoverable\":false,\"scanning\":false," \
+	"\"config_readable\":true," \
+	"\"adapter\":{\"addr\":\"1:2:3:4:5:6\",\"name\":\"a\"," \
+	"\"node\":\"ubt0hci\"},"
+
 static int	 failures;
 static int	 checks;
 
@@ -621,6 +629,26 @@ test_decode(void)
 	ok(msg.state.connections[0].master == 1, "the master role survives");
 	ok(msg.state.connections[1].master == 0, "and the slave role");
 
+	/* The adapter object, which the popup needs to name what it is on. */
+	(void)bt_aton("aa:bb:cc:11:22:03", &st.adapter.bdaddr);
+	(void)strlcpy(st.adapter.name, "a pc", sizeof(st.adapter.name));
+	(void)strlcpy(st.adapter.node, "ubt0hci", sizeof(st.adapter.node));
+
+	ok(decode_owned(proto_state_event(&st), &msg) == 0,
+	    "a state event with an adapter decodes");
+	ok(bdaddr_same(&msg.state.addr, &st.adapter.bdaddr),
+	    "the adapter address survives");
+	eq(msg.state.name, "a pc", "so does its name");
+	eq(msg.state.node, "ubt0hci", "and its netgraph node");
+
+	/* A7 and B1.4 replace bad bytes, so the decoder must accept what they emit. */
+	st.adapter.name[0] = 'u';
+	st.adapter.name[1] = (char)0xff;
+	st.adapter.name[2] = '\0';
+	ok(decode_owned(proto_state_event(&st), &msg) == 0,
+	    "an adapter whose name needed replacing still decodes");
+	eq(msg.state.name, "u?", "with the replacement the emitter made");
+
 	/*
 	 * More connections than the array holds. Without the clamp this writes
 	 * past connections[], so this checks the overrun as much as the count.
@@ -632,10 +660,7 @@ test_decode(void)
 
 		extra = BTMGR_MAX_CONNS + 8;
 		used = (size_t)snprintf(line, sizeof(line),
-		    "{\"event\":\"state\",\"adapter_present\":true,"
-		    "\"powered\":true,\"discoverable\":false,"
-		    "\"scanning\":false,\"config_readable\":true,"
-		    "\"devices\":[],\"connections\":[");
+		    STATE_HEAD "\"devices\":[],\"connections\":[");
 
 		for (i = 0; i < extra && used < sizeof(line) / 2; i++)
 			used += (size_t)snprintf(line + used,
@@ -655,39 +680,37 @@ test_decode(void)
 	}
 
 	/* A connection missing any field would be shown as something invented. */
-	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
-	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
-	    "\"config_readable\":true,\"connections\":[{}],\"devices\":[]}",
+	rejects_msg(STATE_HEAD "\"connections\":[{}],\"devices\":[]}",
 	    "a connection with no fields is refused");
-	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
-	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
-	    "\"config_readable\":true,\"connections\":[{\"addr\":\"nonsense\","
+	rejects_msg(STATE_HEAD "\"connections\":[{\"addr\":\"nonsense\","
 	    "\"handle\":1,\"link\":\"acl\",\"encrypted\":false,"
 	    "\"role\":\"master\"}],\"devices\":[]}",
 	    "an unparseable connection address is refused");
-	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
-	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
-	    "\"config_readable\":true,\"connections\":[{\"addr\":\"1:2:3:4:5:6\","
+	rejects_msg(STATE_HEAD "\"connections\":[{\"addr\":\"1:2:3:4:5:6\","
 	    "\"handle\":1,\"link\":\"usb\",\"encrypted\":false,"
 	    "\"role\":\"master\"}],\"devices\":[]}",
 	    "a link type that is neither acl nor sco is refused");
-	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
-	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
-	    "\"config_readable\":true,\"connections\":[{\"addr\":\"1:2:3:4:5:6\","
+	rejects_msg(STATE_HEAD "\"connections\":[{\"addr\":\"1:2:3:4:5:6\","
 	    "\"handle\":1,\"link\":\"acl\",\"encrypted\":false,"
 	    "\"role\":\"peer\"}],\"devices\":[]}",
 	    "a role that is neither master nor slave is refused");
-	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
-	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
-	    "\"config_readable\":true,\"connections\":[{\"addr\":\"1:2:3:4:5:6\","
+	rejects_msg(STATE_HEAD "\"connections\":[{\"addr\":\"1:2:3:4:5:6\","
 	    "\"handle\":65536,\"link\":\"acl\",\"encrypted\":false,"
 	    "\"role\":\"master\"}],\"devices\":[]}",
 	    "a handle wider than a uint16 is refused, not narrowed");
-	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
-	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
-	    "\"config_readable\":true,\"connections\":[\"not an object\"],"
+	rejects_msg(STATE_HEAD "\"connections\":[\"not an object\"],"
 	    "\"devices\":[]}",
 	    "a connections entry that is not an object is refused");
+
+	/* The adapter object is required while adapter_present. */
+	rejects_msg("{\"event\":\"state\",\"adapter_present\":true,"
+	    "\"powered\":true,\"discoverable\":false,\"scanning\":false,"
+	    "\"config_readable\":true,\"connections\":[],\"devices\":[]}",
+	    "a present adapter with no adapter object is refused");
+	rejects_msg(STATE_HEAD "\"connections\":[],\"devices\":[],"
+	    "\"adapter\":{\"addr\":\"nonsense\",\"name\":\"a\","
+	    "\"node\":\"ubt0hci\"}}",
+	    "an unparseable adapter address is refused");
 
 	/*
 	 * The adapter name comes from HCI_Read_Local_Name, so it can be invalid
