@@ -118,6 +118,44 @@ test_absent_daemon(void)
 }
 
 static void
+test_default_path(void)
+{
+	char	 toolong[128];
+
+	printf("\nthe default socket path\n");
+
+	(void)unsetenv(BTMGR_SOCKET_ENV);
+	eq(btmgr_ipc_default_path(), BTMGR_SOCKET_PATH,
+	    "unset falls back to the compiled-in path");
+
+	(void)setenv(BTMGR_SOCKET_ENV, "/var/run/elsewhere.sock", 1);
+	eq(btmgr_ipc_default_path(), "/var/run/elsewhere.sock",
+	    "an absolute override is taken");
+
+	(void)setenv(BTMGR_SOCKET_ENV, "", 1);
+	eq(btmgr_ipc_default_path(), BTMGR_SOCKET_PATH,
+	    "empty is ignored rather than becoming a relative path");
+
+	(void)setenv(BTMGR_SOCKET_ENV, "relative/path.sock", 1);
+	eq(btmgr_ipc_default_path(), BTMGR_SOCKET_PATH,
+	    "a relative override is ignored");
+
+	/*
+	 * sun_path is 104 bytes on FreeBSD, and btmgr_ipc_open() would reject
+	 * an over-long path with ENAMETOOLONG anyway. Falling back here keeps
+	 * a typo in the session environment from disabling the applet.
+	 */
+	memset(toolong, 'x', sizeof(toolong) - 1);
+	toolong[0] = '/';
+	toolong[sizeof(toolong) - 1] = '\0';
+	(void)setenv(BTMGR_SOCKET_ENV, toolong, 1);
+	eq(btmgr_ipc_default_path(), BTMGR_SOCKET_PATH,
+	    "an override too long for sun_path is ignored");
+
+	(void)unsetenv(BTMGR_SOCKET_ENV);
+}
+
+static void
 test_roundtrip(void)
 {
 	struct btmgr_ipc	*c;
@@ -783,6 +821,7 @@ main(void)
 	printf("btmgr-clienttest: %s\n", sockpath);
 
 	test_absent_daemon();
+	test_default_path();
 	test_roundtrip();
 	test_daemon_restart();
 

@@ -29,6 +29,9 @@ load_rc_config $name
 : ${bluetoothmgrd_enable:="NO"}
 : ${bluetoothmgrd_socket:="/var/run/bluetoothmgr.sock"}
 
+# A client finds the socket through $BTMGR_SOCKET, so moving it off the default
+# means exporting that in the desktop session as well, or the applet looks in
+# the wrong place.
 command_args="-s ${bluetoothmgrd_socket}"
 
 # SIGHUP makes the daemon re-read state and push it to clients. It does not

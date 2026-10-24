@@ -24,6 +24,13 @@
 #define	BTMGR_SOCKET_PATH	"/var/run/bluetoothmgr.sock"
 
 /*
+ * The rc script passes -s $bluetoothmgrd_socket, so the daemon can listen
+ * somewhere other than BTMGR_SOCKET_PATH and a client compiled against the
+ * constant alone would never find it.
+ */
+#define	BTMGR_SOCKET_ENV	"BTMGR_SOCKET"
+
+/*
  * A bound on connecting, so a frontend's startup cannot hang. An AF_UNIX
  * connect does not actually wait, even on a full accept queue, so this is a
  * backstop rather than an expected path.
@@ -53,11 +60,14 @@ typedef void (*btmgr_reply_fn)(const struct proto_msg *reply, void *user_data);
 typedef void (*btmgr_event_fn)(const struct proto_msg *event, void *user_data);
 
 /*
- * path NULL selects BTMGR_SOCKET_PATH. NULL with ENOENT or ECONNREFUSED means
- * the daemon is not running, which a frontend should treat as retry-later
- * rather than as an error to show the user.
+ * path NULL selects btmgr_ipc_default_path(). NULL with ENOENT or ECONNREFUSED
+ * means the daemon is not running, which a frontend should treat as
+ * retry-later rather than as an error to show the user.
  */
 struct btmgr_ipc *btmgr_ipc_open(const char *path);
+
+/* $BTMGR_SOCKET when it is set and usable, otherwise BTMGR_SOCKET_PATH. */
+const char	 *btmgr_ipc_default_path(void);
 
 /* NULL is accepted. */
 void		  btmgr_ipc_close(struct btmgr_ipc *conn);

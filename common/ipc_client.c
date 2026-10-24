@@ -228,6 +228,20 @@ await_connect(int fd)
 	return (0);
 }
 
+const char *
+btmgr_ipc_default_path(void)
+{
+	struct sockaddr_un	 sa;
+	const char		*env;
+
+	env = getenv(BTMGR_SOCKET_ENV);
+	if (env == NULL || env[0] != '/' ||
+	    strlen(env) >= sizeof(sa.sun_path))
+		return (BTMGR_SOCKET_PATH);
+
+	return (env);
+}
+
 struct btmgr_ipc *
 btmgr_ipc_open(const char *path)
 {
@@ -236,7 +250,7 @@ btmgr_ipc_open(const char *path)
 	int			 fd, saved;
 
 	if (path == NULL)
-		path = BTMGR_SOCKET_PATH;
+		path = btmgr_ipc_default_path();
 
 	if (strlen(path) >= sizeof(sa.sun_path)) {
 		errno = ENAMETOOLONG;
