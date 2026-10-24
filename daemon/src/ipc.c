@@ -17,6 +17,7 @@
  * while there is something to flush.
  */
 
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/ucred.h>
@@ -24,6 +25,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -160,32 +163,45 @@ read_sender(struct msghdr *msg)
 	return (-1);
 }
 
+/* Held for the life of the process, so the lock goes away when we do. */
+static int	path_lock = -1;
+
 /*
- * Whether something is still accepting on this path. An AF_UNIX connect
- * completes or fails in the kernel, so there is nothing to wait for: a stale
- * socket gives ECONNREFUSED, a live one connects.
+ * Take exclusive ownership of a socket path before touching it.
+ *
+ * Probing with connect() cannot work: a live listener with a full backlog
+ * refuses just like a socket nobody is on, so a busy daemon reads as stale.
+ * A lock also closes the window where two starts both probe, both find
+ * nothing, and both bind.
+ *
+ * Returns 0 with the lock held, or -1, EADDRINUSE when another daemon owns it.
  */
 static int
-socket_is_live(const char *path)
+claim_socket_path(const char *path)
 {
-	struct sockaddr_un	sa;
-	int			fd, connected;
+	char	lockpath[PATH_MAX];
+	int	fd, saved;
 
-	if (strlen(path) >= sizeof(sa.sun_path))
-		return (0);
+	if (snprintf(lockpath, sizeof(lockpath), "%s.lock", path) >=
+	    (int)sizeof(lockpath)) {
+		errno = ENAMETOOLONG;
+		return (-1);
+	}
 
-	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	fd = open(lockpath, O_CREAT | O_RDONLY | O_CLOEXEC, 0600);
 	if (fd < 0)
-		return (0);
+		return (-1);
 
-	memset(&sa, 0, sizeof(sa));
-	sa.sun_family = AF_UNIX;
-	strlcpy(sa.sun_path, path, sizeof(sa.sun_path));
+	if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+		saved = errno;
+		(void)close(fd);
+		errno = (saved == EWOULDBLOCK) ? EADDRINUSE : saved;
+		return (-1);
+	}
 
-	connected = connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0;
-	(void)close(fd);
+	path_lock = fd;
 
-	return (connected);
+	return (0);
 }
 
 int
@@ -203,19 +219,17 @@ ipc_listen(const char *path, mode_t mode)
 	 * SOCK_CLOEXEC: nothing here spawns today, but a child inheriting the
 	 * listening socket would hold the channel that A5.3 authorizes on.
 	 */
+	/*
+	 * SPEC.md A5.2 says stale, not live. Every unlink below is guarded by
+	 * this lock, so we only ever remove a path no other daemon owns.
+	 */
+	if (claim_socket_path(path) < 0)
+		return (-1);
+
 	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return (-1);
 
-	/*
-	 * SPEC.md A5.2 says stale, not live: unlinking a socket another daemon
-	 * is listening on would silently take its clients.
-	 */
-	if (socket_is_live(path)) {
-		(void)close(fd);
-		errno = EADDRINUSE;
-		return (-1);
-	}
 	(void)unlink(path);
 
 	memset(&sa, 0, sizeof(sa));
