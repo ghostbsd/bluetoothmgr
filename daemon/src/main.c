@@ -1053,7 +1053,11 @@ main(int argc, char *argv[])
 	}
 
 	/* After the fork, so the pid written is the one rc.subr will signal. */
-	pidfile_write(pfh);
+	if (pidfile_write(pfh) < 0) {
+		syslog(LOG_ERR, "pidfile %s: %m", pidpath);
+		pidfile_remove(pfh);
+		exit(1);
+	}
 
 	/*
 	 * After the fork, never before: kqueue(2) says the queue is not
