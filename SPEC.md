@@ -12,8 +12,8 @@ as described in RFC 2119.
 | B | IPC protocol | **v0, provisional.** Freezes at M2 when `ipc.c` exists. |
 | C | Platform constraints of the base Bluetooth stack | **Normative.** Verified against `../ghostbsd-src` and by measurement. |
 
-Out of scope by design: applet UI behaviour, audio integration, SSP. Those are
-M6 and M7 and speccing them now would be writing fiction.
+Out of scope by design: audio integration (M4), SSP (M5) and the UI behaviour
+of the frontends (M6 to M8). Speccing them now would be writing fiction.
 
 ---
 

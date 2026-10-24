@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * bluetoothmgr-applet - the MATE panel applet. PLAN.md M4.
+ * bluetoothmgr-applet - the MATE panel applet. PLAN.md M6.
  *
  * In process: a module the panel loads, so a crash here takes the panel with
  * it. Out of process would be safer, but the panel launches such an applet

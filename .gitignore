@@ -85,5 +85,6 @@ tools/btmgr-ctltest/btmgr-ctltest
 tools/btmgr-prototest/btmgr-prototest
 tools/btmgr-linetest/btmgr-linetest
 tools/btmgr-clienttest/btmgr-clienttest
+tools/btmgr-sesstest/btmgr-sesstest
 
 daemon/bluetoothmgrd

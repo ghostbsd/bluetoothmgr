@@ -180,7 +180,7 @@ test_roundtrip(void)
 	(void)unlink(sockpath);
 }
 
-/* M4 wants the applet to survive the daemon restarting under it. */
+/* M6 wants the applet to survive the daemon restarting under it. */
 static void
 test_daemon_restart(void)
 {

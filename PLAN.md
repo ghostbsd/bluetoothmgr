@@ -21,7 +21,7 @@ netgraph ioctls, with the one trap in `SPEC.md` C4.
 ## Dependencies
 
 `libbluetooth` and netgraph from base, `jansson`, plus `gtk+-3.0` and
-`libmatepanelapplet-4.0` for the applet (M4) and the settings window (M5).
+`libmatepanelapplet-4.0` for the applet (M6) and the settings window (M7).
 
 jansson rather than json-glib, because it is plain C: `common/` links into the
 GLib-free daemon and the GTK clients alike. The daemon has no GLib and no
@@ -149,23 +149,9 @@ B5.2. That difference is the A3.4 failure mode.
 - [x] Verified on hardware: A3.4 reproduced, pairing a device with no `hcsecd.conf` block discards the key
 - [x] Verified on hardware: a device paired through the daemon survives a reboot without re-pairing
 
-## M4: MATE panel applet
+## M3c: The rest of the command set and the device model
 
-- [x] `common/ipc_client.c`, the client half of the protocol, with `common/linebuf.c` underneath it
-- [x] A5.3 and A9: refuse every command unless the peer is root or its process belongs to a GUI session, from `getsockopt(LOCAL_PEERCRED)` and `getutxent()`. Replaces the socket-group check M3a built
-- [x] Verified on hardware: a GUI terminal as an ordinary user is served, the same user over `ssh` and console login is refused with `not_permitted` and gets no `state` event, root is served from anywhere
-- [x] Decode the `connections` array in `proto_parse_msg()`, so a frontend can list devices: address, handle, link type, encryption and role (B5)
-- [ ] Applet skeleton, popup, icon states: absent, off, on, connected
-- [ ] Show and hide driven by `adapter_present`
-- [ ] Reconnect when the daemon restarts under it
-- [ ] Verified: hotplug the dongle and watch the applet appear and disappear
-- [ ] Manual test by maintainer
-
-## M5: Settings window
-
-Also the milestone that connects the device model: `common/store.c`,
-`keys_remove()` and `btmgr_class_type()` are written and tested but have no
-caller in the daemon, so the `devices` array of every `state` event is empty.
+Every frontend sits on this, so the backend finishes before any GUI starts.
 
 - [ ] `scan` as an IPC command, asynchronous inquiry driven from the event loop, idempotent per B4.2, results as `device_found` events
 - [ ] `remove`, `set_alias`, `set_trusted` and `set_power` commands (A8.5)
@@ -174,26 +160,13 @@ caller in the daemon, so the `devices` array of every `state` event is empty.
 - [ ] `rssi`, null unless the device was seen in the current scan (B5.4)
 - [ ] `device_added` and `device_removed` events on store changes (B7)
 - [ ] `pairing_progress` events for the A6 stage transitions (B7)
-- [ ] Pairing wizard driving the A6 sequence
-- [ ] Device list: rename, remove, trust
-- [ ] Alias editing bounded by A2.3, refused with `alias_too_long`
-- [ ] One-click stale key recovery: the `stale_link_key` code and the A3.2 delete, which needs `hcsecd` stopped
-- [ ] `.desktop` entry for the Administration menu
+- [ ] The `stale_link_key` code and the A3.2 key delete, which needs `hcsecd` stopped
+- [ ] `alias_too_long` refusal, bounded by A2.3
+- [ ] Decode `devices` in `proto_parse_msg()`, as `connections` and `adapter` already are
+- [ ] A per-uid client cap, since the A5.1 socket mode lets any local user fill the global one
 - [ ] Manual test by maintainer
 
-## M6: SSP, experimental
-
-Per `SPEC.md` C5. Behind a setting, mutually exclusive with `hcsecd` per C2.2.
-Treat as research.
-
-- [ ] Refuse to arm while `hcsecd` is running
-- [ ] `Write_Simple_Pairing_Mode` to enable SSP
-- [ ] Answer `IO_Capability_Request` and `User_Confirmation_Request`
-- [ ] Persist the key from `Link_Key_Notification`
-- [ ] Verified: pair a device that has no PIN at all
-- [ ] Manual test by maintainer
-
-## M7: Audio integration
+## M4: Audio integration
 
 - [ ] Test whether the per-link `Authentication_Requested` of A6.5 is enough for `virtual_oss` before adding any adapter-wide toggle
 - [ ] `write_authentication_enable` as part of the audio connect flow, if A6.5 proves insufficient
@@ -202,6 +175,42 @@ Treat as research.
 - [ ] Volume via null-sink plus loopback
 - [ ] Confirm the A2.3 alias budget against the `virtual_oss` source, which was not available when 16 was chosen
 - [ ] Verified: the whole audio journey reproduced with no manual steps
+- [ ] Manual test by maintainer
+
+## M5: SSP, experimental
+
+Per `SPEC.md` C5. Behind a setting, mutually exclusive with `hcsecd` per C2.2.
+Treat as research: it displaces the pairing agent everything else depends on.
+
+- [ ] Refuse to arm while `hcsecd` is running
+- [ ] `Write_Simple_Pairing_Mode` to enable SSP
+- [ ] Answer `IO_Capability_Request` and `User_Confirmation_Request`
+- [ ] Persist the key from `Link_Key_Notification`
+- [ ] Verified: pair a device that has no PIN at all
+- [ ] Manual test by maintainer
+
+## M6: MATE panel applet
+
+- [x] `common/ipc_client.c`, the client half of the protocol, with `common/linebuf.c` underneath it
+- [x] A5.3 and A9: refuse every command unless the peer is root or its process belongs to a GUI session, from `getsockopt(LOCAL_PEERCRED)` and `getutxent()`. Replaces the socket-group check M3a built
+- [x] Verified on hardware: a GUI terminal as an ordinary user is served, the same user over `ssh` and console login is refused with `not_permitted` and gets no `state` event, root is served from anywhere
+- [x] Decode `connections` and `adapter` in `proto_parse_msg()`, so a frontend can name the adapter and list its links (B5)
+- [x] Applet skeleton: an in-process module the panel loads, sized from the panel
+- [x] Icon states: absent, off, on, connected, driven by the `state` event
+- [x] Reconnect when the daemon restarts under it, with a tooltip saying why when it cannot
+- [x] Verified on hardware: the applet loads, A5.3 admits it, and the icon follows the adapter
+- [ ] Popup: the adapter, a discoverable toggle, and the device list
+- [ ] Show and hide driven by `adapter_present`
+- [ ] Verified: hotplug the dongle and watch the applet appear and disappear
+- [ ] Manual test by maintainer
+
+## M7: Settings window
+
+- [ ] Pairing wizard driving the A6 sequence
+- [ ] Device list: rename, remove, trust
+- [ ] Alias editing in the UI
+- [ ] One-click stale key recovery, offering the M3c path
+- [ ] `.desktop` entry for the Administration menu
 - [ ] Manual test by maintainer
 
 ## M8: AppIndicator/SNI frontend
