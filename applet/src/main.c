@@ -68,21 +68,70 @@ static void	 on_destroy(GtkWidget *widget, gpointer data);
 static gboolean	 applet_fill(MatePanelApplet *applet, const gchar *iid,
 		     gpointer data);
 
+/*
+ * A name the theme lacks renders broken rather than falling back, and
+ * Qogir-Dark has only "bluetooth", so every list ends there.
+ */
+static const char *const icons_absent[] = {
+	"bluetooth-hardware-disabled-symbolic",
+	"bluetooth-disconnected-symbolic",
+	"bluetooth-disabled",
+	"bluetooth",
+	NULL
+};
+
+static const char *const icons_off[] = {
+	"bluetooth-disabled",
+	"bluetooth-disabled-symbolic",
+	"bluetooth-inactive",
+	"bluetooth",
+	NULL
+};
+
+static const char *const icons_on[] = {
+	"bluetooth",
+	"bluetooth-symbolic",
+	NULL
+};
+
+static const char *const icons_connected[] = {
+	"bluetooth-active",
+	"bluetooth-active-symbolic",
+	"bluetooth-paired",
+	"bluetooth",
+	NULL
+};
+
 static const char *
 state_icon(enum applet_state state)
 {
+	const char *const	*names;
+	GtkIconTheme		*theme;
+	int			 i;
 
 	switch (state) {
 	case APPLET_OFF:
-		return ("bluetooth-disabled");
+		names = icons_off;
+		break;
 	case APPLET_ON:
-		return ("bluetooth");
+		names = icons_on;
+		break;
 	case APPLET_CONNECTED:
-		return ("bluetooth-active");
+		names = icons_connected;
+		break;
 	case APPLET_ABSENT:
 	default:
-		return ("bluetooth-disabled");
+		names = icons_absent;
+		break;
 	}
+
+	theme = gtk_icon_theme_get_default();
+	for (i = 0; names[i + 1] != NULL; i++)
+		if (gtk_icon_theme_has_icon(theme, names[i]))
+			return (names[i]);
+
+	/* The last is taken whether the theme has it or not. */
+	return (names[i]);
 }
 
 static void
@@ -106,6 +155,11 @@ set_state(struct applet_ui *ui, enum applet_state state, const char *detail)
 	gtk_image_set_from_icon_name(GTK_IMAGE(ui->icon), state_icon(state),
 	    GTK_ICON_SIZE_MENU);
 	size_icon(ui->applet, ui->icon);
+
+	/* Dimmed: off and absent must still differ on a one-icon theme. */
+	gtk_widget_set_sensitive(ui->icon,
+	    state == APPLET_ON || state == APPLET_CONNECTED);
+
 	gtk_widget_set_tooltip_text(GTK_WIDGET(ui->applet), detail);
 }
 
