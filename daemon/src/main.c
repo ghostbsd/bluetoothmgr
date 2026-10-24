@@ -55,6 +55,9 @@
 /* A5.1 leaves the socket open to any local user. 32 * 320 KiB of buffer. */
 #define	MAX_CLIENTS	32
 
+/* Of those, the share a peer A5.3 would refuse may take. */
+#define	MAX_UNADMITTED_CLIENTS	8
+
 /*
  * How long a parked pairing waits for Link_Key_Notification. The user has to
  * read a PIN off a screen and type it on the device, so this is generous
@@ -91,6 +94,7 @@ struct daemon {
 	struct hcsecd_ctl	hcsecd;		/* A8.1, the real pair_ops */
 	struct parked_pairing	pairing;
 	int		 clients_full;	/* so a connection flood logs once */
+	int		 unadmitted_full;
 	time_t		 discoverable_until;	/* 0 when not reverting */
 	volatile int	 quit;
 };
@@ -110,6 +114,7 @@ static void	refresh_hci(struct daemon *d);
 static void	reply(struct daemon *d, struct client *c, char *line);
 static int	blocked_while_pairing(const char *cmd);
 static int	client_count(const struct daemon *d);
+static int	unadmitted_client_count(const struct daemon *d);
 static void	tick(struct daemon *d, time_t now);
 static struct pair_ops	pair_ops_for(struct daemon *d);
 static void	finish_pairing(struct daemon *d, const bdaddr_t *addr);
@@ -223,6 +228,19 @@ client_count(const struct daemon *d)
 
 	for (c = d->clients; c != NULL; c = c->next)
 		n++;
+
+	return (n);
+}
+
+static int
+unadmitted_client_count(const struct daemon *d)
+{
+	const struct client	*c;
+	int			 n = 0;
+
+	for (c = d->clients; c != NULL; c = c->next)
+		if (!c->peer_in_gui_session)
+			n++;
 
 	return (n);
 }
@@ -819,6 +837,9 @@ do_accept(struct daemon *d)
 			return;
 		}
 
+		c->peer_in_gui_session =
+		    btmgr_session_peer_allowed(c->uid, c->pid);
+
 		/* Logged once per episode, or a flood becomes a syslog flood. */
 		if (client_count(d) >= MAX_CLIENTS) {
 			if (!d->clients_full) {
@@ -830,6 +851,18 @@ do_accept(struct daemon *d)
 			continue;
 		}
 		d->clients_full = 0;
+
+		if (!c->peer_in_gui_session &&
+		    unadmitted_client_count(d) >= MAX_UNADMITTED_CLIENTS) {
+			if (!d->unadmitted_full) {
+				syslog(LOG_WARNING, "refusing unadmitted peers: "
+				    "%d already attached", MAX_UNADMITTED_CLIENTS);
+				d->unadmitted_full = 1;
+			}
+			ipc_client_free(c);
+			continue;
+		}
+		d->unadmitted_full = 0;
 
 		c->next = d->clients;
 		d->clients = c;
@@ -853,7 +886,7 @@ do_accept(struct daemon *d)
 		 * protocol version, the state carries the adapter and every
 		 * connection.
 		 */
-		if (btmgr_session_peer_allowed(c->uid, c->pid)) {
+		if (c->peer_in_gui_session) {
 			st = proto_state_event(&d->last);
 			if (st != NULL) {
 				(void)ipc_client_send(c, st);

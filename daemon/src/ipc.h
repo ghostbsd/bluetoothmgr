@@ -45,6 +45,9 @@ struct client {
 	pid_t		 send_pid;
 	int		 send_mixed;	/* more than one sender in one line */
 
+	/* The A5.3 verdict at accept, for the cap only. Commands recheck. */
+	int		 peer_in_gui_session;
+
 	struct client	*next;
 };
 
