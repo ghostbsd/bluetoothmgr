@@ -30,6 +30,9 @@
  */
 #define	EXPIRY_SECONDS	(BTMGR_REQUEST_TIMEOUT_SEC + 1)
 
+/* B2.1 makes the daemon greet us, so silence this long means something. */
+#define	HANDSHAKE_SECONDS	10
+
 enum applet_state {
 	APPLET_ABSENT = 0,	/* no adapter, or no daemon */
 	APPLET_OFF,		/* adapter present, stack down */
@@ -44,6 +47,7 @@ struct applet_ui {
 	guint			 watch;		/* fd source, 0 when none */
 	guint			 retry;		/* timer source, 0 when none */
 	guint			 expiry;	/* probe deadline, 0 when none */
+	guint			 handshake;	/* hello deadline, 0 when none */
 	int			 asked;		/* get_state already sent */
 	int			 probe_failed;	/* act once dispatch has returned */
 	char			 failure[128];	/* why, for the tooltip */
@@ -61,6 +65,7 @@ static void	 on_event(const struct proto_msg *event, void *data);
 static gboolean	 on_readable(gint fd, GIOCondition cond, gpointer data);
 static gboolean	 on_retry(gpointer data);
 static gboolean	 on_expiry(gpointer data);
+static gboolean	 on_handshake_timeout(gpointer data);
 static void	 connect_daemon(struct applet_ui *ui);
 static void	 on_change_size(MatePanelApplet *applet, guint size,
 		     gpointer data);
@@ -175,6 +180,10 @@ disconnect(struct applet_ui *ui, const char *why)
 		g_source_remove(ui->expiry);
 		ui->expiry = 0;
 	}
+	if (ui->handshake != 0) {
+		g_source_remove(ui->handshake);
+		ui->handshake = 0;
+	}
 	if (ui->conn != NULL) {
 		btmgr_ipc_close(ui->conn);
 		ui->conn = NULL;
@@ -200,6 +209,12 @@ ask_state(struct applet_ui *ui)
 
 	if (ui->asked || !btmgr_ipc_is_ready(ui->conn))
 		return;
+
+	/* The hello arrived, so the handshake deadline has done its job. */
+	if (ui->handshake != 0) {
+		g_source_remove(ui->handshake);
+		ui->handshake = 0;
+	}
 
 	memset(&cmd, 0, sizeof(cmd));
 	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
@@ -319,6 +334,19 @@ on_expiry(gpointer data)
 	return (G_SOURCE_REMOVE);
 }
 
+static gboolean
+on_handshake_timeout(gpointer data)
+{
+	struct applet_ui	*ui = data;
+
+	ui->handshake = 0;
+
+	if (!btmgr_ipc_is_ready(ui->conn))
+		disconnect(ui, "BluetoothMgr accepted us but never answered");
+
+	return (G_SOURCE_REMOVE);
+}
+
 static void
 connect_daemon(struct applet_ui *ui)
 {
@@ -332,6 +360,11 @@ connect_daemon(struct applet_ui *ui)
 	/* poll reports HUP and ERR whether or not they were asked for. */
 	ui->watch = g_unix_fd_add(btmgr_ipc_fd(ui->conn), G_IO_IN,
 	    on_readable, ui);
+
+	/* Silence after accept never makes the fd readable, so the greeting
+	 * needs a deadline of its own. */
+	ui->handshake = g_timeout_add_seconds(HANDSHAKE_SECONDS,
+	    on_handshake_timeout, ui);
 }
 
 static void
@@ -356,6 +389,8 @@ on_destroy(GtkWidget *widget, gpointer data)
 		g_source_remove(ui->watch);
 	if (ui->expiry != 0)
 		g_source_remove(ui->expiry);
+	if (ui->handshake != 0)
+		g_source_remove(ui->handshake);
 	if (ui->conn != NULL)
 		btmgr_ipc_close(ui->conn);
 
