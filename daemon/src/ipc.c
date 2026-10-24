@@ -160,6 +160,34 @@ read_sender(struct msghdr *msg)
 	return (-1);
 }
 
+/*
+ * Whether something is still accepting on this path. An AF_UNIX connect
+ * completes or fails in the kernel, so there is nothing to wait for: a stale
+ * socket gives ECONNREFUSED, a live one connects.
+ */
+static int
+socket_is_live(const char *path)
+{
+	struct sockaddr_un	sa;
+	int			fd, connected;
+
+	if (strlen(path) >= sizeof(sa.sun_path))
+		return (0);
+
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		return (0);
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sun_family = AF_UNIX;
+	strlcpy(sa.sun_path, path, sizeof(sa.sun_path));
+
+	connected = connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0;
+	(void)close(fd);
+
+	return (connected);
+}
+
 int
 ipc_listen(const char *path, mode_t mode)
 {
@@ -179,7 +207,15 @@ ipc_listen(const char *path, mode_t mode)
 	if (fd < 0)
 		return (-1);
 
-	/* SPEC.md A5.2: a stale socket from a crash must not block startup. */
+	/*
+	 * SPEC.md A5.2 says stale, not live: unlinking a socket another daemon
+	 * is listening on would silently take its clients.
+	 */
+	if (socket_is_live(path)) {
+		(void)close(fd);
+		errno = EADDRINUSE;
+		return (-1);
+	}
 	(void)unlink(path);
 
 	memset(&sa, 0, sizeof(sa));
