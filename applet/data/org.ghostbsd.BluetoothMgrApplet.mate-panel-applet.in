@@ -1,7 +1,7 @@
 [Applet Factory]
 Id=BluetoothMgrAppletFactory
 InProcess=true
-Location=/usr/local/lib/mate-panel/libbluetoothmgr-applet.so
+Location=@MODULE@
 Name=BluetoothMgr Factory
 Description=Factory for BluetoothMgr
 

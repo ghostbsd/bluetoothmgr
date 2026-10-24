@@ -41,12 +41,18 @@ LDADD+=		${APPLET_LIBS} -L/usr/local/lib -ljansson -lbluetooth
 # module alone leaves nothing in "Add to Panel".
 FILESGROUPS=	FILES APPLETDEF
 
-APPLETDEF=	data/org.ghostbsd.BluetoothMgrApplet.mate-panel-applet
+APPLETDEF=	org.ghostbsd.BluetoothMgrApplet.mate-panel-applet
 APPLETDEFDIR=	${PREFIX}/share/mate-panel/applets
+CLEANFILES+=	${APPLETDEF}
+
+# Location has to name the module the panel will dlopen, so it follows PREFIX
+# and cannot be a fixed string in the file.
+${APPLETDEF}: ${.CURDIR}/data/${APPLETDEF}.in
+	sed -e 's|@MODULE@|${SHLIBDIR}/${SHLIB_NAME}|g' ${.ALLSRC} > ${.TARGET}
 
 # bsd.lib.mk installs into directories but does not create them. Ownership is
 # passed through so a staged install as an ordinary user works too.
-beforeinstall:
+beforeinstall: ${APPLETDEF}
 	${INSTALL} -d -o ${LIBOWN} -g ${LIBGRP} ${DESTDIR}${SHLIBDIR}
 	${INSTALL} -d -o ${SHAREOWN} -g ${SHAREGRP} ${DESTDIR}${APPLETDEFDIR}
 
