@@ -48,6 +48,7 @@ struct applet_ui {
 	guint			 retry;		/* timer source, 0 when none */
 	guint			 expiry;	/* probe deadline, 0 when none */
 	guint			 handshake;	/* hello deadline, 0 when none */
+	guint			 renew;		/* A5.4 lease renewal, 0 = none */
 	int			 got_state;	/* a state event has arrived */
 	int			 asked;		/* get_state already sent */
 	int			 probe_failed;	/* act once dispatch has returned */
@@ -67,6 +68,8 @@ static gboolean	 on_readable(gint fd, GIOCondition cond, gpointer data);
 static gboolean	 on_retry(gpointer data);
 static gboolean	 on_expiry(gpointer data);
 static gboolean	 on_handshake_timeout(gpointer data);
+static int	 send_get_state(struct applet_ui *ui);
+static gboolean	 on_renew(gpointer data);
 static void	 connect_daemon(struct applet_ui *ui);
 static void	 on_change_size(MatePanelApplet *applet, guint size,
 		     gpointer data);
@@ -185,6 +188,10 @@ disconnect(struct applet_ui *ui, const char *why)
 		g_source_remove(ui->handshake);
 		ui->handshake = 0;
 	}
+	if (ui->renew != 0) {
+		g_source_remove(ui->renew);
+		ui->renew = 0;
+	}
 	if (ui->conn != NULL) {
 		btmgr_ipc_close(ui->conn);
 		ui->conn = NULL;
@@ -199,15 +206,10 @@ disconnect(struct applet_ui *ui, const char *why)
 		ui->retry = g_timeout_add_seconds(RETRY_SECONDS, on_retry, ui);
 }
 
-/*
- * B2.1 makes the daemon speak first, so a request before the hello is refused
- * with ENOTCONN. Sent once the handshake has landed, and only to learn whether
- * A5.3 admits us: the state arrives unasked when it does.
- */
+/* Sent once the hello lands: B2.1 refuses anything earlier with ENOTCONN. */
 static void
 ask_state(struct applet_ui *ui)
 {
-	struct proto_cmd	 cmd;
 
 	if (ui->asked || !btmgr_ipc_is_ready(ui->conn))
 		return;
@@ -218,15 +220,42 @@ ask_state(struct applet_ui *ui)
 		ui->handshake = 0;
 	}
 
-	memset(&cmd, 0, sizeof(cmd));
-	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
-
-	if (btmgr_ipc_request(ui->conn, &cmd, on_reply, ui) != 0)
+	if (send_get_state(ui) != 0)
 		return;
 
 	ui->asked = 1;
 	if (ui->expiry == 0)
 		ui->expiry = g_timeout_add_seconds(EXPIRY_SECONDS, on_expiry, ui);
+
+	/* A5.4: the lease lapses without this, and the events stop. */
+	if (ui->renew == 0)
+		ui->renew = g_timeout_add_seconds(BTMGR_RENEW_SEC, on_renew, ui);
+}
+
+static int
+send_get_state(struct applet_ui *ui)
+{
+	struct proto_cmd	 cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+	(void)strlcpy(cmd.name, "get_state", sizeof(cmd.name));
+
+	return (btmgr_ipc_request(ui->conn, &cmd, on_reply, ui));
+}
+
+static gboolean
+on_renew(gpointer data)
+{
+	struct applet_ui	*ui = data;
+
+	if (ui->conn == NULL || !btmgr_ipc_is_ready(ui->conn)) {
+		ui->renew = 0;
+		return (G_SOURCE_REMOVE);
+	}
+
+	(void)send_get_state(ui);
+
+	return (G_SOURCE_CONTINUE);
 }
 
 /*
@@ -406,6 +435,8 @@ on_destroy(GtkWidget *widget, gpointer data)
 		g_source_remove(ui->expiry);
 	if (ui->handshake != 0)
 		g_source_remove(ui->handshake);
+	if (ui->renew != 0)
+		g_source_remove(ui->renew);
 	if (ui->conn != NULL)
 		btmgr_ipc_close(ui->conn);
 

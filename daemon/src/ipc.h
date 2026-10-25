@@ -49,6 +49,9 @@ struct client {
 	/* The A5.3 verdict at accept, for the cap only. Commands recheck. */
 	int		 peer_in_gui_session;
 
+	/* A5.4. Monotonic, when a sender A5.3 admitted last sent. 0 = never. */
+	time_t		 lease;
+
 	struct client	*next;
 };
 

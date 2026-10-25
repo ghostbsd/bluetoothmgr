@@ -113,7 +113,8 @@ static void	reconcile(struct daemon *d);
 static void	refresh_hci(struct daemon *d);
 static void	reply(struct daemon *d, struct client *c, char *line);
 static int	blocked_while_pairing(const char *cmd);
-static int	client_allowed(const struct client *c);
+static time_t	now_mono(void);
+static int	client_leased(const struct client *c, time_t now);
 static int	client_count(const struct daemon *d);
 static int	unadmitted_client_count(const struct daemon *d);
 static time_t	next_deadline(const struct daemon *d);
@@ -164,15 +165,15 @@ kq_del(int kq, uintptr_t ident, short filter)
 	return (kevent(kq, &kev, 1, NULL, 0, NULL));
 }
 
-/* The sender once one is known, otherwise whoever connected. */
+/* A5.4. Events need a current lease, which only an authorized send grants. */
 static int
-client_allowed(const struct client *c)
+client_leased(const struct client *c, time_t now)
 {
 
-	if (c->send_uid != (uid_t)-1)
-		return (btmgr_session_peer_allowed(c->send_uid, c->send_pid));
+	if (c->lease == 0)
+		return (0);
 
-	return (btmgr_session_peer_allowed(c->uid, c->pid));
+	return (now - c->lease <= BTMGR_LEASE_SEC);
 }
 
 /*
@@ -186,18 +187,19 @@ static void
 broadcast(struct daemon *d, const char *line)
 {
 	struct client	*c, *next;
+	time_t		 now;
 
 	if (line == NULL)
 		return;
 
+	now = now_mono();
+
 	for (c = d->clients; c != NULL; c = next) {
 		next = c->next;
 
-		/* A5.4. Dropped, not skipped: queued state would flush later. */
-		if (!client_allowed(c)) {
-			drop_client(d, c);
+		/* Skipped, not dropped: a renewal brings the client back. */
+		if (!client_leased(c, now))
 			continue;
-		}
 
 		if (ipc_client_send(c, line) < 0) {
 			drop_client(d, c);
@@ -654,6 +656,8 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		return;
 	}
 
+	c->lease = now_mono();		/* A5.4 */
+
 	if (parsed < 0) {
 		reply(d, c, proto_error(cmd.id, code, NULL));
 		return;
@@ -869,7 +873,7 @@ static void
 do_accept(struct daemon *d)
 {
 	struct client	*c;
-	char		*hello, *st;
+	char		*hello;
 
 	for (;;) {
 		c = ipc_accept(d->lfd);
@@ -923,20 +927,7 @@ do_accept(struct daemon *d)
 			free(hello);
 		}
 
-		/*
-		 * Then the current state, so a client starts up in sync. Only
-		 * for a peer A5.3 admits: hello carries nothing but the
-		 * protocol version, the state carries the adapter and every
-		 * connection.
-		 */
-		if (c->peer_in_gui_session) {
-			st = proto_state_event(&d->last);
-			if (st != NULL) {
-				(void)ipc_client_send(c, st);
-				free(st);
-			}
-		}
-
+		/* A5.4: no state until a send of theirs earns the lease. */
 		if (c->want_write)
 			(void)kq_add(d->kq, (uintptr_t)c->fd, EVFILT_WRITE, c);
 

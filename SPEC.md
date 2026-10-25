@@ -191,17 +191,20 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
   Peer uid and pid come from `getsockopt(LOCAL_PEERCRED)`, since `struct xucred`
   carries `cr_pid`. `getpeereid()` reports uid and gid only, so it cannot
   supply the pid A9.4 needs.
-- **A5.4** Unsolicited events are subject to A5.3 as well. The daemon MUST NOT
-  send the `state` event on accept, nor any broadcast, to a peer A5.3 would
-  refuse. An event has no sender, so it is judged on the connecting peer.
+- **A5.4** Unsolicited events are subject to A5.3 as well. The daemon MUST send
+  an event only while the connection holds a lease: a message whose sender A5.3
+  admitted, within the last `BTMGR_LEASE_SEC`. A connection that has sent no
+  such message MUST receive no `state` event and no broadcast. A connection
+  whose lease has lapsed MUST stop receiving them until it renews.
 - **A5.5** For a command the peer is the process that sent it, not the one that
   connected. The daemon MUST set `LOCAL_CREDS_PERSISTENT` on each accepted
-  socket before its first read and take the sender from `sc_pid` of the
-  `SCM_CREDS2` message the kernel attaches to every send. A message carrying no
-  such credentials MUST authorize nothing. A5.3 and A9.4 apply to that pid.
+  socket before its first read and take the sender from `sc_pid` and `sc_euid`
+  of the `SCM_CREDS2` message the kernel attaches to every send. A message
+  carrying no such credentials MUST authorize nothing. A5.3 and A9.4 apply to
+  that pid and uid, and MUST NOT use the uid of the connecting process.
 
-  A line assembled from sends with differing `sc_pid` MUST close the
-  connection: a second sender is splicing into an authorized stream.
+  A line assembled from sends with differing `sc_pid` or `sc_euid` MUST close
+  the connection.
 
 ## A6. Pairing sequence (the ordering constraint)
 
