@@ -48,6 +48,7 @@ struct applet_ui {
 	guint			 retry;		/* timer source, 0 when none */
 	guint			 expiry;	/* probe deadline, 0 when none */
 	guint			 handshake;	/* hello deadline, 0 when none */
+	int			 got_state;	/* a state event has arrived */
 	int			 asked;		/* get_state already sent */
 	int			 probe_failed;	/* act once dispatch has returned */
 	char			 failure[128];	/* why, for the tooltip */
@@ -190,6 +191,7 @@ disconnect(struct applet_ui *ui, const char *why)
 	}
 	ui->asked = 0;
 	ui->probe_failed = 0;
+	ui->got_state = 0;
 
 	set_state(ui, APPLET_ABSENT, why);
 
@@ -260,6 +262,12 @@ on_event(const struct proto_msg *event, void *data)
 	if (!event->has_state)
 		return;
 
+	ui->got_state = 1;
+	if (ui->expiry != 0) {
+		g_source_remove(ui->expiry);
+		ui->expiry = 0;
+	}
+
 	if (!event->state.adapter_present)
 		state = APPLET_ABSENT;
 	else if (!event->state.powered)
@@ -327,9 +335,16 @@ on_expiry(gpointer data)
 	/* Cleared first: disconnect() must not remove a source mid-callback. */
 	ui->expiry = 0;
 
-	/* expire_requests() calls on_reply, so the flag is set by now. */
-	if (btmgr_ipc_expire_requests(ui->conn) > 0 && ui->probe_failed)
-		disconnect(ui, ui->failure);
+	(void)btmgr_ipc_expire_requests(ui->conn);
+
+	/*
+	 * Unconditional, because every way of getting here means no state
+	 * arrived: a lost reply, a reply with no state behind it, or a clock
+	 * change that left the request short of its deadline.
+	 */
+	if (!ui->got_state)
+		disconnect(ui, ui->failure[0] != '\0' ? ui->failure :
+		    "BluetoothMgr sent no state");
 
 	return (G_SOURCE_REMOVE);
 }
