@@ -197,7 +197,9 @@ claim_socket_path(const char *path)
 	if (fd < 0)
 		return (-1);
 
-	if (fstat(fd, &sb) < 0 || !S_ISREG(sb.st_mode)) {
+	/* Someone else's file is not a lock we can trust, whatever it says. */
+	if (fstat(fd, &sb) < 0 || !S_ISREG(sb.st_mode) ||
+	    (sb.st_uid != geteuid() && sb.st_uid != 0)) {
 		(void)close(fd);
 		errno = EFTYPE;
 		return (-1);
