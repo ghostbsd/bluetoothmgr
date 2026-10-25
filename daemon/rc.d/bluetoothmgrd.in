@@ -15,7 +15,7 @@ name="bluetoothmgrd"
 desc="BluetoothMgr Bluetooth connection manager"
 rcvar="bluetoothmgrd_enable"
 
-command="/usr/local/sbin/${name}"
+command="@SBINDIR@/${name}"
 
 # The daemon backgrounds itself, so rc.subr supervises it by its pidfile.
 procname="${command}"
