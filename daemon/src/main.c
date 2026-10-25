@@ -165,15 +165,19 @@ kq_del(int kq, uintptr_t ident, short filter)
 	return (kevent(kq, &kev, 1, NULL, 0, NULL));
 }
 
-/* A5.4. Events need a current lease, which only an authorized send grants. */
+/*
+ * A5.4. Events go to the process that opened the connection, which A5.5 binds
+ * every send to, and only while that process is still admitted and its lease
+ * is current.
+ */
 static int
 client_leased(const struct client *c, time_t now)
 {
 
-	if (c->lease == 0)
+	if (c->lease == 0 || now - c->lease > BTMGR_LEASE_SEC)
 		return (0);
 
-	return (now - c->lease <= BTMGR_LEASE_SEC);
+	return (btmgr_session_peer_allowed(c->uid, c->pid));
 }
 
 /*
@@ -635,10 +639,10 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 	char			 code[32];
 	int			 parsed;
 
-	/* A5.5. Two senders in one line is one splicing into the other. */
+	/* A5.5. Not the process that opened the connection. */
 	if (c->send_mixed) {
-		syslog(LOG_WARNING, "dropping client uid %d: one line, "
-		    "more than one sending process", (int)c->uid);
+		syslog(LOG_WARNING, "dropping client uid %d pid %d: sent by "
+		    "another process", (int)c->uid, (int)c->pid);
 		drop_client(d, c);
 		return;
 	}

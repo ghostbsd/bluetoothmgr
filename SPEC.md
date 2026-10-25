@@ -192,10 +192,12 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
   carries `cr_pid`. `getpeereid()` reports uid and gid only, so it cannot
   supply the pid A9.4 needs.
 - **A5.4** Unsolicited events are subject to A5.3 as well. The daemon MUST send
-  an event only while the connection holds a lease: a message whose sender A5.3
-  admitted, within the last `BTMGR_LEASE_SEC`. A connection that has sent no
-  such message MUST receive no `state` event and no broadcast. A connection
-  whose lease has lapsed MUST stop receiving them until it renews.
+  an event only to the process that opened the connection, which A5.5 binds
+  every send to, and only while A5.3 still admits that process and the
+  connection holds a lease: a message from it within the last
+  `BTMGR_LEASE_SEC`. A connection that has sent no such message MUST receive no
+  `state` event and no broadcast. A connection whose lease has lapsed MUST stop
+  receiving them until it renews.
 - **A5.5** For a command the peer is the process that sent it, not the one that
   connected. The daemon MUST set `LOCAL_CREDS_PERSISTENT` on each accepted
   socket before its first read and take the sender from `sc_pid` and `sc_euid`
@@ -203,8 +205,9 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
   carrying no such credentials MUST authorize nothing. A5.3 and A9.4 apply to
   that pid and uid, and MUST NOT use the uid of the connecting process.
 
-  A line assembled from sends with differing `sc_pid` or `sc_euid` MUST close
-  the connection.
+  A connection belongs to the process that opened it. Every send on it MUST
+  carry the `sc_pid` and `sc_euid` of that process, and any send that does not
+  MUST close the connection.
 
 ## A6. Pairing sequence (the ordering constraint)
 

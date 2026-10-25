@@ -374,16 +374,15 @@ ipc_client_read(struct client *c)
 		sender = read_sender(&msg, &sender_uid);
 
 		/*
-		 * A5.5. Bytes still waiting to complete a line came from
-		 * send_pid; a different sender now is splicing into them.
+		 * A5.5. The connection belongs to the process that opened it.
+		 * Anything else holding the fd is not that process, so the
+		 * credentials on a send are the only way to tell, and they
+		 * have to match for every send, not just within a line.
 		 */
-		if (c->in_len == c->in_taken) {
-			c->send_pid = sender;
-			c->send_uid = sender_uid;
-			c->send_mixed = 0;
-		} else if (sender != c->send_pid || sender_uid != c->send_uid) {
+		c->send_pid = sender;
+		c->send_uid = sender_uid;
+		if (sender < 0 || sender != c->pid || sender_uid != c->uid)
 			c->send_mixed = 1;
-		}
 
 		/*
 		 * SPEC.md B1.3: a line longer than the cap closes the
