@@ -9,18 +9,23 @@
 
 SUBDIR=		lib \
 		daemon \
+		applet \
 		tools
 
 SUBDIR_PARALLEL=
 
-ANALYZE_INCS=	-Ilib/libbtmgr -Icommon -Idaemon/src -I/usr/local/include
+APPLET_INCS!=	pkg-config --cflags libmatepanelapplet-4.0
+ANALYZE_INCS=	-Ilib/libbtmgr -Icommon -Idaemon/src -I/usr/local/include \
+		${APPLET_INCS}
 ANALYZE_SRCS!=	echo lib/libbtmgr/*.c common/*.c daemon/src/*.c \
 		tools/btmgr-probe/*.c tools/btmgr-filetest/*.c \
 		tools/btmgr-strtest/*.c tools/btmgr-hoststest/*.c \
 		tools/btmgr-secdtest/*.c tools/btmgr-keystest/*.c \
 		tools/btmgr-storetest/*.c tools/btmgr-pathtest/*.c \
 		tools/btmgr-pairtest/*.c tools/btmgr-ctltest/*.c \
-		tools/btmgr-prototest/*.c tools/btmgr-linetest/*.c tools/btmgr-clienttest/*.c
+		tools/btmgr-prototest/*.c tools/btmgr-linetest/*.c \
+		tools/btmgr-clienttest/*.c tools/btmgr-sesstest/*.c \
+		tools/btmgr-inflighttest/*.c applet/src/*.c
 
 TIDY?=		clang-tidy19
 

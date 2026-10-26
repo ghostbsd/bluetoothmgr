@@ -29,6 +29,10 @@ struct state;
 /* SPEC.md B1.3. A longer line closes the connection unparsed. */
 #define	BTMGR_LINE_MAX		((size_t)64 * 1024)
 
+/* A5.4: the event lease, and the interval a client should renew within. */
+#define	BTMGR_LEASE_SEC		120
+#define	BTMGR_RENEW_SEC		45
+
 #define	BTMGR_CMD_NAME_MAX	32
 
 /*
@@ -94,6 +98,11 @@ struct proto_adapter_state {
 	int	discoverable;
 	int	scanning;
 	int	config_readable;
+
+	/* The adapter object, present only while adapter_present. */
+	bdaddr_t	addr;
+	char		name[BTMGR_NAME_SIZE];
+	char		node[HCI_DEVNAME_SIZE];
 
 	/*
 	 * How many of connections[] were decoded, which is the array's length

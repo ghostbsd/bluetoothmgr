@@ -85,5 +85,15 @@ tools/btmgr-ctltest/btmgr-ctltest
 tools/btmgr-prototest/btmgr-prototest
 tools/btmgr-linetest/btmgr-linetest
 tools/btmgr-clienttest/btmgr-clienttest
+tools/btmgr-sesstest/btmgr-sesstest
+tools/btmgr-inflighttest/btmgr-inflighttest
 
 daemon/bluetoothmgrd
+daemon/bluetoothmgrd.rc
+
+# The applet was a program before it became a module the panel dlopens, and a
+# stale binary of that name reached the repository once.
+applet/bluetoothmgr-applet
+
+# Generated from data/*.in so Location follows PREFIX.
+applet/org.ghostbsd.BluetoothMgrApplet.mate-panel-applet

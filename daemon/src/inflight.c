@@ -26,7 +26,7 @@ static struct inflight	taken;
 
 int
 inflight_add(struct inflight_table *t, enum inflight_kind kind, int id,
-    struct client *c, const bdaddr_t *addr, uint16_t handle)
+    struct client *c, const bdaddr_t *addr, uint16_t handle, time_t now)
 {
 	int	i;
 
@@ -42,7 +42,7 @@ inflight_add(struct inflight_table *t, enum inflight_kind kind, int id,
 		if (addr != NULL)
 			bdaddr_copy(&t->e[i].addr, addr);
 		t->e[i].handle = handle;
-		t->e[i].deadline = time(NULL) + INFLIGHT_TIMEOUT_SEC;
+		t->e[i].deadline = now + INFLIGHT_TIMEOUT_SEC;
 
 		return (0);
 	}
@@ -126,4 +126,20 @@ inflight_drop_client(struct inflight_table *t, const struct client *c)
 		if (t->e[i].used && t->e[i].client == c)
 			t->e[i].used = 0;
 	}
+}
+
+time_t
+inflight_next_deadline(const struct inflight_table *t)
+{
+	time_t	earliest = 0;
+	int	i;
+
+	for (i = 0; i < INFLIGHT_MAX; i++) {
+		if (!t->e[i].used)
+			continue;
+		if (earliest == 0 || t->e[i].deadline < earliest)
+			earliest = t->e[i].deadline;
+	}
+
+	return (earliest);
 }

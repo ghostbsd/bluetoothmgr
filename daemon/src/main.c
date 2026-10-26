@@ -3,18 +3,12 @@
  *
  * bluetoothmgrd - BluetoothMgr daemon.
  *
- * One kqueue loop watching five kinds of thing at once: the listening socket,
- * each connected client's readability and writability, the passive HCI event
- * socket, signals, and a periodic reconcile timer.
- *
- * M2 performs no privileged operation at all. Per SPEC.md C1 the entire
- * polling path is on the kernel's unprivileged allowlist, so this can and
- * should be developed as an ordinary user:
+ * One kqueue loop over the listening socket, each client, the passive HCI
+ * socket and signals. The tick is kevent()'s timeout, not an EVFILT_TIMER,
+ * which stops firing across a suspend.
  *
  *	./bluetoothmgrd -f -s /tmp/btmgr.sock
  *	nc -U /tmp/btmgr.sock
- *
- * The privileged half arrives in M3.
  */
 
 #include <sys/types.h>
@@ -23,6 +17,7 @@
 
 #include <err.h>
 #include <errno.h>
+#include <libutil.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,33 +38,25 @@
 #include "session.h"
 #include "state.h"
 
-/*
- * Must come after the system headers: it redefines malloc and friends. The
- * pragma says so to clang-include-cleaner, which sees no direct use of this
- * header because the use is macro replacement of malloc(), not a symbol.
- */
+/* After the system headers: it redefines malloc. */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
 #define	DEFAULT_SOCKET	"/var/run/bluetoothmgr.sock"
+#define	DEFAULT_PIDFILE	"/var/run/bluetoothmgrd.pid"
 
-/*
- * A5.1: the mode is not the authorization boundary, A5.3 is. A narrower mode
- * would refuse a GUI user at connect() for not sharing the socket's group,
- * which is the group test A5.3 exists to replace.
- */
+/* A5.1: the mode is not the boundary, A5.3 is. Narrower refuses a GUI user. */
 #define	SOCKET_MODE	0666
-#define	RECONCILE_MS	5000		/* SPEC.md C2.1: the safety net */
+#define	RECONCILE_SEC	5		/* SPEC.md C2.1: the safety net */
 
-/*
- * Upper bound on a discoverability timeout, one hour. Bluetooth UIs offer
- * minutes, so this is generous; its job is to keep a client from reaching
- * integer overflow in the millisecond conversion.
- */
+/* An hour. Generous for a UI that offers minutes, and bounds the arithmetic. */
 #define	BTMGR_DISCOVER_MAX_SEC	3600
 #define	MAX_EVENTS	32
 
 /* A5.1 leaves the socket open to any local user. 32 * 320 KiB of buffer. */
 #define	MAX_CLIENTS	32
+
+/* Of those, the share a peer A5.3 would refuse may take. */
+#define	MAX_UNADMITTED_CLIENTS	8
 
 /*
  * How long a parked pairing waits for Link_Key_Notification. The user has to
@@ -78,22 +65,11 @@
  */
 #define	PAIRING_TIMEOUT_SEC	60
 
-/*
- * udata tags. kqueue hands back whatever pointer we registered, so a distinct
- * address per source tells the handler what fired without a lookup table. For
- * clients we register the struct client * itself, which is the real payoff:
- * the event arrives with our own state already attached.
- */
+/* kqueue returns the pointer we registered, so an address names a source. */
 static int	tag_listen_sock;	/* the IPC listening socket */
 static int	tag_hci;		/* the passive HCI event socket */
-static int	tag_timer;
-static int	tag_discoverable;
 
-/*
- * A6: one pairing at a time, because A6.2 forbids the reload a second one's
- * step 4 would need. client may die before the key arrives, so every use goes
- * through client_alive().
- */
+/* A6.2 allows one at a time. client may die first, so use client_alive(). */
 struct parked_pairing {
 	struct pair_state	 state;
 	struct client		*client;
@@ -118,6 +94,8 @@ struct daemon {
 	struct hcsecd_ctl	hcsecd;		/* A8.1, the real pair_ops */
 	struct parked_pairing	pairing;
 	int		 clients_full;	/* so a connection flood logs once */
+	int		 unadmitted_full;
+	time_t		 discoverable_until;	/* 0 when not reverting */
 	volatile int	 quit;
 };
 
@@ -135,7 +113,12 @@ static void	reconcile(struct daemon *d);
 static void	refresh_hci(struct daemon *d);
 static void	reply(struct daemon *d, struct client *c, char *line);
 static int	blocked_while_pairing(const char *cmd);
+static time_t	now_mono(void);
+static int	client_leased(const struct client *c, time_t now);
 static int	client_count(const struct daemon *d);
+static int	unadmitted_client_count(const struct daemon *d);
+static time_t	next_deadline(const struct daemon *d);
+static void	tick(struct daemon *d, time_t now);
 static struct pair_ops	pair_ops_for(struct daemon *d);
 static void	finish_pairing(struct daemon *d, const bdaddr_t *addr);
 static void	abandon_pairing(struct daemon *d, const char *code,
@@ -149,8 +132,11 @@ static void
 usage(void)
 {
 	(void)fprintf(stderr,
-	    "usage: bluetoothmgrd [-f] [-n] [-r root] [-s socket]\n"
+	    "usage: bluetoothmgrd [-f] [-n] [-p pidfile] [-r root] "
+	    "[-s socket]\n"
 	    "\t-n\tdry run: report what would be written, write nothing\n"
+	    "\t-p\tpidfile, " DEFAULT_PIDFILE " by default. Its lock is what\n"
+	    "\t\tkeeps a second daemon from taking over the socket.\n"
 	    "\t-r\twrite the config files under root instead of /, for a\n"
 	    "\t\ttrial against copies. Use " BTMGR_SANDBOX ", never a\n"
 	    "\t\tworld-writable directory: a sandbox copy of hcsecd.conf\n"
@@ -180,6 +166,21 @@ kq_del(int kq, uintptr_t ident, short filter)
 }
 
 /*
+ * A5.4. Events go to the process that opened the connection, which A5.5 binds
+ * every send to, and only while that process is still admitted and its lease
+ * is current.
+ */
+static int
+client_leased(const struct client *c, time_t now)
+{
+
+	if (c->lease == 0 || now - c->lease > BTMGR_LEASE_SEC)
+		return (0);
+
+	return (btmgr_session_peer_allowed(c->uid, c->pid));
+}
+
+/*
  * Send a line to every client, dropping any that cannot take it.
  *
  * Note the saved next pointer. drop_client() frees c, so reading c->next
@@ -190,18 +191,19 @@ static void
 broadcast(struct daemon *d, const char *line)
 {
 	struct client	*c, *next;
+	time_t		 now;
 
 	if (line == NULL)
 		return;
 
+	now = now_mono();
+
 	for (c = d->clients; c != NULL; c = next) {
 		next = c->next;
 
-		/* A5.4. Dropped, not skipped: queued state would flush later. */
-		if (!btmgr_session_peer_allowed(c->uid, c->pid)) {
-			drop_client(d, c);
+		/* Skipped, not dropped: a renewal brings the client back. */
+		if (!client_leased(c, now))
 			continue;
-		}
 
 		if (ipc_client_send(c, line) < 0) {
 			drop_client(d, c);
@@ -210,6 +212,57 @@ broadcast(struct daemon *d, const char *line)
 		if (c->want_write)
 			(void)kq_add(d->kq, (uintptr_t)c->fd, EVFILT_WRITE, c);
 	}
+}
+
+/* Everything on a schedule. now is monotonic, see now_mono(). */
+static void
+tick(struct daemon *d, time_t now)
+{
+
+	inflight_expire(&d->pending, now, on_expired, d);
+
+	if (d->pairing.state.active && now >= d->pairing.deadline)
+		abandon_pairing(d, "timeout", "no link key arrived");
+
+	if (d->discoverable_until != 0 && now >= d->discoverable_until) {
+		syslog(LOG_INFO, "discoverable timeout");
+		d->discoverable_until = 0;
+		if (d->last.adapter_present)
+			(void)btmgr_set_scan(d->last.adapter.node, 0, 1);
+	}
+
+	d->dirty = 1;
+}
+
+/* Every deadline uses this. CLOCK_MONOTONIC covers a suspend on FreeBSD. */
+static time_t
+now_mono(void)
+{
+	struct timespec	 ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+		return (time(NULL));
+
+	return (ts.tv_sec);
+}
+
+/* The earliest deadline to wake for, or 0. The tick alone is too coarse. */
+static time_t
+next_deadline(const struct daemon *d)
+{
+	time_t	earliest, candidate;
+
+	earliest = inflight_next_deadline(&d->pending);
+
+	candidate = d->pairing.state.active ? d->pairing.deadline : 0;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	candidate = d->discoverable_until;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	return (earliest);
 }
 
 /* Walked rather than counted, so there is no tally to keep in step. */
@@ -221,6 +274,19 @@ client_count(const struct daemon *d)
 
 	for (c = d->clients; c != NULL; c = c->next)
 		n++;
+
+	return (n);
+}
+
+static int
+unadmitted_client_count(const struct daemon *d)
+{
+	const struct client	*c;
+	int			 n = 0;
+
+	for (c = d->clients; c != NULL; c = c->next)
+		if (!c->peer_in_gui_session)
+			n++;
 
 	return (n);
 }
@@ -530,7 +596,7 @@ do_pair(struct daemon *d, struct client *c, const struct proto_cmd *cmd)
 
 	d->pairing.client = c;
 	d->pairing.id = cmd->id;
-	d->pairing.deadline = time(NULL) + PAIRING_TIMEOUT_SEC;
+	d->pairing.deadline = now_mono() + PAIRING_TIMEOUT_SEC;
 	if (cmd->has_device_name)
 		(void)strlcpy(d->pairing.name, cmd->device_name,
 		    sizeof(d->pairing.name));
@@ -573,23 +639,20 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 	char			 code[32];
 	int			 parsed;
 
-	/* A5.5. Two senders in one line is one splicing into the other. */
-	if (c->send_mixed) {
-		syslog(LOG_WARNING, "dropping client uid %d: one line, "
-		    "more than one sending process", (int)c->uid);
-		drop_client(d, c);
-		return;
-	}
-
 	/* Parsed only for the id, per B3.1; not acted on until A5.3 passes. */
 	parsed = proto_parse_cmd(line, len, &cmd, code, sizeof(code));
 
-	/* A5.3, re-checked per command per A9.7: a session can end mid-connection. */
-	if (!btmgr_session_peer_allowed(c->uid, c->send_pid)) {
+	/*
+	 * A5.3, re-checked per command per A9.7. The sender's own uid, not the
+	 * one that connected: a root process can pass the socket on.
+	 */
+	if (!btmgr_session_peer_allowed(c->send_uid, c->send_pid)) {
 		reply(d, c, proto_error(cmd.id, "not_permitted",
 		    "not root and not in a GUI session"));
 		return;
 	}
+
+	c->lease = now_mono();		/* A5.4 */
 
 	if (parsed < 0) {
 		reply(d, c, proto_error(cmd.id, code, NULL));
@@ -638,7 +701,7 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		 * arrives implausibly fast still finds someone waiting.
 		 */
 		if (inflight_add(&d->pending, INFLIGHT_CONNECT, cmd.id, c,
-		    &cmd.addr, 0) < 0) {
+		    &cmd.addr, 0, now_mono()) < 0) {
 			reply(d, c, proto_error(cmd.id, "busy",
 			    "too many operations in flight"));
 			return;
@@ -682,7 +745,7 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		}
 
 		if (inflight_add(&d->pending, INFLIGHT_DISCONNECT, cmd.id, c,
-		    &cmd.addr, handle) < 0) {
+		    &cmd.addr, handle, now_mono()) < 0) {
 			reply(d, c, proto_error(cmd.id, "busy", NULL));
 			return;
 		}
@@ -749,23 +812,10 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		 * off. EV_ONESHOT deletes the registration once it fires, so
 		 * there is nothing to clean up afterwards.
 		 */
-		if (on && cmd.has_timeout && cmd.timeout > 0) {
-			struct kevent	kev;
-			int64_t		ms;
-
-			/*
-			 * Widen before multiplying. The range check above
-			 * already bounds this, but doing the arithmetic in
-			 * int64_t means the safety does not depend on
-			 * remembering that.
-			 */
-			ms = (int64_t)cmd.timeout * 1000;
-
-			EV_SET(&kev, 2, EVFILT_TIMER,
-			    EV_ADD | EV_ENABLE | EV_ONESHOT, 0, ms,
-			    &tag_discoverable);
-			(void)kevent(d->kq, &kev, 1, NULL, 0, NULL);
-		}
+		/* A deadline on the tick, for the same reason as the tick. */
+		d->discoverable_until = 0;
+		if (on && cmd.has_timeout && cmd.timeout > 0)
+			d->discoverable_until = now_mono() + cmd.timeout;
 
 		d->dirty = 1;
 		reply(d, c, proto_ok(cmd.id));
@@ -782,6 +832,14 @@ service_client(struct daemon *d, struct client *c)
 	size_t	 len;
 
 	if (ipc_client_read(c) < 0) {
+		drop_client(d, c);
+		return;
+	}
+
+	/* A5.5. Checked before any line, so a fragment cannot hold the slot. */
+	if (c->send_mixed) {
+		syslog(LOG_WARNING, "dropping client uid %d pid %d: sent by "
+		    "another process", (int)c->uid, (int)c->pid);
 		drop_client(d, c);
 		return;
 	}
@@ -819,7 +877,7 @@ static void
 do_accept(struct daemon *d)
 {
 	struct client	*c;
-	char		*hello, *st;
+	char		*hello;
 
 	for (;;) {
 		c = ipc_accept(d->lfd);
@@ -829,6 +887,9 @@ do_accept(struct daemon *d)
 			syslog(LOG_ERR, "accept: %m");
 			return;
 		}
+
+		c->peer_in_gui_session =
+		    btmgr_session_peer_allowed(c->uid, c->pid);
 
 		/* Logged once per episode, or a flood becomes a syslog flood. */
 		if (client_count(d) >= MAX_CLIENTS) {
@@ -841,6 +902,18 @@ do_accept(struct daemon *d)
 			continue;
 		}
 		d->clients_full = 0;
+
+		if (!c->peer_in_gui_session &&
+		    unadmitted_client_count(d) >= MAX_UNADMITTED_CLIENTS) {
+			if (!d->unadmitted_full) {
+				syslog(LOG_WARNING, "refusing unadmitted peers: "
+				    "%d already attached", MAX_UNADMITTED_CLIENTS);
+				d->unadmitted_full = 1;
+			}
+			ipc_client_free(c);
+			continue;
+		}
+		d->unadmitted_full = 0;
 
 		c->next = d->clients;
 		d->clients = c;
@@ -858,20 +931,7 @@ do_accept(struct daemon *d)
 			free(hello);
 		}
 
-		/*
-		 * Then the current state, so a client starts up in sync. Only
-		 * for a peer A5.3 admits: hello carries nothing but the
-		 * protocol version, the state carries the adapter and every
-		 * connection.
-		 */
-		if (btmgr_session_peer_allowed(c->uid, c->pid)) {
-			st = proto_state_event(&d->last);
-			if (st != NULL) {
-				(void)ipc_client_send(c, st);
-				free(st);
-			}
-		}
-
+		/* A5.4: no state until a send of theirs earns the lease. */
 		if (c->want_write)
 			(void)kq_add(d->kq, (uintptr_t)c->fd, EVFILT_WRITE, c);
 
@@ -966,7 +1026,11 @@ main(int argc, char *argv[])
 	struct daemon	 d;
 	struct kevent	 events[MAX_EVENTS];
 	struct client	*c;
+	struct pidfh	*pfh;
 	const char	*root = NULL;
+	const char	*pidpath = DEFAULT_PIDFILE;
+	pid_t		 other;
+	time_t		 last_tick;
 	int		 ch, foreground = 0, dry_run = 0, i, n;
 
 	memset(&d, 0, sizeof(d));
@@ -975,13 +1039,16 @@ main(int argc, char *argv[])
 	d.hci = -1;
 	d.sockpath = DEFAULT_SOCKET;
 
-	while ((ch = getopt(argc, argv, "fnr:s:")) != -1) {
+	while ((ch = getopt(argc, argv, "fnp:r:s:")) != -1) {
 		switch (ch) {
 		case 'f':
 			foreground = 1;
 			break;
 		case 'n':
 			dry_run = 1;
+			break;
+		case 'p':
+			pidpath = optarg;
 			break;
 		case 'r':
 			root = optarg;
@@ -995,6 +1062,13 @@ main(int argc, char *argv[])
 	}
 	if (optind != argc)
 		usage();
+
+	/* daemon(3) moves us to /, so a relative path binds out of reach. */
+	if (d.sockpath[0] != '/')
+		errx(1, "socket path must be absolute: %s", d.sockpath);
+
+	if (pidpath[0] != '/')
+		errx(1, "pidfile path must be absolute: %s", pidpath);
 
 	/*
 	 * Resolve the config paths before anything else, so a bad -r is a
@@ -1029,42 +1103,112 @@ main(int argc, char *argv[])
 	openlog("bluetoothmgrd", LOG_PID | (foreground ? LOG_PERROR : 0),
 	    LOG_DAEMON);
 
-	d.kq = kqueue();
-	if (d.kq < 0)
-		err(1, "kqueue");
+	/*
+	 * Before the socket: the lock is what stops a second daemon from
+	 * unlinking the first one's socket on its way to binding its own.
+	 */
+	pfh = pidfile_open(pidpath, 0600, &other);
+	if (pfh == NULL) {
+		if (errno == EEXIST)
+			errx(1, "already running as pid %d", (int)other);
+		err(1, "pidfile %s", pidpath);
+	}
 
+	/*
+	 * Bound before daemonising, since a socket that cannot be bound is the
+	 * likeliest startup failure and err(3) still reaches the terminal
+	 * here. An ordinary descriptor survives the fork.
+	 */
 	d.lfd = ipc_listen(d.sockpath, SOCKET_MODE);
-	if (d.lfd < 0)
+	if (d.lfd < 0) {
+		pidfile_remove(pfh);
 		err(1, "ipc_listen %s", d.sockpath);
+	}
 
-	if (kq_add(d.kq, (uintptr_t)d.lfd, EVFILT_READ, &tag_listen_sock) < 0)
-		err(1, "kevent add listener");
+	if (!foreground && daemon(0, 0) < 0) {
+		pidfile_remove(pfh);
+		err(1, "daemon");
+	}
+
+	/*
+	 * After the fork, never before: kqueue(2) says the queue is not
+	 * inherited by a child created with fork(2), so a queue made up here
+	 * would leave every later kevent() failing with EINVAL.
+	 *
+	 * Past this point stderr is gone, so failures go to syslog.
+	 */
+	d.kq = kqueue();
+	if (d.kq < 0) {
+		syslog(LOG_ERR, "kqueue: %m");
+		exit(1);
+	}
+
+	if (kq_add(d.kq, (uintptr_t)d.lfd, EVFILT_READ, &tag_listen_sock) < 0) {
+		syslog(LOG_ERR, "kevent add listener: %m");
+		exit(1);
+	}
 
 	if (kq_add(d.kq, SIGTERM, EVFILT_SIGNAL, NULL) < 0 ||
 	    kq_add(d.kq, SIGINT, EVFILT_SIGNAL, NULL) < 0 ||
-	    kq_add(d.kq, SIGHUP, EVFILT_SIGNAL, NULL) < 0)
-		err(1, "kevent add signals");
-
-	/* EVFILT_TIMER data is milliseconds by default. */
-	{
-		struct kevent	kev;
-
-		EV_SET(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ENABLE, 0,
-		    RECONCILE_MS, &tag_timer);
-		if (kevent(d.kq, &kev, 1, NULL, 0, NULL) < 0)
-			err(1, "kevent add timer");
+	    kq_add(d.kq, SIGHUP, EVFILT_SIGNAL, NULL) < 0) {
+		syslog(LOG_ERR, "kevent add signals: %m");
+		exit(1);
 	}
 
-	if (!foreground && daemon(0, 0) < 0)
-		err(1, "daemon");
+	/*
+	 * Last: the pid is the forked one, and SIGTERM is ignored until the
+	 * filters above exist, so publishing earlier loses a stop sent in
+	 * between.
+	 */
+	if (pidfile_write(pfh) < 0) {
+		syslog(LOG_ERR, "pidfile %s: %m", pidpath);
+		pidfile_remove(pfh);
+		exit(1);
+	}
 
 	syslog(LOG_INFO, "started, socket %s", d.sockpath);
 
 	/* Prime the state before the first client can ask for it. */
 	reconcile(&d);
 
+	last_tick = now_mono();
+
 	while (!d.quit) {
-		n = kevent(d.kq, NULL, 0, events, MAX_EVENTS, NULL);
+		struct timespec	 wait;
+		time_t		 now, since, deadline, until;
+
+		/*
+		 * The tick is a kevent() timeout rather than an EVFILT_TIMER.
+		 * A periodic EVFILT_TIMER stops firing across a suspend and
+		 * resume, measured here: the daemon kept serving requests with
+		 * a snapshot frozen at the moment it went to sleep. Elapsed
+		 * time cannot be lost the same way, and a resume shows up as a
+		 * large gap that ticks immediately.
+		 */
+		now = now_mono();
+		since = now - last_tick;
+		if (since < 0 || since >= RECONCILE_SEC) {
+			tick(&d, now);
+			last_tick = now;
+			since = 0;
+		}
+
+		/* Before blocking, or a tick's changes wait for the next pass. */
+		if (d.dirty)
+			reconcile(&d);
+
+		wait.tv_sec = RECONCILE_SEC - since;
+		wait.tv_nsec = 0;
+
+		/* Wake on the nearest deadline when it falls sooner. */
+		deadline = next_deadline(&d);
+		if (deadline != 0) {
+			until = deadline > now ? deadline - now : 0;
+			if (until < wait.tv_sec)
+				wait.tv_sec = until;
+		}
+
+		n = kevent(d.kq, NULL, 0, events, MAX_EVENTS, &wait);
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
@@ -1083,33 +1227,6 @@ main(int argc, char *argv[])
 					syslog(LOG_INFO, "shutting down");
 					d.quit = 1;
 				}
-				continue;
-			}
-
-			if (ev->udata == &tag_timer) {
-				/*
-				 * The tick doubles as the deadline check for
-				 * in-flight operations, so no extra timer is
-				 * needed for them.
-				 */
-				inflight_expire(&d.pending, time(NULL),
-				    on_expired, &d);
-
-				if (d.pairing.state.active &&
-				    time(NULL) >= d.pairing.deadline)
-					abandon_pairing(&d, "timeout",
-					    "no link key arrived");
-
-				d.dirty = 1;
-				continue;
-			}
-
-			if (ev->udata == &tag_discoverable) {
-				syslog(LOG_INFO, "discoverable timeout");
-				if (d.last.adapter_present)
-					(void)btmgr_set_scan(
-					    d.last.adapter.node, 0, 1);
-				d.dirty = 1;
 				continue;
 			}
 
@@ -1175,6 +1292,8 @@ main(int argc, char *argv[])
 	(void)unlink(d.sockpath);		/* SPEC.md A5.2 */
 	if (d.kq >= 0)
 		close(d.kq);
+
+	pidfile_remove(pfh);
 
 	syslog(LOG_INFO, "stopped");
 	closelog();

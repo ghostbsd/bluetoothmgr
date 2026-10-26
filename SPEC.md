@@ -12,8 +12,8 @@ as described in RFC 2119.
 | B | IPC protocol | **v0, provisional.** Freezes at M2 when `ipc.c` exists. |
 | C | Platform constraints of the base Bluetooth stack | **Normative.** Verified against `../ghostbsd-src` and by measurement. |
 
-Out of scope by design: applet UI behaviour, audio integration, SSP. Those are
-M6 and M7 and speccing them now would be writing fiction.
+Out of scope by design: audio integration (M4), SSP (M5) and the UI behaviour
+of the frontends (M6 to M8). Speccing them now would be writing fiction.
 
 ---
 
@@ -191,17 +191,23 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
   Peer uid and pid come from `getsockopt(LOCAL_PEERCRED)`, since `struct xucred`
   carries `cr_pid`. `getpeereid()` reports uid and gid only, so it cannot
   supply the pid A9.4 needs.
-- **A5.4** Unsolicited events are subject to A5.3 as well. The daemon MUST NOT
-  send the `state` event on accept, nor any broadcast, to a peer A5.3 would
-  refuse. An event has no sender, so it is judged on the connecting peer.
+- **A5.4** Unsolicited events are subject to A5.3 as well. The daemon MUST send
+  an event only to the process that opened the connection, which A5.5 binds
+  every send to, and only while A5.3 still admits that process and the
+  connection holds a lease: a message from it within the last
+  `BTMGR_LEASE_SEC`. A connection that has sent no such message MUST receive no
+  `state` event and no broadcast. A connection whose lease has lapsed MUST stop
+  receiving them until it renews.
 - **A5.5** For a command the peer is the process that sent it, not the one that
   connected. The daemon MUST set `LOCAL_CREDS_PERSISTENT` on each accepted
-  socket before its first read and take the sender from `sc_pid` of the
-  `SCM_CREDS2` message the kernel attaches to every send. A message carrying no
-  such credentials MUST authorize nothing. A5.3 and A9.4 apply to that pid.
+  socket before its first read and take the sender from `sc_pid` and `sc_euid`
+  of the `SCM_CREDS2` message the kernel attaches to every send. A message
+  carrying no such credentials MUST authorize nothing. A5.3 and A9.4 apply to
+  that pid and uid, and MUST NOT use the uid of the connecting process.
 
-  A line assembled from sends with differing `sc_pid` MUST close the
-  connection: a second sender is splicing into an authorized stream.
+  A connection belongs to the process that opened it. Every send on it MUST
+  carry the `sc_pid` and `sc_euid` of that process, and any send that does not
+  MUST close the connection.
 
 ## A6. Pairing sequence (the ordering constraint)
 
@@ -528,7 +534,7 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
 | `event` | When |
 |---|---|
 | `hello` | Once, on connect (B2) |
-| `state` | On connect after `hello`, and whenever anything changes |
+| `state` | In answer to `get_state`, and whenever anything changes (A5.4) |
 | `device_found` | During a scan, per inquiry result |
 | `device_added` / `device_removed` | Store changes |
 | `pairing_progress` | Stage transitions during A6 |

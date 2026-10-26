@@ -6,6 +6,7 @@ SUBDIR=		btmgr-clienttest \
 		btmgr-ctltest \
 		btmgr-filetest \
 		btmgr-hoststest \
+		btmgr-inflighttest \
 		btmgr-keystest \
 		btmgr-linetest \
 		btmgr-pairtest \

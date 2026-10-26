@@ -17,6 +17,7 @@
  * while there is something to flush.
  */
 
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/ucred.h>
@@ -24,6 +25,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -41,7 +44,7 @@
 
 static int	set_nonblock(int fd);
 static void	read_peer_cred(struct client *c);
-static pid_t	read_sender(struct msghdr *msg);
+static pid_t	read_sender(struct msghdr *msg, uid_t *uid);
 static int	buf_append(char **buf, size_t *len, size_t *cap,
 		    const char *data, size_t n, size_t limit);
 
@@ -138,10 +141,12 @@ read_peer_cred(struct client *c)
  * nothing.
  */
 static pid_t
-read_sender(struct msghdr *msg)
+read_sender(struct msghdr *msg, uid_t *uid)
 {
 	struct cmsghdr		*cm;
 	const struct sockcred2	*sc;
+
+	*uid = (uid_t)-1;
 
 	if ((msg->msg_flags & MSG_CTRUNC) != 0)
 		return (-1);
@@ -153,18 +158,78 @@ read_sender(struct msghdr *msg)
 			continue;
 
 		sc = (const void *)CMSG_DATA(cm);
-		if (sc->sc_pid > 0)
+		if (sc->sc_pid > 0) {
+			*uid = sc->sc_euid;
 			return (sc->sc_pid);
+		}
 	}
 
 	return (-1);
+}
+
+/* Held for the life of the process, so the lock goes away when we do. */
+static int	path_lock = -1;
+
+/*
+ * Own the path before touching it. 0, or -1 with EADDRINUSE if another daemon
+ * holds it. A connect() probe cannot tell a full backlog from a dead socket.
+ */
+static int
+claim_socket_path(const char *path)
+{
+	struct stat	sb, named;
+	char		lockpath[PATH_MAX];
+	int		fd, saved;
+
+	if (snprintf(lockpath, sizeof(lockpath), "%s.lock", path) >=
+	    (int)sizeof(lockpath)) {
+		errno = ENAMETOOLONG;
+		return (-1);
+	}
+
+	/*
+	 * O_NOFOLLOW and O_NONBLOCK because the socket directory may be
+	 * writable in a -r run: a symlink or a FIFO left at this name would
+	 * otherwise redirect us or block open() forever.
+	 */
+	fd = open(lockpath, O_CREAT | O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
+	    O_NONBLOCK, 0600);
+	if (fd < 0)
+		return (-1);
+
+	/* Someone else's file is not a lock we can trust, whatever it says. */
+	if (fstat(fd, &sb) < 0 || !S_ISREG(sb.st_mode) ||
+	    (sb.st_uid != geteuid() && sb.st_uid != 0)) {
+		(void)close(fd);
+		errno = EFTYPE;
+		return (-1);
+	}
+
+	if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+		saved = errno;
+		(void)close(fd);
+		errno = (saved == EWOULDBLOCK) ? EADDRINUSE : saved;
+		return (-1);
+	}
+
+	/* The name must still be the inode we locked, or we locked nothing. */
+	if (stat(lockpath, &named) < 0 || named.st_dev != sb.st_dev ||
+	    named.st_ino != sb.st_ino) {
+		(void)close(fd);
+		errno = EADDRINUSE;
+		return (-1);
+	}
+
+	path_lock = fd;
+
+	return (0);
 }
 
 int
 ipc_listen(const char *path, mode_t mode)
 {
 	struct sockaddr_un	sa;
-	int			fd, saved;
+	int			fd, on, saved;
 
 	if (strlen(path) >= sizeof(sa.sun_path)) {
 		errno = ENAMETOOLONG;
@@ -175,11 +240,14 @@ ipc_listen(const char *path, mode_t mode)
 	 * SOCK_CLOEXEC: nothing here spawns today, but a child inheriting the
 	 * listening socket would hold the channel that A5.3 authorizes on.
 	 */
+	/* A5.2 says stale, not live. The lock guards every unlink below. */
+	if (claim_socket_path(path) < 0)
+		return (-1);
+
 	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return (-1);
 
-	/* SPEC.md A5.2: a stale socket from a crash must not block startup. */
 	(void)unlink(path);
 
 	memset(&sa, 0, sizeof(sa));
@@ -190,6 +258,17 @@ ipc_listen(const char *path, mode_t mode)
 		goto fail;
 
 	if (chmod(path, mode) < 0)
+		goto fail;
+
+	/*
+	 * A5.5, on the listener: unp_connect() copies UNP_WANTCRED from the
+	 * listening socket to the new one, so an accepted socket already has
+	 * it. Setting it after accept() is too late for a client that writes
+	 * the moment connect() returns.
+	 */
+	on = 1;
+	if (setsockopt(fd, SOL_LOCAL, LOCAL_CREDS_PERSISTENT, &on,
+	    sizeof(on)) < 0)
 		goto fail;
 
 	if (listen(fd, 8) < 0)
@@ -212,7 +291,7 @@ struct client *
 ipc_accept(int lfd)
 {
 	struct client	*c;
-	int		 fd, on, saved;
+	int		 fd, saved;
 
 	/* accept() does not inherit SOCK_CLOEXEC from the listener. */
 	fd = accept4(lfd, NULL, NULL, SOCK_CLOEXEC);
@@ -235,21 +314,9 @@ ipc_accept(int lfd)
 
 	c->fd = fd;
 	c->send_pid = -1;
+	c->send_uid = (uid_t)-1;
 
 	read_peer_cred(c);
-
-	/*
-	 * A5.5, before any read: without it the kernel attaches no sender to
-	 * the first message and we could not authorize it.
-	 */
-	on = 1;
-	if (setsockopt(fd, SOL_LOCAL, LOCAL_CREDS_PERSISTENT, &on,
-	    sizeof(on)) < 0) {
-		saved = errno;
-		ipc_client_free(c);
-		errno = saved;
-		return (NULL);
-	}
 
 	return (c);
 }
@@ -280,6 +347,7 @@ ipc_client_read(struct client *c)
 	char		 buf[4096];
 	ssize_t		 n;
 	pid_t		 sender;
+	uid_t		 sender_uid;
 
 	for (;;) {
 		iov.iov_base = buf;
@@ -303,18 +371,18 @@ ipc_client_read(struct client *c)
 			return (-1);		/* peer closed */
 
 		/* A5.5. No credentials means no sender we can authorize. */
-		sender = read_sender(&msg);
+		sender = read_sender(&msg, &sender_uid);
 
 		/*
-		 * A5.5. Bytes still waiting to complete a line came from
-		 * send_pid; a different sender now is splicing into them.
+		 * A5.5. The connection belongs to the process that opened it.
+		 * Anything else holding the fd is not that process, so the
+		 * credentials on a send are the only way to tell, and they
+		 * have to match for every send, not just within a line.
 		 */
-		if (c->in_len == c->in_taken) {
-			c->send_pid = sender;
-			c->send_mixed = 0;
-		} else if (sender != c->send_pid) {
+		c->send_pid = sender;
+		c->send_uid = sender_uid;
+		if (sender < 0 || sender != c->pid || sender_uid != c->uid)
 			c->send_mixed = 1;
-		}
 
 		/*
 		 * SPEC.md B1.3: a line longer than the cap closes the

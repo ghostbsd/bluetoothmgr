@@ -44,6 +44,7 @@ struct btmgr_ipc {
 	int			 request_timeout;
 };
 
+static time_t			 now_mono(void);
 static int			 await_connect(int fd);
 static struct pending_request	*claim_slot(struct btmgr_ipc *conn);
 static void			 fail_slot(struct pending_request *slot,
@@ -95,6 +96,18 @@ claim_slot(struct btmgr_ipc *conn)
 	errno = EBUSY;
 
 	return (NULL);
+}
+
+/* Deadlines use this, so adjusting the wall clock cannot strand a request. */
+static time_t
+now_mono(void)
+{
+	struct timespec	 ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+		return (time(NULL));
+
+	return (ts.tv_sec);
 }
 
 /* Release the slot, then report the failure to whoever registered it. */
@@ -150,7 +163,7 @@ btmgr_ipc_expire_requests(struct btmgr_ipc *conn)
 	if (conn == NULL)
 		return (0);
 
-	now = time(NULL);
+	now = now_mono();
 	for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
 		struct pending_request	*slot = &conn->pending[i];
 
@@ -228,6 +241,20 @@ await_connect(int fd)
 	return (0);
 }
 
+const char *
+btmgr_ipc_default_path(void)
+{
+	struct sockaddr_un	 sa;
+	const char		*env;
+
+	env = getenv(BTMGR_SOCKET_ENV);
+	if (env == NULL || env[0] != '/' ||
+	    strlen(env) >= sizeof(sa.sun_path))
+		return (BTMGR_SOCKET_PATH);
+
+	return (env);
+}
+
 struct btmgr_ipc *
 btmgr_ipc_open(const char *path)
 {
@@ -236,7 +263,7 @@ btmgr_ipc_open(const char *path)
 	int			 fd, saved;
 
 	if (path == NULL)
-		path = BTMGR_SOCKET_PATH;
+		path = btmgr_ipc_default_path();
 
 	if (strlen(path) >= sizeof(sa.sun_path)) {
 		errno = ENAMETOOLONG;
@@ -410,7 +437,7 @@ btmgr_ipc_request(struct btmgr_ipc *conn, struct proto_cmd *cmd,
 	slot->in_use = 1;
 	slot->on_reply = on_reply;
 	slot->user_data = user_data;
-	slot->deadline = time(NULL) + conn->request_timeout;
+	slot->deadline = now_mono() + conn->request_timeout;
 
 	if (btmgr_ipc_send(conn, line) != 0) {
 		saved = errno;
