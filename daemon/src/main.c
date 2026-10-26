@@ -639,14 +639,6 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 	char			 code[32];
 	int			 parsed;
 
-	/* A5.5. Not the process that opened the connection. */
-	if (c->send_mixed) {
-		syslog(LOG_WARNING, "dropping client uid %d pid %d: sent by "
-		    "another process", (int)c->uid, (int)c->pid);
-		drop_client(d, c);
-		return;
-	}
-
 	/* Parsed only for the id, per B3.1; not acted on until A5.3 passes. */
 	parsed = proto_parse_cmd(line, len, &cmd, code, sizeof(code));
 
@@ -840,6 +832,14 @@ service_client(struct daemon *d, struct client *c)
 	size_t	 len;
 
 	if (ipc_client_read(c) < 0) {
+		drop_client(d, c);
+		return;
+	}
+
+	/* A5.5. Checked before any line, so a fragment cannot hold the slot. */
+	if (c->send_mixed) {
+		syslog(LOG_WARNING, "dropping client uid %d pid %d: sent by "
+		    "another process", (int)c->uid, (int)c->pid);
 		drop_client(d, c);
 		return;
 	}

@@ -534,7 +534,7 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
 | `event` | When |
 |---|---|
 | `hello` | Once, on connect (B2) |
-| `state` | On connect after `hello`, and whenever anything changes |
+| `state` | In answer to `get_state`, and whenever anything changes (A5.4) |
 | `device_found` | During a scan, per inquiry result |
 | `device_added` / `device_removed` | Store changes |
 | `pairing_progress` | Stage transitions during A6 |

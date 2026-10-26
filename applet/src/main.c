@@ -46,10 +46,10 @@ struct applet_ui {
 	struct btmgr_ipc	*conn;
 	guint			 watch;		/* fd source, 0 when none */
 	guint			 retry;		/* timer source, 0 when none */
-	guint			 expiry;	/* probe deadline, 0 when none */
+	guint			 expiry;	/* get_state deadline, 0 = none */
 	guint			 handshake;	/* hello deadline, 0 when none */
 	guint			 renew;		/* A5.4 lease renewal, 0 = none */
-	int			 got_state;	/* a state event has arrived */
+	int			 got_state;	/* state since the last get_state */
 	int			 asked;		/* get_state already sent */
 	int			 probe_failed;	/* act once dispatch has returned */
 	char			 failure[128];	/* why, for the tooltip */
@@ -253,7 +253,13 @@ on_renew(gpointer data)
 		return (G_SOURCE_REMOVE);
 	}
 
-	(void)send_get_state(ui);
+	/* Every get_state earns a state event, so silence means a wedged daemon. */
+	if (send_get_state(ui) == 0) {
+		ui->got_state = 0;
+		if (ui->expiry == 0)
+			ui->expiry = g_timeout_add_seconds(EXPIRY_SECONDS,
+			    on_expiry, ui);
+	}
 
 	return (G_SOURCE_CONTINUE);
 }
