@@ -27,10 +27,12 @@ int	listen_open(const char *node);
  * parked in the in-flight table.
  */
 enum listen_event {
-	LISTEN_CON_COMPL = 1,		/* Connection_Complete */
-	LISTEN_DISCON_COMPL,		/* Disconnection_Complete */
-	LISTEN_AUTH_COMPL,		/* Authentication_Complete */
-	LISTEN_LINK_KEY			/* Link_Key_Notification: A6 step 6 */
+	LISTEN_CONNECTION_COMPLETE = 1,
+	LISTEN_DISCONNECTION_COMPLETE,
+	LISTEN_AUTHENTICATION_COMPLETE,
+	LISTEN_LINK_KEY,
+	LISTEN_INQUIRY_RESULT,
+	LISTEN_INQUIRY_COMPLETE
 };
 
 /*
@@ -42,8 +44,9 @@ enum listen_event {
 struct listen_report {
 	enum listen_event	kind;
 	uint8_t			status;		/* 0 = success */
-	bdaddr_t		addr;		/* CON_COMPL and LINK_KEY */
+	bdaddr_t		address;
 	uint16_t		handle;
+	uint8_t			device_class[NG_HCI_CLASS_SIZE];
 };
 
 /*

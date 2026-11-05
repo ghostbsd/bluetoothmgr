@@ -418,6 +418,9 @@ proto_encode_cmd(const struct proto_cmd *cmd)
 	/* The parser refuses an empty name, so emitting one is a doomed send. */
 	if (cmd->has_device_name && cmd->device_name[0] == '\0')
 		return (NULL);
+	if (cmd->has_action && cmd->action != PROTO_ACTION_START &&
+	    cmd->action != PROTO_ACTION_STOP)
+		return (NULL);
 
 	obj = json_object();
 	if (obj == NULL)
@@ -438,6 +441,13 @@ proto_encode_cmd(const struct proto_cmd *cmd)
 	    json_object_set_new(obj, "on", json_boolean(cmd->on)) != 0)
 		goto fail;
 	if (cmd->has_pin && set_string(obj, "pin", cmd->pin) != 0)
+		goto fail;
+	if (cmd->has_action && set_string(obj, "action",
+	    cmd->action == PROTO_ACTION_STOP ? "stop" : "start") != 0)
+		goto fail;
+	if (cmd->has_duration &&
+	    json_object_set_new(obj, "duration",
+	    json_integer(cmd->duration)) != 0)
 		goto fail;
 	if (cmd->has_device_name &&
 	    set_string(obj, "name", cmd->device_name) != 0)
@@ -527,6 +537,33 @@ fail:
 	json_decref(o);
 
 	return (NULL);
+}
+
+/* The class prints high byte first, as B5 shows it. */
+char *
+proto_device_found_event(const bdaddr_t *address, const uint8_t *device_class,
+    const char *type_name)
+{
+	char	 address_text[BTMGR_ADDR_STRSIZE];
+	char	 class_text[sizeof("xx:xx:xx")];
+	json_t	*o;
+
+	(void)snprintf(class_text, sizeof(class_text), "%02x:%02x:%02x",
+	    device_class[2], device_class[1], device_class[0]);
+
+	o = json_object();
+	if (o == NULL)
+		return (NULL);
+
+	if (set_string(o, "event", "device_found") != 0 ||
+	    set_string(o, "addr", bt_ntoa(address, address_text)) != 0 ||
+	    set_string(o, "class", class_text) != 0 ||
+	    set_string(o, "type", type_name) != 0) {
+		json_decref(o);
+		return (NULL);
+	}
+
+	return (render(o));
 }
 
 char *
@@ -663,6 +700,31 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 		}
 		out->on = json_is_true(v) ? 1 : 0;
 		out->has_on = 1;
+	}
+
+	v = json_object_get(root, "action");
+	if (v != NULL) {
+		if (json_string_is(v, "start"))
+			out->action = PROTO_ACTION_START;
+		else if (json_string_is(v, "stop"))
+			out->action = PROTO_ACTION_STOP;
+		else {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+		out->has_action = 1;
+	}
+
+	v = json_object_get(root, "duration");
+	if (v != NULL) {
+		if (!json_is_integer(v)) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+		out->duration = (int)json_integer_value(v);
+		out->has_duration = 1;
 	}
 
 	/*

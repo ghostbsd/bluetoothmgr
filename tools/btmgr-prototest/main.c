@@ -255,6 +255,44 @@ test_scalars(void)
 	    "an out-of-range timeout parses; the handler range checks it");
 }
 
+static void
+test_scan(void)
+{
+	struct proto_cmd	 cmd;
+	char			 code[32];
+
+	printf("\nB4 scan\n");
+
+	ok(parse("{\"id\":4,\"cmd\":\"scan\",\"action\":\"start\"}", &cmd,
+	    code, sizeof(code)) == 0 && cmd.has_action &&
+	    cmd.action == PROTO_ACTION_START, "action start parses");
+	ok(!cmd.has_duration, "with duration absent");
+	ok(parse("{\"id\":4,\"cmd\":\"scan\",\"action\":\"stop\"}", &cmd,
+	    code, sizeof(code)) == 0 && cmd.has_action &&
+	    cmd.action == PROTO_ACTION_STOP, "action stop parses");
+	ok(parse("{\"id\":4,\"cmd\":\"scan\"}", &cmd, code,
+	    sizeof(code)) == 0 && !cmd.has_action,
+	    "an absent action is absent, for the handler to refuse");
+
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"action\":\"pause\"}", "bad_json",
+	    "an unknown action is bad_json");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"action\":1}", "bad_json",
+	    "a non-string action is bad_json");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"action\":null}", "bad_json",
+	    "an explicit null action is an error, not an omission");
+
+	ok(parse("{\"id\":4,\"cmd\":\"scan\",\"action\":\"start\","
+	    "\"duration\":20}", &cmd, code, sizeof(code)) == 0 &&
+	    cmd.has_duration && cmd.duration == 20, "a duration parses");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"duration\":\"20\"}", "bad_json",
+	    "a string duration is not coerced");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"duration\":2.5}", "bad_json",
+	    "nor is a fractional one");
+	ok(parse("{\"id\":4,\"cmd\":\"scan\",\"duration\":999}", &cmd, code,
+	    sizeof(code)) == 0,
+	    "an out-of-range duration parses; the handler range checks it");
+}
+
 /* B4 pair. The PIN is a secret, so it is never transliterated. */
 static void
 test_pin(void)
@@ -389,6 +427,10 @@ round_trip(const struct proto_cmd *sent, const char *what)
 	    got.on == sent->on &&
 	    got.has_pin == sent->has_pin &&
 	    got.has_device_name == sent->has_device_name &&
+	    got.has_action == sent->has_action &&
+	    got.action == sent->action &&
+	    got.has_duration == sent->has_duration &&
+	    got.duration == sent->duration &&
 	    (!sent->has_addr ||
 	    memcmp(&got.addr, &sent->addr, sizeof(got.addr)) == 0) &&
 	    (!sent->has_pin || strcmp(got.pin, sent->pin) == 0) &&
@@ -524,6 +566,36 @@ test_encode(void)
 	cmd.has_device_name = 1;
 	(void)strlcpy(cmd.device_name, "a \" quote", sizeof(cmd.device_name));
 	round_trip(&cmd, "a device name containing a quote survives escaping");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 12;
+	(void)strlcpy(cmd.name, "scan", sizeof(cmd.name));
+	cmd.has_action = 1;
+	cmd.action = PROTO_ACTION_START;
+	cmd.has_duration = 1;
+	cmd.duration = 20;
+	round_trip(&cmd, "scan start with a duration");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 13;
+	(void)strlcpy(cmd.name, "scan", sizeof(cmd.name));
+	cmd.has_action = 1;
+	cmd.action = PROTO_ACTION_STOP;
+	round_trip(&cmd, "scan stop");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 14;
+	(void)strlcpy(cmd.name, "scan", sizeof(cmd.name));
+	cmd.has_duration = 1;
+	cmd.duration = 0;
+	round_trip(&cmd, "duration zero, not absent");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 15;
+	(void)strlcpy(cmd.name, "scan", sizeof(cmd.name));
+	cmd.has_action = 1;
+	ok(proto_encode_cmd(&cmd) == NULL,
+	    "an action that is neither start nor stop is not encodable");
 }
 
 /*
@@ -798,6 +870,33 @@ test_decode(void)
 	ok(msg.has_state == 0, "and no state claimed");
 }
 
+static void
+test_device_found(void)
+{
+	const uint8_t		 device_class[NG_HCI_CLASS_SIZE] =
+	    { 0x3c, 0x04, 0x28 };
+	struct proto_msg	 msg;
+	bdaddr_t		 address;
+	char			*line;
+
+	printf("\nB7 device_found\n");
+
+	(void)bt_aton("aa:bb:cc:11:22:03", &address);
+
+	line = proto_device_found_event(&address, device_class, "av");
+	ok(line != NULL, "a device_found event encodes");
+	if (line == NULL)
+		return;
+
+	eq(line, "{\"event\":\"device_found\",\"addr\":\"aa:bb:cc:11:22:03\","
+	    "\"class\":\"28:04:3c\",\"type\":\"av\"}\n",
+	    "with the class printed high byte first");
+
+	ok(decode_owned(line, &msg) == 0 && msg.kind == PROTO_MSG_EVENT,
+	    "and decodes as an event");
+	eq(msg.event_name, "device_found", "named device_found");
+}
+
 int
 main(void)
 {
@@ -805,10 +904,12 @@ main(void)
 	test_envelope();
 	test_addr();
 	test_scalars();
+	test_scan();
 	test_pin();
 	test_name();
 	test_encode();
 	test_decode();
+	test_device_found();
 
 	if (btmgr_mc_report() != 0) {
 		printf("memcheck: allocations still live\n");

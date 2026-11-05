@@ -18,7 +18,7 @@ struct state {
 	int			adapter_present;
 	int			powered;	/* netgraph stack is inited */
 	int			discoverable;	/* inquiry scan enabled */
-	int			scanning;	/* reserved, always 0 in M2 */
+	int			scanning;
 
 	/*
 	 * M2 runs unprivileged, so /etc/bluetooth/hcsecd.conf (mode 0600) is

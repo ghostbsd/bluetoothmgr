@@ -50,6 +50,11 @@
 
 /* An hour. Generous for a UI that offers minutes, and bounds the arithmetic. */
 #define	BTMGR_DISCOVER_MAX_SEC	3600
+
+#define	SCAN_DEFAULT_SEC	10
+
+/* The HCI length rounds up, so 61 s asks the controller for 61.44 s. */
+#define	SCAN_MARGIN_SEC		5
 #define	MAX_EVENTS	32
 
 /* A5.1 leaves the socket open to any local user. 32 * 320 KiB of buffer. */
@@ -96,6 +101,8 @@ struct daemon {
 	int		 clients_full;	/* so a connection flood logs once */
 	int		 unadmitted_full;
 	time_t		 discoverable_until;	/* 0 when not reverting */
+	int		 scanning;
+	time_t		 scan_until;
 	volatile int	 quit;
 };
 
@@ -231,6 +238,12 @@ tick(struct daemon *d, time_t now)
 			(void)btmgr_set_scan(d->last.adapter.node, 0, 1);
 	}
 
+	if (d->scanning && now >= d->scan_until) {
+		syslog(LOG_INFO, "scan ended with no inquiry complete");
+		d->scanning = 0;
+		d->scan_until = 0;
+	}
+
 	d->dirty = 1;
 }
 
@@ -259,6 +272,10 @@ next_deadline(const struct daemon *d)
 		earliest = candidate;
 
 	candidate = d->discoverable_until;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	candidate = d->scanning ? d->scan_until : 0;
 	if (candidate != 0 && (earliest == 0 || candidate < earliest))
 		earliest = candidate;
 
@@ -470,11 +487,11 @@ on_completion(const struct listen_report *r, void *arg)
 	 * someone's pending request.
 	 */
 	if (r->kind == LISTEN_LINK_KEY) {
-		finish_pairing(d, &r->addr);
+		finish_pairing(d, &r->address);
 		return;
 	}
 
-	if (r->kind == LISTEN_AUTH_COMPL) {
+	if (r->kind == LISTEN_AUTHENTICATION_COMPLETE) {
 		/*
 		 * Success means the key is on its way, so there is nothing to
 		 * do. Failure means it never will be, usually a refused or
@@ -486,8 +503,32 @@ on_completion(const struct listen_report *r, void *arg)
 		return;
 	}
 
-	if (r->kind == LISTEN_CON_COMPL && d->pairing.state.active &&
-	    memcmp(d->pairing.state.addr, &r->addr, BTMGR_ADDR_LEN) == 0) {
+	if (r->kind == LISTEN_INQUIRY_RESULT) {
+		char	*line;
+
+		if (!d->scanning)
+			return;
+
+		line = proto_device_found_event(&r->address, r->device_class,
+		    btmgr_type_name(btmgr_class_type(r->device_class)));
+		broadcast(d, line);
+		free(line);
+		return;
+	}
+
+	if (r->kind == LISTEN_INQUIRY_COMPLETE) {
+		d->scanning = 0;
+		d->scan_until = 0;
+		d->dirty = 1;
+		return;
+	}
+
+	if (r->kind != LISTEN_CONNECTION_COMPLETE &&
+	    r->kind != LISTEN_DISCONNECTION_COMPLETE)
+		return;
+
+	if (r->kind == LISTEN_CONNECTION_COMPLETE && d->pairing.state.active &&
+	    memcmp(d->pairing.state.addr, &r->address, BTMGR_ADDR_LEN) == 0) {
 		/*
 		 * A6 step 5 is not done until the link is authenticated: a bare
 		 * ACL link never exchanges a PIN, so no key would ever arrive.
@@ -516,9 +557,9 @@ on_completion(const struct listen_report *r, void *arg)
 	 * seconds later with "timeout" even though the connection succeeded.
 	 */
 	for (;;) {
-		if (r->kind == LISTEN_CON_COMPL)
+		if (r->kind == LISTEN_CONNECTION_COMPLETE)
 			f = inflight_take(&d->pending, INFLIGHT_CONNECT,
-			    &r->addr);
+			    &r->address);
 		else
 			f = inflight_take_handle(&d->pending,
 			    INFLIGHT_DISCONNECT, r->handle);
@@ -764,6 +805,56 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		return;
 	}
 
+	if (strcmp(cmd.name, "scan") == 0) {
+		int	duration;
+
+		if (!cmd.has_action) {
+			reply(d, c, proto_error(cmd.id, "bad_json",
+			    "scan requires action"));
+			return;
+		}
+
+		if (cmd.action == PROTO_ACTION_STOP) {
+			if (d->scanning &&
+			    btmgr_inquiry_cancel(d->last.adapter.node) < 0) {
+				reply(d, c, proto_error(cmd.id, "io_error",
+				    strerror(errno)));
+				return;
+			}
+			d->scanning = 0;
+			d->scan_until = 0;
+			d->dirty = 1;
+			reply(d, c, proto_ok(cmd.id));
+			return;
+		}
+
+		/* B4.2 */
+		if (d->scanning) {
+			reply(d, c, proto_ok(cmd.id));
+			return;
+		}
+
+		duration = cmd.has_duration ? cmd.duration : SCAN_DEFAULT_SEC;
+		if (duration < 1 || duration > BTMGR_INQUIRY_MAX_SEC) {
+			reply(d, c, proto_error(cmd.id, "bad_json",
+			    "duration out of range"));
+			return;
+		}
+
+		if (btmgr_inquiry_start(d->last.adapter.node, duration) < 0) {
+			reply(d, c, proto_error(cmd.id, "io_error",
+			    strerror(errno)));
+			return;
+		}
+
+		d->scanning = 1;
+		d->scan_until = now_mono() + duration + SCAN_MARGIN_SEC;
+		d->dirty = 1;
+		syslog(LOG_INFO, "scan started by uid %d", (int)c->uid);
+		reply(d, c, proto_ok(cmd.id));
+		return;
+	}
+
 	if (strcmp(cmd.name, "set_discoverable") == 0) {
 		int	on;
 
@@ -956,6 +1047,9 @@ refresh_hci(struct daemon *d)
 	if (strcmp(d->node, want) == 0)
 		return;			/* already matching */
 
+	d->scanning = 0;
+	d->scan_until = 0;
+
 	if (d->hci >= 0) {
 		(void)kq_del(d->kq, (uintptr_t)d->hci, EVFILT_READ);
 		listen_close(d->hci);
@@ -1001,6 +1095,7 @@ reconcile(struct daemon *d)
 	char		*line;
 
 	state_snapshot(&now);
+	now.scanning = d->scanning && now.adapter_present;
 
 	if (d->have_last && state_equal(&now, &d->last)) {
 		d->dirty = 0;
