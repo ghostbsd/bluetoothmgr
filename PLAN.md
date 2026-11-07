@@ -153,7 +153,7 @@ B5.2. That difference is the A3.4 failure mode.
 
 Every frontend sits on this, so the backend finishes before any GUI starts.
 
-- [ ] `scan` as an IPC command, asynchronous inquiry driven from the event loop, idempotent per B4.2, results as `device_found` events
+- [x] `scan` as an IPC command, asynchronous inquiry driven from the event loop, idempotent per B4.2, results as `device_found` events
 - [ ] `remove`, `set_alias`, `set_trusted` and `set_power` commands (A8.5)
 - [ ] Wire `common/store.c` into the daemon, so A4 metadata reaches clients
 - [ ] Populate the `devices` array: `paired`, `has_key`, `type`, `class`, `connected`, `trusted` (B5.2, B5.3)
