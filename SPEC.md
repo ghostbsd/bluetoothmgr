@@ -323,7 +323,20 @@ strict grammars, plus syslog.
   typing on. Restart MUST be an explicit, confirmed user action.
 - **A8.5** `set_power: false` maps to `service bluetooth stop <unit>`, which
   tears down the netgraph stack. This is not equivalent to BlueZ's adapter
-  power-off and the UI MUST make the difference visible.
+  power-off and the UI MUST make the difference visible. `set_power: true`
+  maps to `service bluetooth start <unit>`.
+- **A8.5.1** `set_power` MUST carry `on`. A request without it is `bad_json`.
+- **A8.5.2** A `set_power` matching the current state MUST reply `ok` without
+  running anything.
+- **A8.5.3** While a power change runs, another `set_power` MUST be refused with
+  `busy`.
+- **A8.5.4** `adapter_present` MUST report whether the USB device is attached,
+  and `powered` whether its HCI unit is inited. A stopped stack MUST report
+  `adapter_present` true and `powered` false.
+- **A8.5.5** While `powered` is false, `adapter` MUST carry the address and name
+  last read from that device. If none was read, the address MUST be
+  `00:00:00:00:00:00` and the name empty. They MUST be dropped when the device
+  detaches.
 
 ## A9. `/var/run/utx.active`
 

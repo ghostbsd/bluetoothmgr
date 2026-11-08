@@ -18,7 +18,7 @@ struct state {
 	int			adapter_present;
 	int			powered;	/* netgraph stack is inited */
 	int			discoverable;	/* inquiry scan enabled */
-	int			scanning;	/* reserved, always 0 in M2 */
+	int			scanning;
 
 	/*
 	 * M2 runs unprivileged, so /etc/bluetooth/hcsecd.conf (mode 0600) is
@@ -34,11 +34,20 @@ struct state {
 	int			nconns;
 };
 
+#define	USB_LOCATION_SIZE	256
+
+/* A8.5.5: the adapter as last read live, kept for while it is powered off. */
+struct adapter_cache {
+	int			valid;
+	struct btmgr_adapter	adapter;
+	char			location[USB_LOCATION_SIZE];
+};
+
 /*
  * Rebuild a snapshot from the kernel. Never fails in a way worth propagating:
  * no adapter is an ordinary state, so this always leaves *out usable.
  */
-void	state_snapshot(struct state *out);
+void	state_snapshot(struct state *out, struct adapter_cache *cache);
 
 /* Do two snapshots describe the same world? Non-zero if identical. */
 int	state_equal(const struct state *a, const struct state *b);

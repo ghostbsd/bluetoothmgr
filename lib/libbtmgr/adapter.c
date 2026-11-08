@@ -36,9 +36,18 @@ struct adapter_ctx {
 };
 
 static int	adapter_cb(int, struct bt_devinfo const *, void *);
+static int	unit_ready(uint32_t state);
 static void	adapter_from_devinfo(struct bt_devinfo const *,
 		    struct btmgr_adapter *);
 static void	adapter_read_extra(const char *, struct btmgr_adapter *);
+
+/* On resume the node outlives its USB driver, and commands go nowhere. */
+static int
+unit_ready(uint32_t state)
+{
+
+	return ((state & NG_HCI_UNIT_READY) == NG_HCI_UNIT_READY);
+}
 
 /*
  * Fill in the parts of btmgr_adapter that bt_devinfo() already gives us.
@@ -60,10 +69,9 @@ adapter_from_devinfo(struct bt_devinfo const *di, struct btmgr_adapter *a)
  * Opens its own socket. See the note at the top of this file about why the
  * one bt_devenum() provides cannot be written to.
  *
- * Failures here are deliberately not fatal. An adapter whose stack is not yet
- * inited will refuse these commands, and reporting it with an empty name is
- * far more useful than reporting nothing at all. Each field keeps the zero
- * value memset() left behind.
+ * Failures here are deliberately not fatal: reporting an adapter with an empty
+ * name is more useful than reporting nothing. Each field keeps the zero value
+ * memset() left behind.
  */
 static void
 adapter_read_extra(const char *node, struct btmgr_adapter *a)
@@ -146,7 +154,8 @@ adapter_cb(int s, struct bt_devinfo const *di, void *arg)
 
 	a = &ctx->out[ctx->count];
 	adapter_from_devinfo(di, a);
-	adapter_read_extra(a->node, a);
+	if (unit_ready(di->state))
+		adapter_read_extra(a->node, a);
 	ctx->count++;
 
 	return (ctx->count >= ctx->cap ? 1 : 0);
@@ -206,7 +215,8 @@ btmgr_adapter_get(const char *node, struct btmgr_adapter *out)
 		return (-1);
 
 	adapter_from_devinfo(&di, out);
-	adapter_read_extra(node, out);
+	if (unit_ready(di.state))
+		adapter_read_extra(node, out);
 
 	return (0);
 }

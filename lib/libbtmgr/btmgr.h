@@ -122,7 +122,11 @@ int		 btmgr_adapter_get(const char *, struct btmgr_adapter *);
 int		 btmgr_conn_list(const char *, struct btmgr_conn *, int *);
 
 /* scan.c */
+#define	BTMGR_INQUIRY_MAX_SEC	61	/* 0x30 units of 1.28 s */
+
 int		 btmgr_scan(const char *, int, struct btmgr_device *, int *);
+int		 btmgr_inquiry_start(const char *, int);
+int		 btmgr_inquiry_cancel(const char *);
 
 /* class.c */
 enum btmgr_type	 btmgr_class_type(const uint8_t *);
