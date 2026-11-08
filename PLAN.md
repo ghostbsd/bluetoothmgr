@@ -154,14 +154,16 @@ B5.2. That difference is the A3.4 failure mode.
 Every frontend sits on this, so the backend finishes before any GUI starts.
 
 - [x] `scan` as an IPC command, asynchronous inquiry driven from the event loop, idempotent per B4.2, results as `device_found` events
-- [ ] `remove`, `set_alias`, `set_trusted` and `set_power` commands (A8.5)
+- [x] `set_power` command (A8.5)
 - [ ] Wire `common/store.c` into the daemon, so A4 metadata reaches clients
+- [ ] `set_trusted` command
+- [ ] `set_alias` command, with the `alias_too_long` refusal bounded by A2.3
+- [ ] The `stale_link_key` code and the A3.2 key delete, which needs `hcsecd` stopped
+- [ ] `remove` command
 - [ ] Populate the `devices` array: `paired`, `has_key`, `type`, `class`, `connected`, `trusted` (B5.2, B5.3)
 - [ ] `rssi`, null unless the device was seen in the current scan (B5.4)
 - [ ] `device_added` and `device_removed` events on store changes (B7)
 - [ ] `pairing_progress` events for the A6 stage transitions (B7)
-- [ ] The `stale_link_key` code and the A3.2 key delete, which needs `hcsecd` stopped
-- [ ] `alias_too_long` refusal, bounded by A2.3
 - [ ] Decode `devices` in `proto_parse_msg()`, as `connections` and `adapter` already are
 - [ ] A per-uid client cap, since the A5.1 socket mode lets any local user fill the global one
 - [ ] Manual test by maintainer

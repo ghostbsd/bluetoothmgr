@@ -7,10 +7,40 @@
  * path needs no root; only M3's operations will.
  */
 
+#include <sys/types.h>
+#include <sys/sysctl.h>
+
+#include <stdio.h>
 #include <string.h>
 
 #include "btmgr.h"
 #include "state.h"
+
+static int	first_usb_unit(char *location, size_t location_size);
+
+/*
+ * The USB device outlives a stopped stack, so it is what A8.5.4 calls
+ * present. Returns the first ubt unit and its location, or -1 if none.
+ */
+static int
+first_usb_unit(char *location, size_t location_size)
+{
+	char	name[64];
+	size_t	length;
+	int	unit;
+
+	for (unit = 0; unit < BTMGR_MAX_ADAPTERS; unit++) {
+		(void)snprintf(name, sizeof(name), "dev.ubt.%d.%%location",
+		    unit);
+		length = location_size - 1;
+		if (sysctlbyname(name, location, &length, NULL, 0) == 0) {
+			location[length] = '\0';
+			return (unit);
+		}
+	}
+
+	return (-1);
+}
 
 /*
  * Rebuild a snapshot.
@@ -21,26 +51,56 @@
  * just move the problem.
  */
 void
-state_snapshot(struct state *out)
+state_snapshot(struct state *out, struct adapter_cache *cache)
 {
 	struct btmgr_adapter	adapters[BTMGR_MAX_ADAPTERS];
-	int			n;
+	char			location[USB_LOCATION_SIZE];
+	int			n, unit;
 
 	memset(out, 0, sizeof(*out));
 
-	n = (int)(sizeof(adapters) / sizeof(adapters[0]));
-	if (btmgr_adapter_list(adapters, &n) < 0 || n == 0)
+	unit = first_usb_unit(location, sizeof(location));
+	if (unit < 0 || (cache->valid &&
+	    strcmp(cache->location, location) != 0))
+		cache->valid = 0;
+	if (unit < 0)
 		return;
+
+	out->adapter_present = 1;
 
 	/*
 	 * M2 manages one adapter, the first. Multi-adapter machines exist but
 	 * the UI has no way to express them yet, and picking the first is
 	 * what hccontrol and bluetooth-config do.
 	 */
-	out->adapter_present = 1;
+	n = (int)(sizeof(adapters) / sizeof(adapters[0]));
+	if (btmgr_adapter_list(adapters, &n) < 0 || n == 0) {
+		if (cache->valid)
+			out->adapter = cache->adapter;
+		out->adapter.inquiry_scan = 0;
+		out->adapter.page_scan = 0;
+		(void)snprintf(out->adapter.node, sizeof(out->adapter.node),
+		    "ubt%dhci", unit);
+		return;
+	}
+
 	out->adapter = adapters[0];
 	out->powered = adapters[0].inited;
 	out->discoverable = adapters[0].inquiry_scan;
+
+	/* Only a ready unit was read in full, see adapter.c. */
+	if (out->powered) {
+		cache->adapter = adapters[0];
+		(void)strlcpy(cache->location, location,
+		    sizeof(cache->location));
+		cache->valid = 1;
+	} else if (cache->valid) {
+		/* A8.5.5 covers a stack still starting, too. */
+		out->adapter = cache->adapter;
+		out->adapter.inquiry_scan = 0;
+		out->adapter.page_scan = 0;
+		out->discoverable = 0;
+	}
 
 	/*
 	 * A stack that is not inited will refuse the connection list, so skip
