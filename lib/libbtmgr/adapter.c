@@ -13,8 +13,10 @@
  * non-PR_CONNREQUIRED socket makes the kernel sodisconnect() first, which sets
  * SS_CANTSENDMORE. The following connect() restores SS_ISCONNECTED but does
  * not clear it, so every later write returns EPIPE and raises SIGPIPE. That is
- * why adapter_read_extra() opens a socket of its own rather than reusing the
- * one it is given.
+ * why btmgr_adapter_read_details() opens a socket of its own.
+ *
+ * btmgr_adapter_list() only asks the kernel and never reaches the controller,
+ * so it is safe to poll. See SPEC.md C3.3.
  */
 
 #include <errno.h>
@@ -39,7 +41,6 @@ static int	adapter_cb(int, struct bt_devinfo const *, void *);
 static int	unit_ready(uint32_t state);
 static void	adapter_from_devinfo(struct bt_devinfo const *,
 		    struct btmgr_adapter *);
-static void	adapter_read_extra(const char *, struct btmgr_adapter *);
 
 /* On resume the node outlives its USB driver, and commands go nowhere. */
 static int
@@ -64,27 +65,36 @@ adapter_from_devinfo(struct bt_devinfo const *di, struct btmgr_adapter *a)
 
 /*
  * Read the three things bt_devinfo() does not report: the friendly name, the
- * scan enable state, and our own class of device.
+ * scan enable state, and our own class of device. These are HCI commands that
+ * go out over USB, so call this once per power-up, never on a timer.
  *
- * Opens its own socket. See the note at the top of this file about why the
- * one bt_devenum() provides cannot be written to.
- *
- * Failures here are deliberately not fatal: reporting an adapter with an empty
- * name is more useful than reporting nothing. Each field keeps the zero value
- * memset() left behind.
+ * Returns -1 without sending anything if the unit is not ready. Once it is,
+ * returns 0 even if a read fails: an adapter with an empty name is more useful
+ * than none. A field that fails keeps the value it had.
  */
-static void
-adapter_read_extra(const char *node, struct btmgr_adapter *a)
+int
+btmgr_adapter_read_details(struct btmgr_adapter *a)
 {
+	const char			*node = a->node;
+	struct bt_devinfo		di;
 	struct bt_devreq		r;
 	ng_hci_read_local_name_rp	name_rp;
 	ng_hci_read_scan_enable_rp	scan_rp;
 	ng_hci_read_unit_class_rp	class_rp;
 	int				s;
 
+	memset(&di, 0, sizeof(di));
+	strlcpy(di.devname, node, sizeof(di.devname));
+	if (bt_devinfo(&di) < 0)
+		return (-1);
+	if (!unit_ready(di.state)) {
+		errno = ENXIO;
+		return (-1);
+	}
+
 	s = bt_devopen(node);
 	if (s < 0)
-		return;
+		return (-1);
 
 	/* Friendly name. */
 	memset(&r, 0, sizeof(r));
@@ -130,13 +140,15 @@ adapter_read_extra(const char *node, struct btmgr_adapter *a)
 		memcpy(a->devclass, class_rp.uclass, sizeof(a->devclass));
 
 	bt_devclose(s);
+
+	return (0);
 }
 
 /*
  * Called by bt_devenum() once per adapter.
  *
  * The socket argument is deliberately unused: it cannot be written to, per the
- * note at the top of this file, so adapter_read_extra() opens its own.
+ * note at the top of this file.
  *
  * Returns 0 to keep enumerating, 1 to stop. We stop once the caller's array
  * is full rather than walking adapters we have nowhere to put.
@@ -154,8 +166,6 @@ adapter_cb(int s, struct bt_devinfo const *di, void *arg)
 
 	a = &ctx->out[ctx->count];
 	adapter_from_devinfo(di, a);
-	if (unit_ready(di->state))
-		adapter_read_extra(a->node, a);
 	ctx->count++;
 
 	return (ctx->count >= ctx->cap ? 1 : 0);
@@ -215,8 +225,7 @@ btmgr_adapter_get(const char *node, struct btmgr_adapter *out)
 		return (-1);
 
 	adapter_from_devinfo(&di, out);
-	if (unit_ready(di.state))
-		adapter_read_extra(node, out);
+	(void)btmgr_adapter_read_details(out);
 
 	return (0);
 }

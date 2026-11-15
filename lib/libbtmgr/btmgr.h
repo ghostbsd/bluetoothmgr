@@ -117,6 +117,7 @@ __BEGIN_DECLS
 /* adapter.c */
 int		 btmgr_adapter_list(struct btmgr_adapter *, int *);
 int		 btmgr_adapter_get(const char *, struct btmgr_adapter *);
+int		 btmgr_adapter_read_details(struct btmgr_adapter *);
 
 /* conn.c */
 int		 btmgr_conn_list(const char *, struct btmgr_conn *, int *);

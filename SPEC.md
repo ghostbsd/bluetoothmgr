@@ -610,6 +610,10 @@ runs `service bluetooth quietstart` and `quietstop`.
 - **C3.2** Polling `bt_devenum()` on the reconcile timer is sufficient.
   `/var/run/devd.seqpacket.pipe` would give instant notification and MAY be
   added if the latency matters.
+- **C3.3** The reconcile timer MUST NOT send HCI commands. The adapter's name,
+  class and scan enable MUST be read from the controller once each time its
+  unit becomes ready, and again on the daemon's `SIGHUP`. Scan enable written
+  by the daemon MUST be recorded rather than read back.
 
 ## C4. The `bt_devenum()` callback socket cannot be written to
 

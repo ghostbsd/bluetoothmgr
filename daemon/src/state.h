@@ -39,6 +39,7 @@ struct state {
 /* A8.5.5: the adapter as last read live, kept for while it is powered off. */
 struct adapter_cache {
 	int			valid;
+	int			details_read;	/* since the unit last came up */
 	struct btmgr_adapter	adapter;
 	char			location[USB_LOCATION_SIZE];
 };

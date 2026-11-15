@@ -17,6 +17,19 @@
 #include "state.h"
 
 static int	first_usb_unit(char *location, size_t location_size);
+static void	copy_details(struct btmgr_adapter *to,
+		    const struct btmgr_adapter *from);
+
+/* What btmgr_adapter_read_details() fills in, and nothing else. */
+static void
+copy_details(struct btmgr_adapter *to, const struct btmgr_adapter *from)
+{
+
+	memcpy(to->name, from->name, sizeof(to->name));
+	memcpy(to->devclass, from->devclass, sizeof(to->devclass));
+	to->inquiry_scan = from->inquiry_scan;
+	to->page_scan = from->page_scan;
+}
 
 /*
  * The USB device outlives a stopped stack, so it is what A8.5.4 calls
@@ -61,8 +74,10 @@ state_snapshot(struct state *out, struct adapter_cache *cache)
 
 	unit = first_usb_unit(location, sizeof(location));
 	if (unit < 0 || (cache->valid &&
-	    strcmp(cache->location, location) != 0))
+	    strcmp(cache->location, location) != 0)) {
 		cache->valid = 0;
+		cache->details_read = 0;
+	}
 	if (unit < 0)
 		return;
 
@@ -75,6 +90,7 @@ state_snapshot(struct state *out, struct adapter_cache *cache)
 	 */
 	n = (int)(sizeof(adapters) / sizeof(adapters[0]));
 	if (btmgr_adapter_list(adapters, &n) < 0 || n == 0) {
+		cache->details_read = 0;
 		if (cache->valid)
 			out->adapter = cache->adapter;
 		out->adapter.inquiry_scan = 0;
@@ -86,20 +102,34 @@ state_snapshot(struct state *out, struct adapter_cache *cache)
 
 	out->adapter = adapters[0];
 	out->powered = adapters[0].inited;
-	out->discoverable = adapters[0].inquiry_scan;
 
-	/* Only a ready unit was read in full, see adapter.c. */
+	/* C3.3: the controller is asked once per power-up, never per tick. */
 	if (out->powered) {
-		cache->adapter = adapters[0];
+		if (!cache->details_read &&
+		    btmgr_adapter_read_details(&out->adapter) == 0)
+			cache->details_read = 1;
+		else if (cache->valid) {
+			copy_details(&out->adapter, &cache->adapter);
+			if (!cache->details_read) {
+				out->adapter.inquiry_scan = 0;
+				out->adapter.page_scan = 0;
+			}
+		}
+		out->discoverable = out->adapter.inquiry_scan;
+
+		cache->adapter = out->adapter;
 		(void)strlcpy(cache->location, location,
 		    sizeof(cache->location));
 		cache->valid = 1;
-	} else if (cache->valid) {
+	} else {
+		cache->details_read = 0;
 		/* A8.5.5 covers a stack still starting, too. */
-		out->adapter = cache->adapter;
-		out->adapter.inquiry_scan = 0;
-		out->adapter.page_scan = 0;
-		out->discoverable = 0;
+		if (cache->valid) {
+			out->adapter = cache->adapter;
+			out->adapter.inquiry_scan = 0;
+			out->adapter.page_scan = 0;
+			out->discoverable = 0;
+		}
 	}
 
 	/*

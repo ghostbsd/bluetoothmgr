@@ -38,6 +38,7 @@
 static int	 pin_is_sendable(const char *pin);
 static int	 set_string(json_t *obj, const char *key, const char *value);
 static int	 read_boolean(json_t *obj, const char *key, int *out);
+static int	 read_int(json_t *value, int *out);
 static int	 json_string_is(json_t *value, const char *want);
 static int	 read_adapter(json_t *obj, struct proto_adapter_state *out);
 static int	 read_connection(json_t *obj, struct proto_connection *out);
@@ -260,6 +261,24 @@ read_boolean(json_t *obj, const char *key, int *out)
 		return (-1);
 
 	*out = json_is_true(value) ? 1 : 0;
+
+	return (0);
+}
+
+/* json_int_t is 64-bit, so a cast to int alone would wrap a large value. */
+static int
+read_int(json_t *value, int *out)
+{
+	json_int_t	 number;
+
+	if (!json_is_integer(value))
+		return (-1);
+
+	number = json_integer_value(value);
+	if (number < INT_MIN || number > INT_MAX)
+		return (-1);
+
+	*out = (int)number;
 
 	return (0);
 }
@@ -638,9 +657,7 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 	 * Recover the id first, even if the rest is malformed, so the error
 	 * reply can be matched to the request that caused it. SPEC.md B3.1.
 	 */
-	v = json_object_get(root, "id");
-	if (json_is_integer(v))
-		out->id = (int)json_integer_value(v);
+	(void)read_int(json_object_get(root, "id"), &out->id);
 
 	if (out->id < 0) {
 		strlcpy(code, "missing_id", codelen);
@@ -682,12 +699,11 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 
 	v = json_object_get(root, "timeout");
 	if (v != NULL) {
-		if (!json_is_integer(v)) {
+		if (read_int(v, &out->timeout) != 0) {
 			strlcpy(code, "bad_json", codelen);
 			json_decref(root);
 			return (-1);
 		}
-		out->timeout = (int)json_integer_value(v);
 		out->has_timeout = 1;
 	}
 
@@ -718,12 +734,11 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 
 	v = json_object_get(root, "duration");
 	if (v != NULL) {
-		if (!json_is_integer(v)) {
+		if (read_int(v, &out->duration) != 0) {
 			strlcpy(code, "bad_json", codelen);
 			json_decref(root);
 			return (-1);
 		}
-		out->duration = (int)json_integer_value(v);
 		out->has_duration = 1;
 	}
 

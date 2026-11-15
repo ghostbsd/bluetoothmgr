@@ -146,6 +146,8 @@ static void	do_set_power(struct daemon *d, struct client *c,
 		    const struct proto_cmd *cmd);
 static int	start_power_change(struct daemon *d, int on);
 static void	finish_power_change(struct daemon *d, int status);
+static void	remember_scan(struct daemon *d, int inquiry_scan,
+		    int page_scan);
 
 static void
 usage(void)
@@ -233,6 +235,16 @@ broadcast(struct daemon *d, const char *line)
 	}
 }
 
+/* C3.3: the poll no longer reads scan enable, so record what we wrote. */
+static void
+remember_scan(struct daemon *d, int inquiry_scan, int page_scan)
+{
+
+	d->adapter_cache.adapter.inquiry_scan = inquiry_scan;
+	d->adapter_cache.adapter.page_scan = page_scan;
+	d->dirty = 1;
+}
+
 /* Everything on a schedule. now is monotonic, see now_mono(). */
 static void
 tick(struct daemon *d, time_t now)
@@ -246,8 +258,9 @@ tick(struct daemon *d, time_t now)
 	if (d->discoverable_until != 0 && now >= d->discoverable_until) {
 		syslog(LOG_INFO, "discoverable timeout");
 		d->discoverable_until = 0;
-		if (d->last.powered)
-			(void)btmgr_set_scan(d->last.adapter.node, 0, 1);
+		if (d->last.powered &&
+		    btmgr_set_scan(d->last.adapter.node, 0, 1) == 0)
+			remember_scan(d, 0, 1);
 	}
 
 	if (d->scanning && now >= d->scan_until) {
@@ -1049,6 +1062,7 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 			    strerror(errno)));
 			return;
 		}
+		remember_scan(d, on, 1);
 
 		/*
 		 * A timeout re-arms the one-shot timer that turns it back
@@ -1469,6 +1483,7 @@ main(int argc, char *argv[])
 			if (ev->filter == EVFILT_SIGNAL) {
 				if (ev->ident == SIGHUP) {
 					syslog(LOG_INFO, "reload");
+					d.adapter_cache.details_read = 0;
 					d.dirty = 1;
 				} else {
 					syslog(LOG_INFO, "shutting down");

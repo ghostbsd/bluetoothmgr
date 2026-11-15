@@ -177,6 +177,8 @@ test_envelope(void)
 	    "a string id is missing_id, not coerced");
 	rejects("{\"id\":-1,\"cmd\":\"get_state\"}", "missing_id",
 	    "a negative id is refused");
+	rejects("{\"id\":4294967297,\"cmd\":\"get_state\"}", "missing_id",
+	    "an id past INT_MAX is refused, not narrowed to 1");
 	rejects("{\"id\":1}", "missing_cmd", "no cmd is missing_cmd");
 	rejects("{\"id\":1,\"cmd\":42}", "missing_cmd", "a non-string cmd too");
 
@@ -242,6 +244,9 @@ test_scalars(void)
 	    "bad_json", "a string timeout is not coerced");
 	rejects("{\"id\":3,\"cmd\":\"set_discoverable\",\"timeout\":1.5}",
 	    "bad_json", "nor is a fractional one");
+	rejects("{\"id\":3,\"cmd\":\"set_discoverable\","
+	    "\"timeout\":4294967296}", "bad_json",
+	    "a timeout past INT_MAX is refused, not narrowed to 0");
 	rejects("{\"id\":3,\"cmd\":\"set_discoverable\",\"on\":1}",
 	    "bad_json", "on must be a boolean, not 1");
 
@@ -288,6 +293,9 @@ test_scan(void)
 	    "a string duration is not coerced");
 	rejects("{\"id\":4,\"cmd\":\"scan\",\"duration\":2.5}", "bad_json",
 	    "nor is a fractional one");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"duration\":4294967306}",
+	    "bad_json",
+	    "a duration past INT_MAX is refused, not narrowed to 10");
 	ok(parse("{\"id\":4,\"cmd\":\"scan\",\"duration\":999}", &cmd, code,
 	    sizeof(code)) == 0,
 	    "an out-of-range duration parses; the handler range checks it");
