@@ -337,6 +337,8 @@ strict grammars, plus syslog.
   last read from that device. If none was read, the address MUST be
   `00:00:00:00:00:00` and the name empty. They MUST be dropped when the device
   detaches.
+- **A8.5.6** While a power change runs, every request other than `get_state`
+  MUST be refused with `busy`.
 
 ## A9. `/var/run/utx.active`
 

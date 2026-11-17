@@ -922,6 +922,13 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		return;
 	}
 
+	/* A8.5.6. powered is stale until the script exits. */
+	if (d->power_pid != 0) {
+		reply(d, c, proto_error(cmd.id, "busy",
+		    "a power change is running"));
+		return;
+	}
+
 	if (!d->last.powered) {
 		reply(d, c, proto_error(cmd.id, "no_adapter", NULL));
 		return;
