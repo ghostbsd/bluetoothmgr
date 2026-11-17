@@ -614,6 +614,10 @@ runs `service bluetooth quietstart` and `quietstop`.
   class and scan enable MUST be read from the controller once each time its
   unit becomes ready, and again on the daemon's `SIGHUP`. Scan enable written
   by the daemon MUST be recorded rather than read back.
+- **C3.4** The daemon MUST watch `/var/run/devd.seqpacket.pipe` for `ubt`
+  attach and detach. On detach it MUST drop the adapter kept per A8.5.5. On
+  attach it MUST read the adapter's details again per C3.3. While the socket
+  is unavailable the daemon MUST retry it on each reconcile tick.
 
 ## C4. The `bt_devenum()` callback socket cannot be written to
 

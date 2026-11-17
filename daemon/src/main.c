@@ -36,6 +36,7 @@
 #include "pairing.h"
 #include "paths.h"
 #include "ipc.h"
+#include "devd.h"
 #include "listen.h"
 #include "proto.h"
 #include "session.h"
@@ -77,6 +78,7 @@
 static int	tag_listen_sock;	/* the IPC listening socket */
 static int	tag_hci;		/* the passive HCI event socket */
 static int	tag_power;		/* the service bluetooth child */
+static int	tag_devd;		/* devd's event socket */
 
 /* A6.2 allows one at a time. client may die first, so use client_alive(). */
 struct parked_pairing {
@@ -111,6 +113,7 @@ struct daemon {
 	pid_t		 power_pid;		/* 0 when none is running */
 	struct client	*power_client;
 	int		 power_id;
+	int		 devd;
 	volatile int	 quit;
 };
 
@@ -148,6 +151,8 @@ static int	start_power_change(struct daemon *d, int on);
 static void	finish_power_change(struct daemon *d, int status);
 static void	remember_scan(struct daemon *d, int inquiry_scan,
 		    int page_scan);
+static void	open_devd(struct daemon *d);
+static void	on_devd(enum devd_event event, int unit, void *arg);
 
 static void
 usage(void)
@@ -245,6 +250,43 @@ remember_scan(struct daemon *d, int inquiry_scan, int page_scan)
 	d->dirty = 1;
 }
 
+/* C3.4. Quiet on failure: the tick retries every few seconds. */
+static void
+open_devd(struct daemon *d)
+{
+	int	fd;
+
+	if (d->devd >= 0)
+		return;
+
+	fd = devd_open();
+	if (fd < 0)
+		return;
+
+	if (kq_add(d->kq, (uintptr_t)fd, EVFILT_READ, &tag_devd) < 0) {
+		(void)close(fd);
+		return;
+	}
+
+	d->devd = fd;
+	syslog(LOG_INFO, "watching devd");
+}
+
+static void
+on_devd(enum devd_event event, int unit, void *arg)
+{
+	struct daemon	*d = arg;
+
+	syslog(LOG_INFO, "ubt%d %s", unit,
+	    event == DEVD_ATTACH ? "attached" : "detached");
+
+	/* A8.5.5: a detached adapter's identity must not carry over. */
+	if (event == DEVD_DETACH)
+		d->adapter_cache.valid = 0;
+	d->adapter_cache.details_read = 0;
+	d->dirty = 1;
+}
+
 /* Everything on a schedule. now is monotonic, see now_mono(). */
 static void
 tick(struct daemon *d, time_t now)
@@ -268,6 +310,8 @@ tick(struct daemon *d, time_t now)
 		d->scanning = 0;
 		d->scan_until = 0;
 	}
+
+	open_devd(d);
 
 	d->dirty = 1;
 }
@@ -1298,6 +1342,7 @@ main(int argc, char *argv[])
 	d.kq = -1;
 	d.lfd = -1;
 	d.hci = -1;
+	d.devd = -1;
 	d.sockpath = DEFAULT_SOCKET;
 
 	while ((ch = getopt(argc, argv, "fnp:r:s:")) != -1) {
@@ -1416,6 +1461,8 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
+	open_devd(&d);
+
 	/*
 	 * Last: the pid is the forked one, and SIGTERM is ignored until the
 	 * filters above exist, so publishing earlier loses a stop sent in
@@ -1494,6 +1541,17 @@ main(int argc, char *argv[])
 
 			if (ev->udata == &tag_listen_sock) {
 				do_accept(&d);
+				continue;
+			}
+
+			if (ev->udata == &tag_devd) {
+				if (devd_drain(d.devd, on_devd, &d) < 0) {
+					syslog(LOG_INFO, "devd went away");
+					(void)kq_del(d.kq, (uintptr_t)d.devd,
+					    EVFILT_READ);
+					(void)close(d.devd);
+					d.devd = -1;
+				}
 				continue;
 			}
 
