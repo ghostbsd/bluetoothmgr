@@ -2,7 +2,7 @@
 #
 # PROVIDE: bluetoothmgrd
 # REQUIRE: DAEMON hcsecd
-# KEYWORD: nojail shutdown
+# KEYWORD: nojail shutdown suspend resume
 #
 # bluetoothmgrd_enable="YES"
 # bluetoothmgrd_socket="/var/run/bluetoothmgr.sock"
@@ -36,6 +36,20 @@ command_args="-s ${bluetoothmgrd_socket} -p ${bluetoothmgrd_pidfile}"
 
 # SIGHUP makes the daemon re-read state and push it to clients. It does not
 # re-exec, so reload is cheap and never drops a connection.
-extra_commands="reload"
+extra_commands="reload suspend resume"
+
+# rc.suspend and rc.resume call these, so the daemon is gone across S3.
+suspend_cmd="${name}_suspend"
+resume_cmd="${name}_resume"
+
+bluetoothmgrd_suspend()
+{
+	/usr/sbin/service ${name} stop
+}
+
+bluetoothmgrd_resume()
+{
+	/usr/sbin/service ${name} start
+}
 
 run_rc_command "$1"
