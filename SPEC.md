@@ -488,6 +488,11 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
   Disallowed, `io_error` for any other status, and `timeout` if none arrives.
   `scanning` MUST NOT become true before status 0 is seen. A `scan` arriving
   while a start awaits its status MUST be refused with `busy`.
+- **B4.9** The reply to a `scan` stop MUST follow the controller's
+  `Command_Complete` for `Inquiry_Cancel`: `ok` for status 0 or Command
+  Disallowed, `io_error` for any other status, and `timeout` if none arrives.
+  `scanning` MUST become false on `ok`. A `scan` arriving while a stop awaits
+  its status MUST be refused with `busy`.
 
 ## B5. State object *(provisional, expect churn)*
 

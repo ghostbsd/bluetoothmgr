@@ -119,7 +119,8 @@ struct daemon {
 	struct client	*scan_client;
 	int		 scan_id;
 	int		 scan_duration;
-	time_t		 scan_status_until;	/* 0 when no start is waiting */
+	time_t		 scan_status_until;	/* 0 when nothing is waiting */
+	int		 scan_stopping;
 	pid_t		 power_pid;		/* 0 when none is running */
 	struct client	*power_client;
 	int		 power_id;
@@ -160,6 +161,7 @@ static void	do_set_power(struct daemon *d, struct client *c,
 static int	start_power_change(struct daemon *d, int on);
 static void	finish_power_change(struct daemon *d, int status);
 static void	finish_scan_start(struct daemon *d, int status);
+static void	finish_scan_stop(struct daemon *d, int status);
 static void	remember_scan(struct daemon *d, int inquiry_scan,
 		    int page_scan);
 static void	open_devd(struct daemon *d);
@@ -322,8 +324,12 @@ tick(struct daemon *d, time_t now)
 		d->scan_until = 0;
 	}
 
-	if (d->scan_status_until != 0 && now >= d->scan_status_until)
-		finish_scan_start(d, -1);
+	if (d->scan_status_until != 0 && now >= d->scan_status_until) {
+		if (d->scan_stopping)
+			finish_scan_stop(d, -1);
+		else
+			finish_scan_start(d, -1);
+	}
 
 	open_devd(d);
 
@@ -615,10 +621,18 @@ on_completion(const struct listen_report *r, void *arg)
 	}
 
 	if (r->kind == LISTEN_COMMAND_STATUS) {
-		if (d->scan_status_until != 0 &&
+		if (d->scan_status_until != 0 && !d->scan_stopping &&
 		    r->opcode == NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
 		    NG_HCI_OCF_INQUIRY))
 			finish_scan_start(d, r->status);
+		return;
+	}
+
+	if (r->kind == LISTEN_COMMAND_COMPLETE) {
+		if (d->scan_status_until != 0 && d->scan_stopping &&
+		    r->opcode == NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
+		    NG_HCI_OCF_INQUIRY_CANCEL))
+			finish_scan_stop(d, r->status);
 		return;
 	}
 
@@ -940,6 +954,41 @@ finish_scan_start(struct daemon *d, int status)
 	}
 }
 
+/* B4.9. Command Disallowed means no inquiry ran, so it is stopped too. */
+static void
+finish_scan_stop(struct daemon *d, int status)
+{
+	struct client	*c = d->scan_client;
+	char		 detail[64];
+	int		 id = d->scan_id;
+	int		 stopped;
+
+	d->scan_client = NULL;
+	d->scan_status_until = 0;
+	d->scan_stopping = 0;
+
+	stopped = status == 0 || status == HCI_STATUS_COMMAND_DISALLOWED;
+	if (stopped) {
+		d->scanning = 0;
+		d->scan_until = 0;
+		d->dirty = 1;
+	}
+
+	if (c == NULL)
+		return;
+
+	if (stopped)
+		reply(d, c, proto_ok(id));
+	else if (status < 0)
+		reply(d, c, proto_error(id, "timeout",
+		    "no status from the controller"));
+	else {
+		(void)snprintf(detail, sizeof(detail),
+		    "controller reported status 0x%02x", status);
+		reply(d, c, proto_error(id, "io_error", detail));
+	}
+}
+
 static void
 handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 {
@@ -1093,24 +1142,32 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 			return;
 		}
 
-		/* B4.8 */
+		/* B4.8, B4.9 */
 		if (d->scan_status_until != 0) {
 			reply(d, c, proto_error(cmd.id, "busy",
-			    "a scan is starting"));
+			    "a scan change is waiting for the controller"));
 			return;
 		}
 
 		if (cmd.action == PROTO_ACTION_STOP) {
-			if (d->scanning &&
-			    btmgr_inquiry_cancel(d->last.adapter.node) < 0) {
-				reply(d, c, proto_error(cmd.id, "io_error",
-				    strerror(errno)));
+			if (!d->scanning) {
+				reply(d, c, proto_ok(cmd.id));
 				return;
 			}
-			d->scanning = 0;
-			d->scan_until = 0;
-			d->dirty = 1;
-			reply(d, c, proto_ok(cmd.id));
+
+			d->scan_client = c;
+			d->scan_id = cmd.id;
+			d->scan_stopping = 1;
+			d->scan_status_until = now_mono() +
+			    SCAN_STATUS_TIMEOUT_SEC;
+
+			if (btmgr_inquiry_cancel(d->last.adapter.node) < 0) {
+				d->scan_client = NULL;
+				d->scan_status_until = 0;
+				d->scan_stopping = 0;
+				reply(d, c, proto_error(cmd.id, "io_error",
+				    strerror(errno)));
+			}
 			return;
 		}
 

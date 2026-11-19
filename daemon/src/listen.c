@@ -41,7 +41,8 @@ static const uint8_t	watched[] = {
 	NG_HCI_EVENT_LINK_KEY_NOTIFICATION,
 	NG_HCI_EVENT_INQUIRY_RESULT,
 	NG_HCI_EVENT_INQUIRY_COMPL,
-	NG_HCI_EVENT_COMMAND_STATUS
+	NG_HCI_EVENT_COMMAND_STATUS,
+	NG_HCI_EVENT_COMMAND_COMPL
 };
 
 int
@@ -324,6 +325,26 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 			rep.kind = LISTEN_COMMAND_STATUS;
 			rep.status = command_status->status;
 			rep.opcode = le16toh(command_status->opcode);
+
+			if (cb != NULL)
+				cb(&rep, arg);
+			break;
+		}
+
+		/* The status is the first return parameter. */
+		case NG_HCI_EVENT_COMMAND_COMPL: {
+			ng_hci_command_compl_ep	*command_complete;
+
+			if ((size_t)n < sizeof(*e) + sizeof(*command_complete) +
+			    1)
+				break;
+
+			command_complete = (ng_hci_command_compl_ep *)(e + 1);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.kind = LISTEN_COMMAND_COMPLETE;
+			rep.status = *(uint8_t *)(command_complete + 1);
+			rep.opcode = le16toh(command_complete->opcode);
 
 			if (cb != NULL)
 				cb(&rep, arg);

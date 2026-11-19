@@ -137,31 +137,27 @@ btmgr_inquiry_start(const char *node, int secs)
 	return (0);
 }
 
-/* Synchronous: a cancelled inquiry sends no Inquiry_Complete to wait for. */
+/*
+ * Send Inquiry_Cancel and return without waiting. The answer is a
+ * Command_Complete on the event socket; a cancelled inquiry sends no
+ * Inquiry_Complete.
+ */
 int
 btmgr_inquiry_cancel(const char *node)
 {
-	struct bt_devreq		r;
-	ng_hci_inquiry_cancel_rp	rp;
-	int				s, saved;
+	int	s, saved;
 
 	if (node == NULL) {
 		errno = EINVAL;
 		return (-1);
 	}
 
-	memset(&rp, 0, sizeof(rp));
-	memset(&r, 0, sizeof(r));
-	r.opcode = NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
-	    NG_HCI_OCF_INQUIRY_CANCEL);
-	r.rparam = &rp;
-	r.rlen = sizeof(rp);
-
 	s = bt_devopen(node);
 	if (s < 0)
 		return (-1);
 
-	if (bt_devreq(s, &r, 3) < 0) {
+	if (bt_devsend(s, NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
+	    NG_HCI_OCF_INQUIRY_CANCEL), NULL, 0) < 0) {
 		saved = errno;
 		bt_devclose(s);
 		errno = saved;
@@ -169,11 +165,6 @@ btmgr_inquiry_cancel(const char *node)
 	}
 
 	bt_devclose(s);
-
-	if (rp.status != 0) {
-		errno = EIO;
-		return (-1);
-	}
 
 	return (0);
 }
