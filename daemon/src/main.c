@@ -796,6 +796,12 @@ do_set_power(struct daemon *d, struct client *c, const struct proto_cmd *cmd)
 		    "set_power requires on"));
 		return;
 	}
+	/* A8.5.3 wins over every other refusal; powered is stale meanwhile. */
+	if (d->power_pid != 0) {
+		reply(d, c, proto_error(cmd->id, "busy",
+		    "a power change is running"));
+		return;
+	}
 	if (!d->last.adapter_present) {
 		reply(d, c, proto_error(cmd->id, "no_adapter", NULL));
 		return;
@@ -803,12 +809,6 @@ do_set_power(struct daemon *d, struct client *c, const struct proto_cmd *cmd)
 	if (d->pairing.state.active) {
 		reply(d, c, proto_error(cmd->id, "busy",
 		    "a pairing is in progress"));
-		return;
-	}
-	/* Before the state test: powered is stale while a change runs. */
-	if (d->power_pid != 0) {
-		reply(d, c, proto_error(cmd->id, "busy",
-		    "a power change is running"));
 		return;
 	}
 	if (cmd->on == d->last.powered) {
