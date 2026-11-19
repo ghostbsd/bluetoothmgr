@@ -916,7 +916,9 @@ finish_power_change(struct daemon *d, int status)
 
 	d->power_pid = 0;
 	d->power_client = NULL;
-	d->dirty = 1;
+
+	/* Now, not at the end of the pass: a later request reads powered. */
+	reconcile(d);
 }
 
 /* B4.8. status is the controller's Command_Status, or -1 if none came. */
