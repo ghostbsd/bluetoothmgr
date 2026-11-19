@@ -40,7 +40,8 @@ static const uint8_t	watched[] = {
 	NG_HCI_EVENT_LINK_KEY_REQ,
 	NG_HCI_EVENT_LINK_KEY_NOTIFICATION,
 	NG_HCI_EVENT_INQUIRY_RESULT,
-	NG_HCI_EVENT_INQUIRY_COMPL
+	NG_HCI_EVENT_INQUIRY_COMPL,
+	NG_HCI_EVENT_COMMAND_STATUS
 };
 
 int
@@ -304,6 +305,25 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 
 			syslog(LOG_DEBUG, "inquiry complete, status %u",
 			    complete->status);
+
+			if (cb != NULL)
+				cb(&rep, arg);
+			break;
+		}
+
+		/* Every command's status; the daemon picks out Inquiry's. */
+		case NG_HCI_EVENT_COMMAND_STATUS: {
+			ng_hci_command_status_ep	*command_status;
+
+			if ((size_t)n < sizeof(*e) + sizeof(*command_status))
+				break;
+
+			command_status = (ng_hci_command_status_ep *)(e + 1);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.kind = LISTEN_COMMAND_STATUS;
+			rep.status = command_status->status;
+			rep.opcode = le16toh(command_status->opcode);
 
 			if (cb != NULL)
 				cb(&rep, arg);

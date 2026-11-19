@@ -59,6 +59,12 @@
 
 /* The HCI length rounds up, so 61 s asks the controller for 61.44 s. */
 #define	SCAN_MARGIN_SEC		5
+
+/* Command_Status comes back in milliseconds; this only covers a lost one. */
+#define	SCAN_STATUS_TIMEOUT_SEC	3
+
+/* The HCI headers have no name for this status. */
+#define	HCI_STATUS_COMMAND_DISALLOWED	0x0c
 #define	MAX_EVENTS	32
 
 /* A5.1 leaves the socket open to any local user. 32 * 320 KiB of buffer. */
@@ -110,6 +116,10 @@ struct daemon {
 	time_t		 discoverable_until;	/* 0 when not reverting */
 	int		 scanning;
 	time_t		 scan_until;
+	struct client	*scan_client;
+	int		 scan_id;
+	int		 scan_duration;
+	time_t		 scan_status_until;	/* 0 when no start is waiting */
 	pid_t		 power_pid;		/* 0 when none is running */
 	struct client	*power_client;
 	int		 power_id;
@@ -149,6 +159,7 @@ static void	do_set_power(struct daemon *d, struct client *c,
 		    const struct proto_cmd *cmd);
 static int	start_power_change(struct daemon *d, int on);
 static void	finish_power_change(struct daemon *d, int status);
+static void	finish_scan_start(struct daemon *d, int status);
 static void	remember_scan(struct daemon *d, int inquiry_scan,
 		    int page_scan);
 static void	open_devd(struct daemon *d);
@@ -311,6 +322,9 @@ tick(struct daemon *d, time_t now)
 		d->scan_until = 0;
 	}
 
+	if (d->scan_status_until != 0 && now >= d->scan_status_until)
+		finish_scan_start(d, -1);
+
 	open_devd(d);
 
 	d->dirty = 1;
@@ -345,6 +359,10 @@ next_deadline(const struct daemon *d)
 		earliest = candidate;
 
 	candidate = d->scanning ? d->scan_until : 0;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	candidate = d->scan_status_until;
 	if (candidate != 0 && (earliest == 0 || candidate < earliest))
 		earliest = candidate;
 
@@ -414,6 +432,8 @@ drop_client(struct daemon *d, struct client *c)
 		d->pairing.client = NULL;
 	if (d->power_client == c)
 		d->power_client = NULL;
+	if (d->scan_client == c)
+		d->scan_client = NULL;
 
 	ipc_client_free(c);
 }
@@ -591,6 +611,14 @@ on_completion(const struct listen_report *r, void *arg)
 		d->scanning = 0;
 		d->scan_until = 0;
 		d->dirty = 1;
+		return;
+	}
+
+	if (r->kind == LISTEN_COMMAND_STATUS) {
+		if (d->scan_status_until != 0 &&
+		    r->opcode == NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
+		    NG_HCI_OCF_INQUIRY))
+			finish_scan_start(d, r->status);
 		return;
 	}
 
@@ -877,6 +905,41 @@ finish_power_change(struct daemon *d, int status)
 	d->dirty = 1;
 }
 
+/* B4.8. status is the controller's Command_Status, or -1 if none came. */
+static void
+finish_scan_start(struct daemon *d, int status)
+{
+	struct client	*c = d->scan_client;
+	char		 detail[64];
+	int		 id = d->scan_id;
+
+	d->scan_client = NULL;
+	d->scan_status_until = 0;
+
+	if (status == 0) {
+		d->scanning = 1;
+		d->scan_until = now_mono() + d->scan_duration + SCAN_MARGIN_SEC;
+		d->dirty = 1;
+	}
+
+	if (c == NULL)
+		return;
+
+	if (status == 0)
+		reply(d, c, proto_ok(id));
+	else if (status < 0)
+		reply(d, c, proto_error(id, "timeout",
+		    "no status from the controller"));
+	else if (status == HCI_STATUS_COMMAND_DISALLOWED)
+		reply(d, c, proto_error(id, "busy",
+		    "another inquiry is running"));
+	else {
+		(void)snprintf(detail, sizeof(detail),
+		    "controller reported status 0x%02x", status);
+		reply(d, c, proto_error(id, "io_error", detail));
+	}
+}
+
 static void
 handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 {
@@ -1030,6 +1093,13 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 			return;
 		}
 
+		/* B4.8 */
+		if (d->scan_status_until != 0) {
+			reply(d, c, proto_error(cmd.id, "busy",
+			    "a scan is starting"));
+			return;
+		}
+
 		if (cmd.action == PROTO_ACTION_STOP) {
 			if (d->scanning &&
 			    btmgr_inquiry_cancel(d->last.adapter.node) < 0) {
@@ -1057,17 +1127,21 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 			return;
 		}
 
+		/* Parked before sending, as connect is. B4.8 replies later. */
+		d->scan_client = c;
+		d->scan_id = cmd.id;
+		d->scan_duration = duration;
+		d->scan_status_until = now_mono() + SCAN_STATUS_TIMEOUT_SEC;
+
 		if (btmgr_inquiry_start(d->last.adapter.node, duration) < 0) {
+			d->scan_client = NULL;
+			d->scan_status_until = 0;
 			reply(d, c, proto_error(cmd.id, "io_error",
 			    strerror(errno)));
 			return;
 		}
 
-		d->scanning = 1;
-		d->scan_until = now_mono() + duration + SCAN_MARGIN_SEC;
-		d->dirty = 1;
-		syslog(LOG_INFO, "scan started by uid %d", (int)c->uid);
-		reply(d, c, proto_ok(cmd.id));
+		syslog(LOG_INFO, "scan requested by uid %d", (int)c->uid);
 		return;
 	}
 

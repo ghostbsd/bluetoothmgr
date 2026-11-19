@@ -32,7 +32,8 @@ enum listen_event {
 	LISTEN_AUTHENTICATION_COMPLETE,
 	LISTEN_LINK_KEY,
 	LISTEN_INQUIRY_RESULT,
-	LISTEN_INQUIRY_COMPLETE
+	LISTEN_INQUIRY_COMPLETE,
+	LISTEN_COMMAND_STATUS
 };
 
 /*
@@ -46,6 +47,7 @@ struct listen_report {
 	uint8_t			status;		/* 0 = success */
 	bdaddr_t		address;
 	uint16_t		handle;
+	uint16_t		opcode;
 	uint8_t			device_class[NG_HCI_CLASS_SIZE];
 };
 

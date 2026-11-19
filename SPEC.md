@@ -483,6 +483,11 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
   `busy`. The first four reload `hcsecd`, which A6.2 forbids; `set_power` tears
   the stack down per A8.5. `get_state`, `scan`, `connect`, `disconnect` and
   `set_discoverable` MUST remain available.
+- **B4.8** The reply to a `scan` start MUST follow the controller's
+  `Command_Status` for `Inquiry`: `ok` for status 0, `busy` for Command
+  Disallowed, `io_error` for any other status, and `timeout` if none arrives.
+  `scanning` MUST NOT become true before status 0 is seen. A `scan` arriving
+  while a start awaits its status MUST be refused with `busy`.
 
 ## B5. State object *(provisional, expect churn)*
 
