@@ -42,6 +42,9 @@ static int	 read_int(json_t *value, int *out);
 static int	 json_string_is(json_t *value, const char *want);
 static int	 read_adapter(json_t *obj, struct proto_adapter_state *out);
 static int	 read_connection(json_t *obj, struct proto_connection *out);
+static int	 hex_value(char digit);
+static int	 read_device_class(const char *text, uint8_t *device_class);
+static int	 read_found_device(json_t *obj, struct proto_found_device *out);
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
@@ -283,6 +286,72 @@ read_int(json_t *value, int *out)
 	return (0);
 }
 
+static int
+hex_value(char digit)
+{
+
+	if (digit >= '0' && digit <= '9')
+		return (digit - '0');
+	if (digit >= 'a' && digit <= 'f')
+		return (digit - 'a' + 10);
+	if (digit >= 'A' && digit <= 'F')
+		return (digit - 'A' + 10);
+
+	return (-1);
+}
+
+/* "28:04:3c" is printed high byte first; HCI order is low byte first. */
+static int
+read_device_class(const char *text, uint8_t *device_class)
+{
+	size_t	byte, position;
+	int	high, low;
+
+	if (strlen(text) != sizeof("xx:xx:xx") - 1)
+		return (-1);
+
+	for (byte = 0; byte < NG_HCI_CLASS_SIZE; byte++) {
+		position = byte * 3;
+		high = hex_value(text[position]);
+		low = hex_value(text[position + 1]);
+		if (high < 0 || low < 0)
+			return (-1);
+		if (byte < NG_HCI_CLASS_SIZE - 1 && text[position + 2] != ':')
+			return (-1);
+
+		device_class[NG_HCI_CLASS_SIZE - 1 - byte] =
+		    (uint8_t)(high * 16 + low);
+	}
+
+	return (0);
+}
+
+/* Every field is required, as in the adapter object. */
+static int
+read_found_device(json_t *obj, struct proto_found_device *out)
+{
+	json_t	*value;
+
+	value = json_object_get(obj, "addr");
+	if (!json_is_string(value) ||
+	    !bt_aton(json_string_value(value), &out->addr))
+		return (-1);
+
+	value = json_object_get(obj, "class");
+	if (!json_is_string(value) ||
+	    read_device_class(json_string_value(value),
+	    out->device_class) != 0)
+		return (-1);
+
+	value = json_object_get(obj, "type");
+	if (!json_is_string(value) || json_string_value(value)[0] == '\0' ||
+	    strlcpy(out->type, json_string_value(value), sizeof(out->type)) >=
+	    sizeof(out->type))
+		return (-1);
+
+	return (0);
+}
+
 int
 proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 {
@@ -400,6 +469,25 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 
 		out->state.connection_count = (int)n;
 		out->has_state = 1;
+	}
+
+	if (strcmp(out->event_name, "device_found") == 0) {
+		if (read_found_device(root, &out->found_device) != 0) {
+			json_decref(root);
+			return (-1);
+		}
+		out->has_found_device = 1;
+	}
+
+	/* B7.2. The detail shares the reply's field. */
+	if (strcmp(out->event_name, "scan_failed") == 0) {
+		value = json_object_get(root, "detail");
+		if (!json_is_string(value)) {
+			json_decref(root);
+			return (-1);
+		}
+		strlcpy(out->error_detail, json_string_value(value),
+		    sizeof(out->error_detail));
 	}
 
 	json_decref(root);
@@ -578,6 +666,24 @@ proto_device_found_event(const bdaddr_t *address, const uint8_t *device_class,
 	    set_string(o, "addr", bt_ntoa(address, address_text)) != 0 ||
 	    set_string(o, "class", class_text) != 0 ||
 	    set_string(o, "type", type_name) != 0) {
+		json_decref(o);
+		return (NULL);
+	}
+
+	return (render(o));
+}
+
+char *
+proto_scan_failed_event(const char *detail)
+{
+	json_t	*o;
+
+	o = json_object();
+	if (o == NULL)
+		return (NULL);
+
+	if (set_string(o, "event", "scan_failed") != 0 ||
+	    set_string(o, "detail", detail) != 0) {
 		json_decref(o);
 		return (NULL);
 	}

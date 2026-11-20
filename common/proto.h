@@ -123,6 +123,15 @@ struct proto_adapter_state {
 	struct proto_connection connections[BTMGR_MAX_CONNS];
 };
 
+#define	BTMGR_TYPE_NAME_MAX	16
+
+/* A device_found event. device_class is low byte first, as HCI sends it. */
+struct proto_found_device {
+	bdaddr_t	addr;
+	uint8_t		device_class[NG_HCI_CLASS_SIZE];
+	char		type[BTMGR_TYPE_NAME_MAX];
+};
+
 struct proto_msg {
 	enum proto_msg_kind	kind;
 
@@ -142,6 +151,10 @@ struct proto_msg {
 	/* Set for the state event only. */
 	int			has_state;
 	struct proto_adapter_state state;
+
+	/* Set for the device_found event only. */
+	int			has_found_device;
+	struct proto_found_device found_device;
 };
 
 /*
@@ -165,6 +178,7 @@ char	*proto_hello(void);
 char	*proto_state_event(const struct state *st);
 char	*proto_device_found_event(const bdaddr_t *address,
 	    const uint8_t *device_class, const char *type_name);
+char	*proto_scan_failed_event(const char *detail);
 char	*proto_ok(int id);
 char	*proto_error(int id, const char *code, const char *detail);
 

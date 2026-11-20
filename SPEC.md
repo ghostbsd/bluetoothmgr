@@ -563,12 +563,16 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
 | `hello` | Once, on connect (B2) |
 | `state` | In answer to `get_state`, and whenever anything changes (A5.4) |
 | `device_found` | During a scan, per inquiry result |
+| `scan_failed` | A scan ended with a controller error (B7.2) |
 | `device_added` / `device_removed` | Store changes |
 | `pairing_progress` | Stage transitions during A6 |
 
 - **B7.1** The daemon MUST coalesce. It MUST NOT emit a `state` event when
   nothing changed, which is the point of the reconcile timer being a fallback
   rather than the driver.
+- **B7.2** When the daemon's own scan ends with an `Inquiry_Complete` carrying
+  a non-zero status, the daemon MUST send `scan_failed` with a `detail` naming
+  the status. `scanning` MUST become false either way.
 
 ---
 

@@ -626,6 +626,15 @@ on_completion(const struct listen_report *r, void *arg)
 	}
 
 	if (r->kind == LISTEN_INQUIRY_COMPLETE) {
+		/* B7.2 */
+		if (d->scanning && r->status != 0) {
+			char	*line;
+
+			syslog(LOG_WARNING, "scan failed, %s", detail);
+			line = proto_scan_failed_event(detail);
+			broadcast(d, line);
+			free(line);
+		}
 		d->scanning = 0;
 		d->scan_until = 0;
 		d->dirty = 1;
@@ -1446,6 +1455,9 @@ refresh_hci(struct daemon *d)
 
 	d->scanning = 0;
 	d->scan_until = 0;
+
+	/* reconcile() has already sent the old scanning, so send again. */
+	d->dirty = 1;
 
 	if (d->hci >= 0) {
 		(void)kq_del(d->kq, (uintptr_t)d->hci, EVFILT_READ);

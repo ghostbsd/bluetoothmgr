@@ -871,10 +871,10 @@ test_decode(void)
 	    "a message carrying both id and event is refused");
 
 	/* B7 will grow. An unknown event must decode, not fail. */
-	ok(decode("{\"event\":\"device_found\",\"addr\":\"1:2:3:4:5:6\"}",
+	ok(decode("{\"event\":\"pairing_progress\",\"stage\":3}",
 	    &msg) == 0, "an event this build does not know still decodes");
 	ok(msg.kind == PROTO_MSG_EVENT, "as an event");
-	eq(msg.event_name, "device_found", "with its name available");
+	eq(msg.event_name, "pairing_progress", "with its name available");
 	ok(msg.has_state == 0, "and no state claimed");
 }
 
@@ -903,6 +903,51 @@ test_device_found(void)
 	ok(decode_owned(line, &msg) == 0 && msg.kind == PROTO_MSG_EVENT,
 	    "and decodes as an event");
 	eq(msg.event_name, "device_found", "named device_found");
+	ok(msg.has_found_device, "with the device decoded");
+	ok(memcmp(&msg.found_device.addr, &address, sizeof(address)) == 0,
+	    "its address survives");
+	ok(memcmp(msg.found_device.device_class, device_class,
+	    sizeof(device_class)) == 0,
+	    "its class comes back low byte first, as it went in");
+	eq(msg.found_device.type, "av", "and its type");
+
+	rejects_msg("{\"event\":\"device_found\",\"class\":\"28:04:3c\","
+	    "\"type\":\"av\"}", "a device_found without addr is refused");
+	rejects_msg("{\"event\":\"device_found\","
+	    "\"addr\":\"aa:bb:cc:11:22:03\","
+	    "\"class\":\"28:04\",\"type\":\"av\"}",
+	    "a short class is refused");
+	rejects_msg("{\"event\":\"device_found\","
+	    "\"addr\":\"aa:bb:cc:11:22:03\","
+	    "\"class\":\"0x:04:3c\",\"type\":\"av\"}",
+	    "a class that is not hex is refused");
+}
+
+static void
+test_scan_failed(void)
+{
+	struct proto_msg	 msg;
+	char			*line;
+
+	printf("\nB7.2 scan_failed\n");
+
+	line = proto_scan_failed_event("controller reported status 0x0c");
+	ok(line != NULL, "a scan_failed event encodes");
+	if (line == NULL)
+		return;
+
+	eq(line, "{\"event\":\"scan_failed\","
+	    "\"detail\":\"controller reported status 0x0c\"}\n",
+	    "with its detail");
+
+	ok(decode_owned(line, &msg) == 0 && msg.kind == PROTO_MSG_EVENT,
+	    "and decodes as an event");
+	eq(msg.event_name, "scan_failed", "named scan_failed");
+	eq(msg.error_detail, "controller reported status 0x0c",
+	    "with its detail decoded");
+
+	rejects_msg("{\"event\":\"scan_failed\"}",
+	    "a scan_failed without detail is refused");
 }
 
 int
@@ -918,6 +963,7 @@ main(void)
 	test_encode();
 	test_decode();
 	test_device_found();
+	test_scan_failed();
 
 	if (btmgr_mc_report() != 0) {
 		printf("memcheck: allocations still live\n");
