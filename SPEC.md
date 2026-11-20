@@ -339,6 +339,8 @@ strict grammars, plus syslog.
   detaches.
 - **A8.5.6** While a power change runs, every request other than `get_state`
   MUST be refused with `busy`.
+- **A8.5.7** A power change still running after 60 seconds MUST be killed
+  together with its process group, and its request answered with `timeout`.
 
 ## A9. `/var/run/utx.active`
 

@@ -63,6 +63,9 @@
 /* Command_Status comes back in milliseconds; this only covers a lost one. */
 #define	SCAN_STATUS_TIMEOUT_SEC	3
 
+/* A8.5.7. A start is 1 to 3 s; every hccontrol timing out is about 40. */
+#define	POWER_TIMEOUT_SEC	60
+
 /* The HCI headers have no name for this status. */
 #define	HCI_STATUS_COMMAND_DISALLOWED	0x0c
 #define	MAX_EVENTS	32
@@ -124,6 +127,7 @@ struct daemon {
 	pid_t		 power_pid;		/* 0 when none is running */
 	struct client	*power_client;
 	int		 power_id;
+	time_t		 power_until;
 	int		 devd;
 	volatile int	 quit;
 };
@@ -160,6 +164,7 @@ static void	do_set_power(struct daemon *d, struct client *c,
 		    const struct proto_cmd *cmd);
 static int	start_power_change(struct daemon *d, int on);
 static void	finish_power_change(struct daemon *d, int status);
+static void	expire_power_change(struct daemon *d);
 static void	finish_scan_start(struct daemon *d, int status);
 static void	finish_scan_stop(struct daemon *d, int status);
 static void	remember_scan(struct daemon *d, int inquiry_scan,
@@ -331,6 +336,9 @@ tick(struct daemon *d, time_t now)
 			finish_scan_start(d, -1);
 	}
 
+	if (d->power_pid != 0 && now >= d->power_until)
+		expire_power_change(d);
+
 	open_devd(d);
 
 	d->dirty = 1;
@@ -369,6 +377,10 @@ next_deadline(const struct daemon *d)
 		earliest = candidate;
 
 	candidate = d->scan_status_until;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	candidate = d->power_pid != 0 ? d->power_until : 0;
 	if (candidate != 0 && (earliest == 0 || candidate < earliest))
 		earliest = candidate;
 
@@ -832,6 +844,7 @@ static int
 start_power_change(struct daemon *d, int on)
 {
 	posix_spawn_file_actions_t	 actions;
+	posix_spawnattr_t		 attributes;
 	struct kevent			 change;
 	char				 unit[HCI_DEVNAME_SIZE];
 	char				*argv[5];
@@ -865,8 +878,20 @@ start_power_change(struct daemon *d, int on)
 		errno = error;
 		return (-1);
 	}
-	error = posix_spawn_file_actions_addopen(&actions, 0, "/dev/null",
-	    O_RDONLY, 0);
+	error = posix_spawnattr_init(&attributes);
+	if (error != 0) {
+		posix_spawn_file_actions_destroy(&actions);
+		errno = error;
+		return (-1);
+	}
+
+	/* Its own group, so A8.5.7 can kill hccontrol along with it. */
+	error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+	if (error == 0)
+		error = posix_spawnattr_setpgroup(&attributes, 0);
+	if (error == 0)
+		error = posix_spawn_file_actions_addopen(&actions, 0,
+		    "/dev/null", O_RDONLY, 0);
 	if (error == 0)
 		error = posix_spawn_file_actions_addopen(&actions, 1,
 		    "/dev/null", O_WRONLY, 0);
@@ -876,8 +901,9 @@ start_power_change(struct daemon *d, int on)
 	if (error == 0)
 		error = posix_spawn_file_actions_addclosefrom_np(&actions, 3);
 	if (error == 0)
-		error = posix_spawn(&pid, "/usr/sbin/service", &actions, NULL,
-		    argv, envp);
+		error = posix_spawn(&pid, "/usr/sbin/service", &actions,
+		    &attributes, argv, envp);
+	posix_spawnattr_destroy(&attributes);
 	posix_spawn_file_actions_destroy(&actions);
 	if (error != 0) {
 		errno = error;
@@ -885,6 +911,7 @@ start_power_change(struct daemon *d, int on)
 	}
 
 	d->power_pid = pid;
+	d->power_until = now_mono() + POWER_TIMEOUT_SEC;
 
 	EV_SET(&change, (uintptr_t)pid, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0,
 	    &tag_power);
@@ -916,8 +943,28 @@ finish_power_change(struct daemon *d, int status)
 
 	d->power_pid = 0;
 	d->power_client = NULL;
+	d->power_until = 0;
 
 	/* Now, not at the end of the pass: a later request reads powered. */
+	reconcile(d);
+}
+
+/* A8.5.7. The killed child is reaped when its NOTE_EXIT arrives. */
+static void
+expire_power_change(struct daemon *d)
+{
+
+	syslog(LOG_ERR, "power change still running after %d s, killing it",
+	    POWER_TIMEOUT_SEC);
+	(void)kill(-d->power_pid, SIGKILL);
+
+	if (d->power_client != NULL)
+		reply(d, d->power_client, proto_error(d->power_id, "timeout",
+		    "service bluetooth did not finish"));
+
+	d->power_pid = 0;
+	d->power_client = NULL;
+	d->power_until = 0;
 	reconcile(d);
 }
 
@@ -1696,11 +1743,12 @@ main(int argc, char *argv[])
 			}
 
 			if (ev->udata == &tag_power) {
+				pid_t	child = (pid_t)ev->ident;
 				int	status;
 
-				if (d.power_pid != 0 &&
-				    waitpid(d.power_pid, &status, WNOHANG) ==
-				    d.power_pid)
+				/* Reaped even after A8.5.7 gave up on it. */
+				if (waitpid(child, &status, WNOHANG) == child &&
+				    child == d.power_pid)
 					finish_power_change(&d, status);
 				continue;
 			}
