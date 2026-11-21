@@ -18,6 +18,7 @@ SRCS=		main.c \
 		hosts.c \
 		hcsecd.c \
 		store.c \
+		storefile.c \
 		btaddr.c \
 		sanitise.c \
 		session.c \

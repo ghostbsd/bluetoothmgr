@@ -17,6 +17,7 @@
 #include "state.h"
 
 static int	first_usb_unit(char *location, size_t location_size);
+static void	copy_text(char *to, size_t to_size, const char *from);
 static void	copy_details(struct btmgr_adapter *to,
 		    const struct btmgr_adapter *from);
 
@@ -137,6 +138,46 @@ state_snapshot(struct state *out, struct adapter_cache *cache)
 		out->nconns = 0;
 }
 
+/* The store answers NULL for a field it does not have. */
+static void
+copy_text(char *to, size_t to_size, const char *from)
+{
+
+	if (from != NULL)
+		(void)strlcpy(to, from, to_size);
+}
+
+void
+state_add_devices(struct state *out, const struct store *store)
+{
+	uint8_t			 addrs[STATE_MAX_DEVICES][BTMGR_ADDR_LEN];
+	struct state_device	*device;
+	size_t			 count, i;
+
+	out->ndevices = 0;
+	if (store == NULL)
+		return;
+
+	/* The total, which can exceed what fits. */
+	count = store_addrs(store, addrs, STATE_MAX_DEVICES);
+	if (count > STATE_MAX_DEVICES)
+		count = STATE_MAX_DEVICES;
+
+	for (i = 0; i < count; i++) {
+		device = &out->devices[i];
+		memset(device, 0, sizeof(*device));
+		memcpy(device->addr, addrs[i], BTMGR_ADDR_LEN);
+		copy_text(device->name, sizeof(device->name),
+		    store_name(store, addrs[i]));
+		copy_text(device->alias, sizeof(device->alias),
+		    store_alias(store, addrs[i]));
+		copy_text(device->type, sizeof(device->type),
+		    store_type(store, addrs[i]));
+	}
+
+	out->ndevices = (int)count;
+}
+
 /*
  * Compare two snapshots.
  *
@@ -154,7 +195,8 @@ state_equal(const struct state *a, const struct state *b)
 	    a->discoverable != b->discoverable ||
 	    a->scanning != b->scanning ||
 	    a->config_readable != b->config_readable ||
-	    a->nconns != b->nconns)
+	    a->nconns != b->nconns ||
+	    a->ndevices != b->ndevices)
 		return (0);
 
 	if (a->adapter_present) {
@@ -173,6 +215,15 @@ state_equal(const struct state *a, const struct state *b)
 		    a->conns[i].acl != b->conns[i].acl ||
 		    a->conns[i].encrypted != b->conns[i].encrypted ||
 		    a->conns[i].master != b->conns[i].master)
+			return (0);
+	}
+
+	for (i = 0; i < a->ndevices; i++) {
+		if (memcmp(a->devices[i].addr, b->devices[i].addr,
+		    BTMGR_ADDR_LEN) != 0 ||
+		    strcmp(a->devices[i].name, b->devices[i].name) != 0 ||
+		    strcmp(a->devices[i].alias, b->devices[i].alias) != 0 ||
+		    strcmp(a->devices[i].type, b->devices[i].type) != 0)
 			return (0);
 	}
 

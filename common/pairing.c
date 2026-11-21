@@ -22,6 +22,7 @@
 #include "safefile.h"
 #include "sanitise.h"
 #include "store.h"
+#include "storefile.h"
 
 /*
  * Must come after the system headers: it redefines malloc and friends. The
@@ -254,11 +255,10 @@ pairing_complete(const struct btmgr_paths *paths, const struct pair_ops *ops,
     struct pair_state *state, const char *name, const char *type, int64_t now,
     struct pair_report *report)
 {
-	struct store	*store = NULL;
-	char		*text = NULL;
-	char		*before = NULL;
-	char		 alias_copy[BTMGR_ALIAS_BUFSZ];
-	int		 malformed = 0;
+	struct store		*store = NULL;
+	char			*text = NULL;
+	char			 alias_copy[BTMGR_ALIAS_BUFSZ];
+	enum store_load_result	 loaded;
 
 	if (report != NULL)
 		memset(report, 0, sizeof(*report));
@@ -284,17 +284,16 @@ pairing_complete(const struct btmgr_paths *paths, const struct pair_ops *ops,
 		trace_step(report, "flush");
 
 	/* Step 7. A4 metadata. The alias we chose is already in hosts. */
-	before = safefile_read(paths->store, NULL);
-	store = store_parse(before, &malformed, NULL);
-	free(before);
-	if (store == NULL) {
-		set_detail(report, "out of memory reading devices.json");
+	loaded = store_load(paths, &store);
+	if (loaded == STORE_LOAD_ERROR) {
+		set_detail(report, "devices.json could not be read or set "
+		    "aside; the pairing itself succeeded");
 		pairing_state_free(state);
 		return (PAIR_ERROR);
 	}
-	if (malformed)
-		set_detail(report, "devices.json was unreadable and has been "
-		    "replaced; the pairing itself succeeded");
+	if (loaded == STORE_LOAD_SET_ASIDE)
+		set_detail(report, "devices.json was unreadable and was moved "
+		    "to devices.json.bad; the pairing itself succeeded");
 
 	/* Carry the alias across from hosts so both files agree. */
 	{

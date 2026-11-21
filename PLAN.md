@@ -155,7 +155,7 @@ Every frontend sits on this, so the backend finishes before any GUI starts.
 
 - [x] `scan` as an IPC command, asynchronous inquiry driven from the event loop, idempotent per B4.2, results as `device_found` events
 - [x] `set_power` command (A8.5)
-- [ ] Wire `common/store.c` into the daemon, so A4 metadata reaches clients
+- [x] Wire `common/store.c` into the daemon, so A4 metadata reaches clients
 - [ ] `set_trusted` command
 - [ ] `set_alias` command, with the `alias_too_long` refusal bounded by A2.3
 - [ ] The `stale_link_key` code and the A3.2 key delete, which needs `hcsecd` stopped

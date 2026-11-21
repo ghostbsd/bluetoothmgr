@@ -23,6 +23,7 @@
 
 #include <jansson.h>
 
+#include "btaddr.h"
 #include "btmgr.h"
 #include "proto.h"
 #include "sanitise.h"
@@ -42,12 +43,12 @@ static int	 read_int(json_t *value, int *out);
 static int	 json_string_is(json_t *value, const char *want);
 static int	 read_adapter(json_t *obj, struct proto_adapter_state *out);
 static int	 read_connection(json_t *obj, struct proto_connection *out);
-static int	 hex_value(char digit);
 static int	 read_device_class(const char *text, uint8_t *device_class);
 static int	 read_found_device(json_t *obj, struct proto_found_device *out);
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
+static json_t	*device_json(const struct state_device *device);
 
 /*
  * A name is cosmetic, so A7.1 transliterates it. A PIN is an exact secret and
@@ -159,6 +160,39 @@ conn_json(const struct btmgr_conn *c)
 	    json_object_set_new(o, "encrypted",
 	    json_boolean(c->encrypted)) != 0 ||
 	    set_string(o, "role", c->master ? "master" : "slave") != 0) {
+		json_decref(o);
+		return (NULL);
+	}
+
+	return (o);
+}
+
+/* B1.4 on every field: devices.json can be edited by hand. */
+static json_t *
+device_json(const struct state_device *device)
+{
+	char	 address[BTMGR_ADDR_BUFSZ];
+	char	 name[BTMGR_NAME_SIZE];
+	char	 alias[BTMGR_ALIAS_BUFSZ];
+	char	 type[STATE_TYPE_SIZE];
+	json_t	*o;
+
+	o = json_object();
+	if (o == NULL)
+		return (NULL);
+
+	btmgr_addr_format(device->addr, address, sizeof(address));
+	if (btmgr_sanitise_utf8(device->name, name, sizeof(name)) != 0)
+		name[0] = '\0';
+	if (btmgr_sanitise_utf8(device->alias, alias, sizeof(alias)) != 0)
+		alias[0] = '\0';
+	if (btmgr_sanitise_utf8(device->type, type, sizeof(type)) != 0)
+		type[0] = '\0';
+
+	if (set_string(o, "addr", address) != 0 ||
+	    set_string(o, "name", name) != 0 ||
+	    set_string(o, "alias", alias) != 0 ||
+	    set_string(o, "type", type) != 0) {
 		json_decref(o);
 		return (NULL);
 	}
@@ -286,20 +320,6 @@ read_int(json_t *value, int *out)
 	return (0);
 }
 
-static int
-hex_value(char digit)
-{
-
-	if (digit >= '0' && digit <= '9')
-		return (digit - '0');
-	if (digit >= 'a' && digit <= 'f')
-		return (digit - 'a' + 10);
-	if (digit >= 'A' && digit <= 'F')
-		return (digit - 'A' + 10);
-
-	return (-1);
-}
-
 /* "28:04:3c" is printed high byte first; HCI order is low byte first. */
 static int
 read_device_class(const char *text, uint8_t *device_class)
@@ -312,8 +332,8 @@ read_device_class(const char *text, uint8_t *device_class)
 
 	for (byte = 0; byte < NG_HCI_CLASS_SIZE; byte++) {
 		position = byte * 3;
-		high = hex_value(text[position]);
-		low = hex_value(text[position + 1]);
+		high = btmgr_hex_digit(text[position]);
+		low = btmgr_hex_digit(text[position + 1]);
 		if (high < 0 || low < 0)
 			return (-1);
 		if (byte < NG_HCI_CLASS_SIZE - 1 && text[position + 2] != ':')
@@ -588,13 +608,7 @@ proto_hello(void)
 	return (render(o));
 }
 
-/*
- * The state event. SPEC.md B5.
- *
- * The devices array is empty in M2 and grows in M3, when the daemon can read
- * hcsecd.conf and merge paired devices with live connections. Until then
- * config_readable tells clients why it is empty.
- */
+/* The state event. SPEC.md B5. devices comes from the A4 store. */
 char *
 proto_state_event(const struct state *st)
 {
@@ -637,6 +651,11 @@ proto_state_event(const struct state *st)
 	if (devices == NULL ||
 	    json_object_set_new(o, "devices", devices) != 0)
 		goto fail;
+	for (i = 0; i < st->ndevices; i++) {
+		one = device_json(&st->devices[i]);
+		if (one == NULL || json_array_append_new(devices, one) != 0)
+			goto fail;
+	}
 
 	return (render(o));
 

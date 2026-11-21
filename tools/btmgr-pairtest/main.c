@@ -31,6 +31,8 @@
 #include "pairing.h"
 #include "paths.h"
 #include "safefile.h"
+#include "store.h"
+#include "storefile.h"
 
 /* Must come after the system headers: it redefines malloc and friends. */
 #include "memcheck.h"	/* IWYU pragma: keep */
@@ -469,6 +471,51 @@ test_repair(const char *scratch)
 	free(first);
 }
 
+/* A4.3: a malformed store is moved aside, not written over. */
+static void
+test_set_aside(const char *scratch)
+{
+	static const char	 garbage[] = "not json\n";
+	struct btmgr_paths	 paths, dry;
+	struct store		*store;
+	char			 bad[PATH_MAX];
+	char			 err[SAFEFILE_ERRLEN];
+	char			*text;
+	enum store_load_result	 loaded;
+
+	printf("\nA4.3 a malformed devices.json is set aside\n");
+
+	if (seed(scratch, "set-aside", &paths) != 0 ||
+	    safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, garbage,
+	    strlen(garbage), err, sizeof(err)) == SAFEFILE_ERROR) {
+		ok(0, "the sandbox could be built");
+		return;
+	}
+	(void)snprintf(bad, sizeof(bad), "%s%s", paths.store,
+	    STORE_BAD_SUFFIX);
+
+	/* A dry run first: it must report the bad file and move nothing. */
+	dry = paths;
+	dry.sf.dry_run = 1;
+	loaded = store_load(&dry, &store);
+	ok(loaded == STORE_LOAD_SET_ASIDE && store != NULL,
+	    "a dry run still reports the file as bad");
+	store_free(store);
+	ok(access(bad, F_OK) != 0, "but creates no devices.json.bad");
+	text = slurp(paths.store);
+	eq(text, garbage, "and leaves devices.json as it was");
+	free(text);
+
+	loaded = store_load(&paths, &store);
+	ok(loaded == STORE_LOAD_SET_ASIDE && store != NULL &&
+	    store_count(store) == 0, "it loads as an empty store");
+	store_free(store);
+	text = slurp(bad);
+	eq(text, garbage, "the bad file is kept as devices.json.bad");
+	free(text);
+	ok(access(paths.store, F_OK) != 0, "and devices.json is gone");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -501,6 +548,7 @@ main(int argc, char *argv[])
 	test_default_entry(scratch);
 	test_abort(scratch);
 	test_repair(scratch);
+	test_set_aside(scratch);
 
 	printf("\n%d checks, %d failures\n", checks, failures);
 

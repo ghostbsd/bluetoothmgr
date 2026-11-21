@@ -41,6 +41,7 @@
 #include "proto.h"
 #include "session.h"
 #include "state.h"
+#include "storefile.h"
 
 /* After the system headers: it redefines malloc. */
 #include "memcheck.h"	/* IWYU pragma: keep */
@@ -115,6 +116,7 @@ struct daemon {
 	struct client	*clients;
 	struct state	 last;		/* last snapshot sent to clients */
 	struct adapter_cache adapter_cache;
+	struct store	*store;		/* A4, NULL until loaded */
 	int		 have_last;
 	int		 dirty;
 	struct btmgr_paths paths;	/* where the config files are */
@@ -179,6 +181,7 @@ static void	expire_power_change(struct daemon *d);
 static int	power_change_running(const struct daemon *d);
 static void	poll_power_child(struct daemon *d);
 static void	apply_detail(struct daemon *d, const struct listen_report *r);
+static void	load_store(struct daemon *d);
 static void	finish_scan_start(struct daemon *d, int status);
 static void	finish_scan_stop(struct daemon *d, int status);
 static void	remember_scan(struct daemon *d, int inquiry_scan,
@@ -563,6 +566,10 @@ finish_pairing(struct daemon *d, const bdaddr_t *addr)
 	    d->pairing.name, NULL, (int64_t)time(NULL), &report);
 
 	memset(&d->pairing, 0, sizeof(d->pairing));
+
+	/* pairing_complete() wrote the new device to devices.json. */
+	if (r == PAIR_DONE)
+		load_store(d);
 
 	if (!client_alive(d, c))
 		return;
@@ -1075,6 +1082,30 @@ apply_detail(struct daemon *d, const struct listen_report *r)
 		memcpy(adapter->devclass, r->device_class,
 		    sizeof(adapter->devclass));
 
+	d->dirty = 1;
+}
+
+/* A4.3. On failure the store already loaded is kept. */
+static void
+load_store(struct daemon *d)
+{
+	struct store	*store;
+
+	switch (store_load(&d->paths, &store)) {
+	case STORE_LOAD_ERROR:
+		syslog(LOG_ERR, "%s could not be loaded or set aside",
+		    d->paths.store);
+		return;
+	case STORE_LOAD_SET_ASIDE:
+		syslog(LOG_WARNING, "%s was malformed, moved to %s%s",
+		    d->paths.store, d->paths.store, STORE_BAD_SUFFIX);
+		break;
+	case STORE_LOAD_OK:
+		break;
+	}
+
+	store_free(d->store);
+	d->store = store;
 	d->dirty = 1;
 }
 
@@ -1609,6 +1640,7 @@ reconcile(struct daemon *d)
 	char		*line;
 
 	state_snapshot(&now, &d->adapter_cache);
+	state_add_devices(&now, d->store);
 	now.scanning = d->scanning && now.powered;
 
 	/* C3.3: once per power-up, without waiting for the replies. */
@@ -1789,6 +1821,7 @@ main(int argc, char *argv[])
 	syslog(LOG_INFO, "started, socket %s", d.sockpath);
 
 	/* Prime the state before the first client can ask for it. */
+	load_store(&d);
 	reconcile(&d);
 
 	last_tick = now_mono();
@@ -1842,6 +1875,7 @@ main(int argc, char *argv[])
 			if (ev->filter == EVFILT_SIGNAL) {
 				if (ev->ident == SIGHUP) {
 					syslog(LOG_INFO, "reload");
+					load_store(&d);
 					d.adapter_cache.details_read = 0;
 					d.dirty = 1;
 				} else {
@@ -1942,6 +1976,8 @@ main(int argc, char *argv[])
 		close(d.kq);
 
 	pidfile_remove(pfh);
+
+	store_free(d.store);
 
 	syslog(LOG_INFO, "stopped");
 	closelog();
