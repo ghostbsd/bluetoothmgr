@@ -145,6 +145,50 @@ btmgr_adapter_read_details(struct btmgr_adapter *a)
 }
 
 /*
+ * The same three reads, sent without waiting. The replies are Command_Complete
+ * events on the caller's event socket. -1 if the unit is not ready.
+ */
+int
+btmgr_adapter_request_details(const char *node)
+{
+	static const uint16_t	ocfs[] = {
+		NG_HCI_OCF_READ_LOCAL_NAME,
+		NG_HCI_OCF_READ_SCAN_ENABLE,
+		NG_HCI_OCF_READ_UNIT_CLASS
+	};
+	struct bt_devinfo	di;
+	size_t			i;
+	int			s, saved;
+
+	memset(&di, 0, sizeof(di));
+	strlcpy(di.devname, node, sizeof(di.devname));
+	if (bt_devinfo(&di) < 0)
+		return (-1);
+	if (!unit_ready(di.state)) {
+		errno = ENXIO;
+		return (-1);
+	}
+
+	s = bt_devopen(node);
+	if (s < 0)
+		return (-1);
+
+	for (i = 0; i < sizeof(ocfs) / sizeof(ocfs[0]); i++) {
+		if (bt_devsend(s, NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+		    ocfs[i]), NULL, 0) < 0) {
+			saved = errno;
+			bt_devclose(s);
+			errno = saved;
+			return (-1);
+		}
+	}
+
+	bt_devclose(s);
+
+	return (0);
+}
+
+/*
  * Called by bt_devenum() once per adapter.
  *
  * The socket argument is deliberately unused: it cannot be written to, per the

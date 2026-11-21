@@ -333,18 +333,59 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 
 		/* The status is the first return parameter. */
 		case NG_HCI_EVENT_COMMAND_COMPL: {
-			ng_hci_command_compl_ep	*command_complete;
+			ng_hci_command_compl_ep		*command_complete;
+			ng_hci_read_local_name_rp	*name_reply;
+			ng_hci_read_scan_enable_rp	*scan_reply;
+			ng_hci_read_unit_class_rp	*class_reply;
+			uint8_t				*parameters;
+			size_t				 available;
 
 			if ((size_t)n < sizeof(*e) + sizeof(*command_complete) +
 			    1)
 				break;
 
 			command_complete = (ng_hci_command_compl_ep *)(e + 1);
+			parameters = (uint8_t *)(command_complete + 1);
+			available = (size_t)n - sizeof(*e) -
+			    sizeof(*command_complete);
 
 			memset(&rep, 0, sizeof(rep));
 			rep.kind = LISTEN_COMMAND_COMPLETE;
-			rep.status = *(uint8_t *)(command_complete + 1);
+			rep.status = parameters[0];
 			rep.opcode = le16toh(command_complete->opcode);
+
+			/* C3.3: the adapter reads carry their value as well. */
+			switch (rep.opcode) {
+			case NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+			    NG_HCI_OCF_READ_LOCAL_NAME):
+				if (available < sizeof(*name_reply))
+					continue;
+				name_reply = (ng_hci_read_local_name_rp *)
+				    parameters;
+				memcpy(rep.name, name_reply->name,
+				    NG_HCI_UNIT_NAME_SIZE);
+				rep.name[NG_HCI_UNIT_NAME_SIZE] = '\0';
+				break;
+			case NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+			    NG_HCI_OCF_READ_SCAN_ENABLE):
+				if (available < sizeof(*scan_reply))
+					continue;
+				scan_reply = (ng_hci_read_scan_enable_rp *)
+				    parameters;
+				rep.scan_enable = scan_reply->scan_enable;
+				break;
+			case NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+			    NG_HCI_OCF_READ_UNIT_CLASS):
+				if (available < sizeof(*class_reply))
+					continue;
+				class_reply = (ng_hci_read_unit_class_rp *)
+				    parameters;
+				memcpy(rep.device_class, class_reply->uclass,
+				    sizeof(rep.device_class));
+				break;
+			default:
+				break;
+			}
 
 			if (cb != NULL)
 				cb(&rep, arg);

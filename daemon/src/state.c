@@ -103,23 +103,16 @@ state_snapshot(struct state *out, struct adapter_cache *cache)
 	out->adapter = adapters[0];
 	out->powered = adapters[0].inited;
 
-	/* C3.3: the controller is asked once per power-up, never per tick. */
+	/* C3.3: the reads' replies land in the cache; nothing is asked here. */
 	if (out->powered) {
-		if (!cache->details_read &&
-		    btmgr_adapter_read_details(&out->adapter) == 0)
-			cache->details_read = 1;
-		else if (cache->valid) {
+		if (cache->valid)
 			copy_details(&out->adapter, &cache->adapter);
-			if (!cache->details_read) {
-				out->adapter.inquiry_scan = 0;
-				out->adapter.page_scan = 0;
-			}
-		}
 		out->discoverable = out->adapter.inquiry_scan;
 
 		cache->adapter = out->adapter;
 		(void)strlcpy(cache->location, location,
 		    sizeof(cache->location));
+		cache->unit = unit;
 		cache->valid = 1;
 	} else {
 		cache->details_read = 0;

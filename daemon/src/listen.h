@@ -50,6 +50,8 @@ struct listen_report {
 	uint16_t		handle;
 	uint16_t		opcode;
 	uint8_t			device_class[NG_HCI_CLASS_SIZE];
+	uint8_t			scan_enable;
+	char			name[NG_HCI_UNIT_NAME_SIZE + 1];
 };
 
 /*

@@ -341,6 +341,7 @@ strict grammars, plus syslog.
   MUST be refused with `busy`.
 - **A8.5.7** A power change still running after 60 seconds MUST be killed
   together with its process group, and its request answered with `timeout`.
+  It MUST count as running until its process has exited.
 
 ## A9. `/var/run/utx.active`
 
@@ -489,7 +490,8 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
   `Command_Status` for `Inquiry`: `ok` for status 0, `busy` for Command
   Disallowed, `io_error` for any other status, and `timeout` if none arrives.
   `scanning` MUST NOT become true before status 0 is seen. A `scan` arriving
-  while a start awaits its status MUST be refused with `busy`.
+  while a start awaits its status MUST be refused with `busy`. On `timeout` the
+  daemon MUST send `Inquiry_Cancel`.
 - **B4.9** The reply to a `scan` stop MUST follow the controller's
   `Command_Complete` for `Inquiry_Cancel`: `ok` for status 0 or Command
   Disallowed, `io_error` for any other status, and `timeout` if none arrives.
@@ -631,11 +633,15 @@ runs `service bluetooth quietstart` and `quietstop`.
 - **C3.3** The reconcile timer MUST NOT send HCI commands. The adapter's name,
   class and scan enable MUST be read from the controller once each time its
   unit becomes ready, and again on the daemon's `SIGHUP`. Scan enable written
-  by the daemon MUST be recorded rather than read back.
+  by the daemon MUST be recorded rather than read back. These reads MUST NOT
+  block the daemon: they MUST be sent without waiting and applied as their
+  replies arrive.
 - **C3.4** The daemon MUST watch `/var/run/devd.seqpacket.pipe` for `ubt`
   attach and detach. On detach it MUST drop the adapter kept per A8.5.5. On
   attach it MUST read the adapter's details again per C3.3. While the socket
-  is unavailable the daemon MUST retry it on each reconcile tick.
+  is unavailable the daemon MUST retry it on each reconcile tick. Each time
+  the socket is opened, the daemon MUST drop the adapter kept per A8.5.5 and
+  read its details again.
 
 ## C4. The `bt_devenum()` callback socket cannot be written to
 
