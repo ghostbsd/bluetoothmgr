@@ -93,3 +93,78 @@ btmgr_scan(const char *node, int secs, struct btmgr_device *out, int *n)
 
 	return (0);
 }
+
+/*
+ * Start an inquiry and return without waiting. Results arrive on the event
+ * socket as Inquiry_Result, then Inquiry_Complete when secs run out.
+ */
+int
+btmgr_inquiry_start(const char *node, int secs)
+{
+	ng_hci_inquiry_cp	cp;
+	int			s, saved;
+
+	if (node == NULL || secs < 1 || secs > BTMGR_INQUIRY_MAX_SEC) {
+		errno = EINVAL;
+		return (-1);
+	}
+
+	memset(&cp, 0, sizeof(cp));
+
+	/* The General Inquiry Access Code, 0x9e8b33, low byte first. */
+	cp.lap[0] = 0x33;
+	cp.lap[1] = 0x8b;
+	cp.lap[2] = 0x9e;
+
+	/* Units of 1.28 s, rounded up so the scan is never shorter. */
+	cp.inquiry_length = (uint8_t)((secs * 100 + 127) / 128);
+	cp.num_responses = 0;		/* no limit */
+
+	s = bt_devopen(node);
+	if (s < 0)
+		return (-1);
+
+	if (bt_devsend(s, NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
+	    NG_HCI_OCF_INQUIRY), &cp, sizeof(cp)) < 0) {
+		saved = errno;
+		bt_devclose(s);
+		errno = saved;
+		return (-1);
+	}
+
+	bt_devclose(s);
+
+	return (0);
+}
+
+/*
+ * Send Inquiry_Cancel and return without waiting. The answer is a
+ * Command_Complete on the event socket; a cancelled inquiry sends no
+ * Inquiry_Complete.
+ */
+int
+btmgr_inquiry_cancel(const char *node)
+{
+	int	s, saved;
+
+	if (node == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+
+	s = bt_devopen(node);
+	if (s < 0)
+		return (-1);
+
+	if (bt_devsend(s, NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
+	    NG_HCI_OCF_INQUIRY_CANCEL), NULL, 0) < 0) {
+		saved = errno;
+		bt_devclose(s);
+		errno = saved;
+		return (-1);
+	}
+
+	bt_devclose(s);
+
+	return (0);
+}

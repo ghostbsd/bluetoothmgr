@@ -171,6 +171,7 @@ show_adapters(struct btmgr_adapter *ad, int *n)
 	}
 
 	for (i = 0; i < *n; i++) {
+		(void)btmgr_adapter_read_details(&ad[i]);
 		printf("adapter %s\n", ad[i].node);
 		printf("  address      %s\n", bt_ntoa(&ad[i].bdaddr, addr));
 		printf("  name         %s\n",

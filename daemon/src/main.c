@@ -14,11 +14,14 @@
 #include <sys/types.h>
 #include <sys/event.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #include <err.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <libutil.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +36,7 @@
 #include "pairing.h"
 #include "paths.h"
 #include "ipc.h"
+#include "devd.h"
 #include "listen.h"
 #include "proto.h"
 #include "session.h"
@@ -50,6 +54,27 @@
 
 /* An hour. Generous for a UI that offers minutes, and bounds the arithmetic. */
 #define	BTMGR_DISCOVER_MAX_SEC	3600
+
+#define	SCAN_DEFAULT_SEC	10
+
+/* The HCI length rounds up, so 61 s asks the controller for 61.44 s. */
+#define	SCAN_MARGIN_SEC		5
+
+/* Command_Status comes back in milliseconds; this only covers a lost one. */
+#define	SCAN_STATUS_TIMEOUT_SEC	3
+
+/* C3.3: one bit per adapter read still waiting for its reply. */
+#define	DETAIL_NAME		0x1
+#define	DETAIL_SCAN		0x2
+#define	DETAIL_CLASS		0x4
+#define	DETAILS_ALL		(DETAIL_NAME | DETAIL_SCAN | DETAIL_CLASS)
+#define	DETAILS_TIMEOUT_SEC	3
+
+/* A8.5.7. A start is 1 to 3 s; every hccontrol timing out is about 40. */
+#define	POWER_TIMEOUT_SEC	60
+
+/* The HCI headers have no name for this status. */
+#define	HCI_STATUS_COMMAND_DISALLOWED	0x0c
 #define	MAX_EVENTS	32
 
 /* A5.1 leaves the socket open to any local user. 32 * 320 KiB of buffer. */
@@ -68,6 +93,8 @@
 /* kqueue returns the pointer we registered, so an address names a source. */
 static int	tag_listen_sock;	/* the IPC listening socket */
 static int	tag_hci;		/* the passive HCI event socket */
+static int	tag_power;		/* the service bluetooth child */
+static int	tag_devd;		/* devd's event socket */
 
 /* A6.2 allows one at a time. client may die first, so use client_alive(). */
 struct parked_pairing {
@@ -87,6 +114,7 @@ struct daemon {
 	char		 node[HCI_DEVNAME_SIZE];
 	struct client	*clients;
 	struct state	 last;		/* last snapshot sent to clients */
+	struct adapter_cache adapter_cache;
 	int		 have_last;
 	int		 dirty;
 	struct btmgr_paths paths;	/* where the config files are */
@@ -96,6 +124,22 @@ struct daemon {
 	int		 clients_full;	/* so a connection flood logs once */
 	int		 unadmitted_full;
 	time_t		 discoverable_until;	/* 0 when not reverting */
+	int		 scanning;
+	time_t		 scan_until;
+	struct client	*scan_client;
+	int		 scan_id;
+	int		 scan_duration;
+	time_t		 scan_status_until;	/* 0 when nothing is waiting */
+	int		 scan_stopping;
+	pid_t		 power_pid;		/* 0 when none is running */
+	struct client	*power_client;
+	int		 power_id;
+	time_t		 power_until;
+	pid_t		 power_reaping;
+	int		 power_polled;
+	int		 details_pending;
+	time_t		 details_until;
+	int		 devd;
 	volatile int	 quit;
 };
 
@@ -127,6 +171,20 @@ static void	do_pair(struct daemon *d, struct client *c,
 		    const struct proto_cmd *cmd);
 static void	on_completion(const struct listen_report *r, void *arg);
 static void	on_expired(const struct inflight *f, void *arg);
+static void	do_set_power(struct daemon *d, struct client *c,
+		    const struct proto_cmd *cmd);
+static int	start_power_change(struct daemon *d, int on);
+static void	finish_power_change(struct daemon *d, int status);
+static void	expire_power_change(struct daemon *d);
+static int	power_change_running(const struct daemon *d);
+static void	poll_power_child(struct daemon *d);
+static void	apply_detail(struct daemon *d, const struct listen_report *r);
+static void	finish_scan_start(struct daemon *d, int status);
+static void	finish_scan_stop(struct daemon *d, int status);
+static void	remember_scan(struct daemon *d, int inquiry_scan,
+		    int page_scan);
+static void	open_devd(struct daemon *d);
+static void	on_devd(enum devd_event event, int unit, void *arg);
 
 static void
 usage(void)
@@ -214,6 +272,60 @@ broadcast(struct daemon *d, const char *line)
 	}
 }
 
+/* C3.3: the poll no longer reads scan enable, so record what we wrote. */
+static void
+remember_scan(struct daemon *d, int inquiry_scan, int page_scan)
+{
+
+	d->adapter_cache.adapter.inquiry_scan = inquiry_scan;
+	d->adapter_cache.adapter.page_scan = page_scan;
+	d->dirty = 1;
+}
+
+/* C3.4. Quiet on failure: the tick retries every few seconds. */
+static void
+open_devd(struct daemon *d)
+{
+	int	fd;
+
+	if (d->devd >= 0)
+		return;
+
+	fd = devd_open();
+	if (fd < 0)
+		return;
+
+	if (kq_add(d->kq, (uintptr_t)fd, EVFILT_READ, &tag_devd) < 0) {
+		(void)close(fd);
+		return;
+	}
+
+	d->devd = fd;
+	syslog(LOG_INFO, "watching devd");
+
+	/* C3.4. A detach while devd was away went unseen. */
+	d->adapter_cache.valid = 0;
+	d->adapter_cache.details_read = 0;
+	d->dirty = 1;
+}
+
+static void
+on_devd(enum devd_event event, int unit, void *arg)
+{
+	struct daemon	*d = arg;
+
+	syslog(LOG_INFO, "ubt%d %s", unit,
+	    event == DEVD_ATTACH ? "attached" : "detached");
+
+	/* A8.5.5: a detached adapter's identity must not carry over. */
+	if (event == DEVD_DETACH && unit == d->adapter_cache.unit)
+		d->adapter_cache.valid = 0;
+	d->adapter_cache.details_read = 0;
+
+	/* Now, not at the end of the pass: a later request reads d->last. */
+	reconcile(d);
+}
+
 /* Everything on a schedule. now is monotonic, see now_mono(). */
 static void
 tick(struct daemon *d, time_t now)
@@ -227,9 +339,36 @@ tick(struct daemon *d, time_t now)
 	if (d->discoverable_until != 0 && now >= d->discoverable_until) {
 		syslog(LOG_INFO, "discoverable timeout");
 		d->discoverable_until = 0;
-		if (d->last.adapter_present)
-			(void)btmgr_set_scan(d->last.adapter.node, 0, 1);
+		if (d->last.powered &&
+		    btmgr_set_scan(d->last.adapter.node, 0, 1) == 0)
+			remember_scan(d, 0, 1);
 	}
+
+	if (d->scanning && now >= d->scan_until) {
+		syslog(LOG_INFO, "scan ended with no inquiry complete");
+		d->scanning = 0;
+		d->scan_until = 0;
+	}
+
+	if (d->scan_status_until != 0 && now >= d->scan_status_until) {
+		if (d->scan_stopping)
+			finish_scan_stop(d, -1);
+		else
+			finish_scan_start(d, -1);
+	}
+
+	poll_power_child(d);
+	if (d->power_pid != 0 && now >= d->power_until)
+		expire_power_change(d);
+
+	/* C3.3: no retry; the cache keeps what did arrive. */
+	if (d->details_pending != 0 && now >= d->details_until) {
+		syslog(LOG_INFO, "adapter details incomplete");
+		d->details_pending = 0;
+		d->details_until = 0;
+	}
+
+	open_devd(d);
 
 	d->dirty = 1;
 }
@@ -259,6 +398,22 @@ next_deadline(const struct daemon *d)
 		earliest = candidate;
 
 	candidate = d->discoverable_until;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	candidate = d->scanning ? d->scan_until : 0;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	candidate = d->scan_status_until;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	candidate = d->power_pid != 0 ? d->power_until : 0;
+	if (candidate != 0 && (earliest == 0 || candidate < earliest))
+		earliest = candidate;
+
+	candidate = d->details_pending != 0 ? d->details_until : 0;
 	if (candidate != 0 && (earliest == 0 || candidate < earliest))
 		earliest = candidate;
 
@@ -326,6 +481,10 @@ drop_client(struct daemon *d, struct client *c)
 	 */
 	if (d->pairing.client == c)
 		d->pairing.client = NULL;
+	if (d->power_client == c)
+		d->power_client = NULL;
+	if (d->scan_client == c)
+		d->scan_client = NULL;
 
 	ipc_client_free(c);
 }
@@ -436,7 +595,7 @@ abandon_pairing(struct daemon *d, const char *code, const char *why)
 	 * link up, and do_pair() refuses while one exists, so leaving it would
 	 * block the retry. Any link here is ours for that same reason.
 	 */
-	if (handle != 0 && d->last.adapter_present)
+	if (handle != 0 && d->last.powered)
 		(void)btmgr_disconnect_start(d->last.adapter.node, handle,
 		    BTMGR_REASON_USER);
 
@@ -470,11 +629,11 @@ on_completion(const struct listen_report *r, void *arg)
 	 * someone's pending request.
 	 */
 	if (r->kind == LISTEN_LINK_KEY) {
-		finish_pairing(d, &r->addr);
+		finish_pairing(d, &r->address);
 		return;
 	}
 
-	if (r->kind == LISTEN_AUTH_COMPL) {
+	if (r->kind == LISTEN_AUTHENTICATION_COMPLETE) {
 		/*
 		 * Success means the key is on its way, so there is nothing to
 		 * do. Failure means it never will be, usually a refused or
@@ -486,8 +645,58 @@ on_completion(const struct listen_report *r, void *arg)
 		return;
 	}
 
-	if (r->kind == LISTEN_CON_COMPL && d->pairing.state.active &&
-	    memcmp(d->pairing.state.addr, &r->addr, BTMGR_ADDR_LEN) == 0) {
+	if (r->kind == LISTEN_INQUIRY_RESULT) {
+		char	*line;
+
+		if (!d->scanning)
+			return;
+
+		line = proto_device_found_event(&r->address, r->device_class,
+		    btmgr_type_name(btmgr_class_type(r->device_class)));
+		broadcast(d, line);
+		free(line);
+		return;
+	}
+
+	if (r->kind == LISTEN_INQUIRY_COMPLETE) {
+		/* B7.2 */
+		if (d->scanning && r->status != 0) {
+			char	*line;
+
+			syslog(LOG_WARNING, "scan failed, %s", detail);
+			line = proto_scan_failed_event(detail);
+			broadcast(d, line);
+			free(line);
+		}
+		d->scanning = 0;
+		d->scan_until = 0;
+		d->dirty = 1;
+		return;
+	}
+
+	if (r->kind == LISTEN_COMMAND_STATUS) {
+		if (d->scan_status_until != 0 && !d->scan_stopping &&
+		    r->opcode == NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
+		    NG_HCI_OCF_INQUIRY))
+			finish_scan_start(d, r->status);
+		return;
+	}
+
+	if (r->kind == LISTEN_COMMAND_COMPLETE) {
+		apply_detail(d, r);
+		if (d->scan_status_until != 0 && d->scan_stopping &&
+		    r->opcode == NG_HCI_OPCODE(NG_HCI_OGF_LINK_CONTROL,
+		    NG_HCI_OCF_INQUIRY_CANCEL))
+			finish_scan_stop(d, r->status);
+		return;
+	}
+
+	if (r->kind != LISTEN_CONNECTION_COMPLETE &&
+	    r->kind != LISTEN_DISCONNECTION_COMPLETE)
+		return;
+
+	if (r->kind == LISTEN_CONNECTION_COMPLETE && d->pairing.state.active &&
+	    memcmp(d->pairing.state.addr, &r->address, BTMGR_ADDR_LEN) == 0) {
 		/*
 		 * A6 step 5 is not done until the link is authenticated: a bare
 		 * ACL link never exchanges a PIN, so no key would ever arrive.
@@ -516,9 +725,9 @@ on_completion(const struct listen_report *r, void *arg)
 	 * seconds later with "timeout" even though the connection succeeded.
 	 */
 	for (;;) {
-		if (r->kind == LISTEN_CON_COMPL)
+		if (r->kind == LISTEN_CONNECTION_COMPLETE)
 			f = inflight_take(&d->pending, INFLIGHT_CONNECT,
-			    &r->addr);
+			    &r->address);
 		else
 			f = inflight_take_handle(&d->pending,
 			    INFLIGHT_DISCONNECT, r->handle);
@@ -632,6 +841,317 @@ on_expired(const struct inflight *f, void *arg)
 	    "no completion from the controller"));
 }
 
+/* A8.5. The reply comes from finish_power_change() once the script exits. */
+static void
+do_set_power(struct daemon *d, struct client *c, const struct proto_cmd *cmd)
+{
+
+	if (!cmd->has_on) {
+		reply(d, c, proto_error(cmd->id, "bad_json",
+		    "set_power requires on"));
+		return;
+	}
+	/* A8.5.3 wins over every other refusal; powered is stale meanwhile. */
+	if (power_change_running(d)) {
+		reply(d, c, proto_error(cmd->id, "busy",
+		    "a power change is running"));
+		return;
+	}
+	if (!d->last.adapter_present) {
+		reply(d, c, proto_error(cmd->id, "no_adapter", NULL));
+		return;
+	}
+	/* A8.5.2 before B4.7: no change is not a teardown. */
+	if (cmd->on == d->last.powered) {
+		reply(d, c, proto_ok(cmd->id));
+		return;
+	}
+	if (d->pairing.state.active) {
+		reply(d, c, proto_error(cmd->id, "busy",
+		    "a pairing is in progress"));
+		return;
+	}
+
+	syslog(LOG_INFO, "power %s requested by uid %d",
+	    cmd->on ? "on" : "off", (int)c->uid);
+
+	d->power_client = c;
+	d->power_id = cmd->id;
+	if (start_power_change(d, cmd->on) < 0) {
+		d->power_client = NULL;
+		reply(d, c, proto_error(cmd->id, "io_error", strerror(errno)));
+	}
+}
+
+/* Runs service bluetooth stop or start for the unit, without waiting. */
+static int
+start_power_change(struct daemon *d, int on)
+{
+	posix_spawn_file_actions_t	 actions;
+	posix_spawnattr_t		 attributes;
+	struct kevent			 change;
+	char				 unit[HCI_DEVNAME_SIZE];
+	char				*argv[5];
+	char				*envp[2];
+	size_t				 length;
+	pid_t				 pid;
+	int				 error;
+
+	/* The script takes the unit, ubt0, not the node, ubt0hci. */
+	length = strlen(d->last.adapter.node);
+	if (length <= 3 ||
+	    strcmp(d->last.adapter.node + length - 3, "hci") != 0) {
+		errno = EINVAL;
+		return (-1);
+	}
+	memcpy(unit, d->last.adapter.node, length - 3);
+	unit[length - 3] = '\0';
+
+	/* posix_spawn() takes char *, but never writes through it. */
+	argv[0] = (char *)"service";
+	argv[1] = (char *)"bluetooth";
+	argv[2] = (char *)(on ? "start" : "stop");
+	argv[3] = unit;
+	argv[4] = NULL;
+	envp[0] = (char *)"PATH=/sbin:/bin:/usr/sbin:/usr/bin";
+	envp[1] = NULL;
+
+	/* Returns an error number rather than setting errno. */
+	error = posix_spawn_file_actions_init(&actions);
+	if (error != 0) {
+		errno = error;
+		return (-1);
+	}
+	error = posix_spawnattr_init(&attributes);
+	if (error != 0) {
+		posix_spawn_file_actions_destroy(&actions);
+		errno = error;
+		return (-1);
+	}
+
+	/* Its own group, so A8.5.7 can kill hccontrol along with it. */
+	error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+	if (error == 0)
+		error = posix_spawnattr_setpgroup(&attributes, 0);
+	if (error == 0)
+		error = posix_spawn_file_actions_addopen(&actions, 0,
+		    "/dev/null", O_RDONLY, 0);
+	if (error == 0)
+		error = posix_spawn_file_actions_addopen(&actions, 1,
+		    "/dev/null", O_WRONLY, 0);
+	if (error == 0)
+		error = posix_spawn_file_actions_adddup2(&actions, 1, 2);
+	/* The HCI listener is not close-on-exec, hccontrol must not get it. */
+	if (error == 0)
+		error = posix_spawn_file_actions_addclosefrom_np(&actions, 3);
+	if (error == 0)
+		error = posix_spawn(&pid, "/usr/sbin/service", &actions,
+		    &attributes, argv, envp);
+	posix_spawnattr_destroy(&attributes);
+	posix_spawn_file_actions_destroy(&actions);
+	if (error != 0) {
+		errno = error;
+		return (-1);
+	}
+
+	d->power_pid = pid;
+	d->power_until = now_mono() + POWER_TIMEOUT_SEC;
+
+	EV_SET(&change, (uintptr_t)pid, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0,
+	    &tag_power);
+	if (kevent(d->kq, &change, 1, NULL, 0, NULL) < 0) {
+		/* Rare. tick() polls it instead; blocking here would stall. */
+		syslog(LOG_ERR, "kevent add power child: %m");
+		d->power_polled = 1;
+	}
+
+	return (0);
+}
+
+static void
+finish_power_change(struct daemon *d, int status)
+{
+	int	succeeded;
+
+	succeeded = status != -1 && WIFEXITED(status) &&
+	    WEXITSTATUS(status) == 0;
+	syslog(LOG_INFO, "power change %s", succeeded ? "done" : "failed");
+
+	if (d->power_client != NULL)
+		reply(d, d->power_client, succeeded ? proto_ok(d->power_id) :
+		    proto_error(d->power_id, "io_error",
+		    "service bluetooth failed"));
+
+	d->power_pid = 0;
+	d->power_client = NULL;
+	d->power_until = 0;
+	d->power_polled = 0;
+
+	/* Now, not at the end of the pass: a later request reads powered. */
+	reconcile(d);
+}
+
+/* A8.5.7. Busy until the killed child has really exited. */
+static void
+expire_power_change(struct daemon *d)
+{
+
+	syslog(LOG_ERR, "power change still running after %d s, killing it",
+	    POWER_TIMEOUT_SEC);
+	(void)kill(-d->power_pid, SIGKILL);
+
+	if (d->power_client != NULL)
+		reply(d, d->power_client, proto_error(d->power_id, "timeout",
+		    "service bluetooth did not finish"));
+
+	d->power_reaping = d->power_pid;
+	d->power_pid = 0;
+	d->power_client = NULL;
+	d->power_until = 0;
+}
+
+static int
+power_change_running(const struct daemon *d)
+{
+
+	return (d->power_pid != 0 || d->power_reaping != 0);
+}
+
+/* For a child kqueue would not watch; tick() calls this. */
+static void
+poll_power_child(struct daemon *d)
+{
+	pid_t	child;
+	int	status;
+
+	child = d->power_pid != 0 ? d->power_pid : d->power_reaping;
+	if (!d->power_polled || child == 0 ||
+	    waitpid(child, &status, WNOHANG) != child)
+		return;
+
+	if (child == d->power_pid)
+		finish_power_change(d, status);
+	else {
+		d->power_reaping = 0;
+		d->power_polled = 0;
+		reconcile(d);
+	}
+}
+
+/* C3.3. A failed read keeps the cached value. */
+static void
+apply_detail(struct daemon *d, const struct listen_report *r)
+{
+	struct btmgr_adapter	*adapter = &d->adapter_cache.adapter;
+	int			 bit;
+
+	if (r->opcode == NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+	    NG_HCI_OCF_READ_LOCAL_NAME))
+		bit = DETAIL_NAME;
+	else if (r->opcode == NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+	    NG_HCI_OCF_READ_SCAN_ENABLE))
+		bit = DETAIL_SCAN;
+	else if (r->opcode == NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+	    NG_HCI_OCF_READ_UNIT_CLASS))
+		bit = DETAIL_CLASS;
+	else
+		return;
+
+	if ((d->details_pending & bit) == 0)
+		return;
+	d->details_pending &= ~bit;
+	if (d->details_pending == 0)
+		d->details_until = 0;
+
+	if (r->status != 0)
+		return;
+
+	if (bit == DETAIL_NAME)
+		memcpy(adapter->name, r->name, sizeof(adapter->name));
+	else if (bit == DETAIL_SCAN) {
+		adapter->inquiry_scan = (r->scan_enable & 0x01) ? 1 : 0;
+		adapter->page_scan = (r->scan_enable & 0x02) ? 1 : 0;
+	} else
+		memcpy(adapter->devclass, r->device_class,
+		    sizeof(adapter->devclass));
+
+	d->dirty = 1;
+}
+
+/* B4.8. status is the controller's Command_Status, or -1 if none came. */
+static void
+finish_scan_start(struct daemon *d, int status)
+{
+	struct client	*c = d->scan_client;
+	char		 detail[64];
+	int		 id = d->scan_id;
+
+	d->scan_client = NULL;
+	d->scan_status_until = 0;
+
+	if (status == 0) {
+		d->scanning = 1;
+		d->scan_until = now_mono() + d->scan_duration + SCAN_MARGIN_SEC;
+		d->dirty = 1;
+	}
+
+	/* B4.8. The controller may still accept it; nothing may run unseen. */
+	if (status < 0 && d->last.powered)
+		(void)btmgr_inquiry_cancel(d->last.adapter.node);
+
+	if (c == NULL)
+		return;
+
+	if (status == 0)
+		reply(d, c, proto_ok(id));
+	else if (status < 0)
+		reply(d, c, proto_error(id, "timeout",
+		    "no status from the controller"));
+	else if (status == HCI_STATUS_COMMAND_DISALLOWED)
+		reply(d, c, proto_error(id, "busy",
+		    "another inquiry is running"));
+	else {
+		(void)snprintf(detail, sizeof(detail),
+		    "controller reported status 0x%02x", status);
+		reply(d, c, proto_error(id, "io_error", detail));
+	}
+}
+
+/* B4.9. Command Disallowed means no inquiry ran, so it is stopped too. */
+static void
+finish_scan_stop(struct daemon *d, int status)
+{
+	struct client	*c = d->scan_client;
+	char		 detail[64];
+	int		 id = d->scan_id;
+	int		 stopped;
+
+	d->scan_client = NULL;
+	d->scan_status_until = 0;
+	d->scan_stopping = 0;
+
+	stopped = status == 0 || status == HCI_STATUS_COMMAND_DISALLOWED;
+	if (stopped) {
+		d->scanning = 0;
+		d->scan_until = 0;
+		d->dirty = 1;
+	}
+
+	if (c == NULL)
+		return;
+
+	if (stopped)
+		reply(d, c, proto_ok(id));
+	else if (status < 0)
+		reply(d, c, proto_error(id, "timeout",
+		    "no status from the controller"));
+	else {
+		(void)snprintf(detail, sizeof(detail),
+		    "controller reported status 0x%02x", status);
+		reply(d, c, proto_error(id, "io_error", detail));
+	}
+}
+
 static void
 handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 {
@@ -672,7 +1192,19 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		return;
 	}
 
-	if (!d->last.adapter_present) {
+	if (strcmp(cmd.name, "set_power") == 0) {
+		do_set_power(d, c, &cmd);
+		return;
+	}
+
+	/* A8.5.6. powered is stale until the script exits. */
+	if (power_change_running(d)) {
+		reply(d, c, proto_error(cmd.id, "busy",
+		    "a power change is running"));
+		return;
+	}
+
+	if (!d->last.powered) {
 		reply(d, c, proto_error(cmd.id, "no_adapter", NULL));
 		return;
 	}
@@ -764,6 +1296,75 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		return;
 	}
 
+	if (strcmp(cmd.name, "scan") == 0) {
+		int	duration;
+
+		if (!cmd.has_action) {
+			reply(d, c, proto_error(cmd.id, "bad_json",
+			    "scan requires action"));
+			return;
+		}
+
+		/* B4.8, B4.9 */
+		if (d->scan_status_until != 0) {
+			reply(d, c, proto_error(cmd.id, "busy",
+			    "a scan change is waiting for the controller"));
+			return;
+		}
+
+		if (cmd.action == PROTO_ACTION_STOP) {
+			if (!d->scanning) {
+				reply(d, c, proto_ok(cmd.id));
+				return;
+			}
+
+			d->scan_client = c;
+			d->scan_id = cmd.id;
+			d->scan_stopping = 1;
+			d->scan_status_until = now_mono() +
+			    SCAN_STATUS_TIMEOUT_SEC;
+
+			if (btmgr_inquiry_cancel(d->last.adapter.node) < 0) {
+				d->scan_client = NULL;
+				d->scan_status_until = 0;
+				d->scan_stopping = 0;
+				reply(d, c, proto_error(cmd.id, "io_error",
+				    strerror(errno)));
+			}
+			return;
+		}
+
+		/* B4.2 */
+		if (d->scanning) {
+			reply(d, c, proto_ok(cmd.id));
+			return;
+		}
+
+		duration = cmd.has_duration ? cmd.duration : SCAN_DEFAULT_SEC;
+		if (duration < 1 || duration > BTMGR_INQUIRY_MAX_SEC) {
+			reply(d, c, proto_error(cmd.id, "bad_json",
+			    "duration out of range"));
+			return;
+		}
+
+		/* Parked before sending, as connect is. B4.8 replies later. */
+		d->scan_client = c;
+		d->scan_id = cmd.id;
+		d->scan_duration = duration;
+		d->scan_status_until = now_mono() + SCAN_STATUS_TIMEOUT_SEC;
+
+		if (btmgr_inquiry_start(d->last.adapter.node, duration) < 0) {
+			d->scan_client = NULL;
+			d->scan_status_until = 0;
+			reply(d, c, proto_error(cmd.id, "io_error",
+			    strerror(errno)));
+			return;
+		}
+
+		syslog(LOG_INFO, "scan requested by uid %d", (int)c->uid);
+		return;
+	}
+
 	if (strcmp(cmd.name, "set_discoverable") == 0) {
 		int	on;
 
@@ -806,6 +1407,7 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 			    strerror(errno)));
 			return;
 		}
+		remember_scan(d, on, 1);
 
 		/*
 		 * A timeout re-arms the one-shot timer that turns it back
@@ -951,10 +1553,16 @@ refresh_hci(struct daemon *d)
 {
 	const char	*want;
 
-	want = d->last.adapter_present ? d->last.adapter.node : "";
+	want = d->last.powered ? d->last.adapter.node : "";
 
 	if (strcmp(d->node, want) == 0)
 		return;			/* already matching */
+
+	d->scanning = 0;
+	d->scan_until = 0;
+
+	/* reconcile() has already sent the old scanning, so send again. */
+	d->dirty = 1;
 
 	if (d->hci >= 0) {
 		(void)kq_del(d->kq, (uintptr_t)d->hci, EVFILT_READ);
@@ -1000,7 +1608,16 @@ reconcile(struct daemon *d)
 	struct state	 now;
 	char		*line;
 
-	state_snapshot(&now);
+	state_snapshot(&now, &d->adapter_cache);
+	now.scanning = d->scanning && now.powered;
+
+	/* C3.3: once per power-up, without waiting for the replies. */
+	if (now.powered && !d->adapter_cache.details_read &&
+	    btmgr_adapter_request_details(now.adapter.node) == 0) {
+		d->adapter_cache.details_read = 1;
+		d->details_pending = DETAILS_ALL;
+		d->details_until = now_mono() + DETAILS_TIMEOUT_SEC;
+	}
 
 	if (d->have_last && state_equal(&now, &d->last)) {
 		d->dirty = 0;
@@ -1037,6 +1654,7 @@ main(int argc, char *argv[])
 	d.kq = -1;
 	d.lfd = -1;
 	d.hci = -1;
+	d.devd = -1;
 	d.sockpath = DEFAULT_SOCKET;
 
 	while ((ch = getopt(argc, argv, "fnp:r:s:")) != -1) {
@@ -1155,6 +1773,8 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
+	open_devd(&d);
+
 	/*
 	 * Last: the pid is the forked one, and SIGTERM is ignored until the
 	 * filters above exist, so publishing earlier loses a stop sent in
@@ -1222,6 +1842,7 @@ main(int argc, char *argv[])
 			if (ev->filter == EVFILT_SIGNAL) {
 				if (ev->ident == SIGHUP) {
 					syslog(LOG_INFO, "reload");
+					d.adapter_cache.details_read = 0;
 					d.dirty = 1;
 				} else {
 					syslog(LOG_INFO, "shutting down");
@@ -1232,6 +1853,33 @@ main(int argc, char *argv[])
 
 			if (ev->udata == &tag_listen_sock) {
 				do_accept(&d);
+				continue;
+			}
+
+			if (ev->udata == &tag_devd) {
+				if (devd_drain(d.devd, on_devd, &d) < 0) {
+					syslog(LOG_INFO, "devd went away");
+					(void)kq_del(d.kq, (uintptr_t)d.devd,
+					    EVFILT_READ);
+					(void)close(d.devd);
+					d.devd = -1;
+				}
+				continue;
+			}
+
+			if (ev->udata == &tag_power) {
+				pid_t	child = (pid_t)ev->ident;
+				int	status;
+
+				if (waitpid(child, &status, WNOHANG) != child)
+					continue;
+				if (child == d.power_pid)
+					finish_power_change(&d, status);
+				else if (child == d.power_reaping) {
+					/* A8.5.7: now it has stopped. */
+					d.power_reaping = 0;
+					reconcile(&d);
+				}
 				continue;
 			}
 

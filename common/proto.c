@@ -38,9 +38,13 @@
 static int	 pin_is_sendable(const char *pin);
 static int	 set_string(json_t *obj, const char *key, const char *value);
 static int	 read_boolean(json_t *obj, const char *key, int *out);
+static int	 read_int(json_t *value, int *out);
 static int	 json_string_is(json_t *value, const char *want);
 static int	 read_adapter(json_t *obj, struct proto_adapter_state *out);
 static int	 read_connection(json_t *obj, struct proto_connection *out);
+static int	 hex_value(char digit);
+static int	 read_device_class(const char *text, uint8_t *device_class);
+static int	 read_found_device(json_t *obj, struct proto_found_device *out);
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
@@ -264,6 +268,90 @@ read_boolean(json_t *obj, const char *key, int *out)
 	return (0);
 }
 
+/* json_int_t is 64-bit, so a cast to int alone would wrap a large value. */
+static int
+read_int(json_t *value, int *out)
+{
+	json_int_t	 number;
+
+	if (!json_is_integer(value))
+		return (-1);
+
+	number = json_integer_value(value);
+	if (number < INT_MIN || number > INT_MAX)
+		return (-1);
+
+	*out = (int)number;
+
+	return (0);
+}
+
+static int
+hex_value(char digit)
+{
+
+	if (digit >= '0' && digit <= '9')
+		return (digit - '0');
+	if (digit >= 'a' && digit <= 'f')
+		return (digit - 'a' + 10);
+	if (digit >= 'A' && digit <= 'F')
+		return (digit - 'A' + 10);
+
+	return (-1);
+}
+
+/* "28:04:3c" is printed high byte first; HCI order is low byte first. */
+static int
+read_device_class(const char *text, uint8_t *device_class)
+{
+	size_t	byte, position;
+	int	high, low;
+
+	if (strlen(text) != sizeof("xx:xx:xx") - 1)
+		return (-1);
+
+	for (byte = 0; byte < NG_HCI_CLASS_SIZE; byte++) {
+		position = byte * 3;
+		high = hex_value(text[position]);
+		low = hex_value(text[position + 1]);
+		if (high < 0 || low < 0)
+			return (-1);
+		if (byte < NG_HCI_CLASS_SIZE - 1 && text[position + 2] != ':')
+			return (-1);
+
+		device_class[NG_HCI_CLASS_SIZE - 1 - byte] =
+		    (uint8_t)(high * 16 + low);
+	}
+
+	return (0);
+}
+
+/* Every field is required, as in the adapter object. */
+static int
+read_found_device(json_t *obj, struct proto_found_device *out)
+{
+	json_t	*value;
+
+	value = json_object_get(obj, "addr");
+	if (!json_is_string(value) ||
+	    !bt_aton(json_string_value(value), &out->addr))
+		return (-1);
+
+	value = json_object_get(obj, "class");
+	if (!json_is_string(value) ||
+	    read_device_class(json_string_value(value),
+	    out->device_class) != 0)
+		return (-1);
+
+	value = json_object_get(obj, "type");
+	if (!json_is_string(value) || json_string_value(value)[0] == '\0' ||
+	    strlcpy(out->type, json_string_value(value), sizeof(out->type)) >=
+	    sizeof(out->type))
+		return (-1);
+
+	return (0);
+}
+
 int
 proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 {
@@ -383,6 +471,25 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 		out->has_state = 1;
 	}
 
+	if (strcmp(out->event_name, "device_found") == 0) {
+		if (read_found_device(root, &out->found_device) != 0) {
+			json_decref(root);
+			return (-1);
+		}
+		out->has_found_device = 1;
+	}
+
+	/* B7.2. The detail shares the reply's field. */
+	if (strcmp(out->event_name, "scan_failed") == 0) {
+		value = json_object_get(root, "detail");
+		if (!json_is_string(value)) {
+			json_decref(root);
+			return (-1);
+		}
+		strlcpy(out->error_detail, json_string_value(value),
+		    sizeof(out->error_detail));
+	}
+
 	json_decref(root);
 
 	return (0);
@@ -418,6 +525,9 @@ proto_encode_cmd(const struct proto_cmd *cmd)
 	/* The parser refuses an empty name, so emitting one is a doomed send. */
 	if (cmd->has_device_name && cmd->device_name[0] == '\0')
 		return (NULL);
+	if (cmd->has_action && cmd->action != PROTO_ACTION_START &&
+	    cmd->action != PROTO_ACTION_STOP)
+		return (NULL);
 
 	obj = json_object();
 	if (obj == NULL)
@@ -438,6 +548,13 @@ proto_encode_cmd(const struct proto_cmd *cmd)
 	    json_object_set_new(obj, "on", json_boolean(cmd->on)) != 0)
 		goto fail;
 	if (cmd->has_pin && set_string(obj, "pin", cmd->pin) != 0)
+		goto fail;
+	if (cmd->has_action && set_string(obj, "action",
+	    cmd->action == PROTO_ACTION_STOP ? "stop" : "start") != 0)
+		goto fail;
+	if (cmd->has_duration &&
+	    json_object_set_new(obj, "duration",
+	    json_integer(cmd->duration)) != 0)
 		goto fail;
 	if (cmd->has_device_name &&
 	    set_string(obj, "name", cmd->device_name) != 0)
@@ -529,6 +646,51 @@ fail:
 	return (NULL);
 }
 
+/* The class prints high byte first, as B5 shows it. */
+char *
+proto_device_found_event(const bdaddr_t *address, const uint8_t *device_class,
+    const char *type_name)
+{
+	char	 address_text[BTMGR_ADDR_STRSIZE];
+	char	 class_text[sizeof("xx:xx:xx")];
+	json_t	*o;
+
+	(void)snprintf(class_text, sizeof(class_text), "%02x:%02x:%02x",
+	    device_class[2], device_class[1], device_class[0]);
+
+	o = json_object();
+	if (o == NULL)
+		return (NULL);
+
+	if (set_string(o, "event", "device_found") != 0 ||
+	    set_string(o, "addr", bt_ntoa(address, address_text)) != 0 ||
+	    set_string(o, "class", class_text) != 0 ||
+	    set_string(o, "type", type_name) != 0) {
+		json_decref(o);
+		return (NULL);
+	}
+
+	return (render(o));
+}
+
+char *
+proto_scan_failed_event(const char *detail)
+{
+	json_t	*o;
+
+	o = json_object();
+	if (o == NULL)
+		return (NULL);
+
+	if (set_string(o, "event", "scan_failed") != 0 ||
+	    set_string(o, "detail", detail) != 0) {
+		json_decref(o);
+		return (NULL);
+	}
+
+	return (render(o));
+}
+
 char *
 proto_ok(int id)
 {
@@ -601,9 +763,7 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 	 * Recover the id first, even if the rest is malformed, so the error
 	 * reply can be matched to the request that caused it. SPEC.md B3.1.
 	 */
-	v = json_object_get(root, "id");
-	if (json_is_integer(v))
-		out->id = (int)json_integer_value(v);
+	(void)read_int(json_object_get(root, "id"), &out->id);
 
 	if (out->id < 0) {
 		strlcpy(code, "missing_id", codelen);
@@ -645,12 +805,11 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 
 	v = json_object_get(root, "timeout");
 	if (v != NULL) {
-		if (!json_is_integer(v)) {
+		if (read_int(v, &out->timeout) != 0) {
 			strlcpy(code, "bad_json", codelen);
 			json_decref(root);
 			return (-1);
 		}
-		out->timeout = (int)json_integer_value(v);
 		out->has_timeout = 1;
 	}
 
@@ -663,6 +822,30 @@ proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
 		}
 		out->on = json_is_true(v) ? 1 : 0;
 		out->has_on = 1;
+	}
+
+	v = json_object_get(root, "action");
+	if (v != NULL) {
+		if (json_string_is(v, "start"))
+			out->action = PROTO_ACTION_START;
+		else if (json_string_is(v, "stop"))
+			out->action = PROTO_ACTION_STOP;
+		else {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+		out->has_action = 1;
+	}
+
+	v = json_object_get(root, "duration");
+	if (v != NULL) {
+		if (read_int(v, &out->duration) != 0) {
+			strlcpy(code, "bad_json", codelen);
+			json_decref(root);
+			return (-1);
+		}
+		out->has_duration = 1;
 	}
 
 	/*

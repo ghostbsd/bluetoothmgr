@@ -42,6 +42,11 @@ struct state;
  */
 #define	BTMGR_PIN_MAX		16
 
+enum proto_action {
+	PROTO_ACTION_START = 1,
+	PROTO_ACTION_STOP
+};
+
 /* A parsed command. SPEC.md B3 and B4. */
 struct proto_cmd {
 	int		id;
@@ -56,6 +61,10 @@ struct proto_cmd {
 	int		on;
 	int		has_pin;
 	char		pin[BTMGR_PIN_MAX + 1];
+	int		has_action;
+	enum proto_action action;
+	int		has_duration;
+	int		duration;
 
 	/* From the client's scan. Without it A2 aliases everything bt-xxxxxx. */
 	int		has_device_name;
@@ -114,6 +123,15 @@ struct proto_adapter_state {
 	struct proto_connection connections[BTMGR_MAX_CONNS];
 };
 
+#define	BTMGR_TYPE_NAME_MAX	16
+
+/* A device_found event. device_class is low byte first, as HCI sends it. */
+struct proto_found_device {
+	bdaddr_t	addr;
+	uint8_t		device_class[NG_HCI_CLASS_SIZE];
+	char		type[BTMGR_TYPE_NAME_MAX];
+};
+
 struct proto_msg {
 	enum proto_msg_kind	kind;
 
@@ -133,6 +151,10 @@ struct proto_msg {
 	/* Set for the state event only. */
 	int			has_state;
 	struct proto_adapter_state state;
+
+	/* Set for the device_found event only. */
+	int			has_found_device;
+	struct proto_found_device found_device;
 };
 
 /*
@@ -146,7 +168,7 @@ int	proto_parse_msg(const char *line, size_t len, struct proto_msg *out);
 /*
  * Client to daemon: the inverse of proto_parse_cmd, so a round trip through
  * both is what keeps the two from disagreeing. Only the fields proto_cmd
- * carries can be emitted, so scan, set_alias and set_trusted wait until their
+ * carries can be emitted, so set_alias and set_trusted wait until their
  * fields exist. Returns NULL on bad input or allocation failure.
  */
 char	*proto_encode_cmd(const struct proto_cmd *cmd);
@@ -154,6 +176,9 @@ char	*proto_encode_cmd(const struct proto_cmd *cmd);
 /* Daemon to client. Each returns a malloc'd line including its '\n'. */
 char	*proto_hello(void);
 char	*proto_state_event(const struct state *st);
+char	*proto_device_found_event(const bdaddr_t *address,
+	    const uint8_t *device_class, const char *type_name);
+char	*proto_scan_failed_event(const char *detail);
 char	*proto_ok(int id);
 char	*proto_error(int id, const char *code, const char *detail);
 

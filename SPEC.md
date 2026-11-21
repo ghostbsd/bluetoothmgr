@@ -323,7 +323,25 @@ strict grammars, plus syslog.
   typing on. Restart MUST be an explicit, confirmed user action.
 - **A8.5** `set_power: false` maps to `service bluetooth stop <unit>`, which
   tears down the netgraph stack. This is not equivalent to BlueZ's adapter
-  power-off and the UI MUST make the difference visible.
+  power-off and the UI MUST make the difference visible. `set_power: true`
+  maps to `service bluetooth start <unit>`.
+- **A8.5.1** `set_power` MUST carry `on`. A request without it is `bad_json`.
+- **A8.5.2** A `set_power` matching the current state MUST reply `ok` without
+  running anything.
+- **A8.5.3** While a power change runs, another `set_power` MUST be refused with
+  `busy`.
+- **A8.5.4** `adapter_present` MUST report whether the USB device is attached,
+  and `powered` whether its HCI unit is inited. A stopped stack MUST report
+  `adapter_present` true and `powered` false.
+- **A8.5.5** While `powered` is false, `adapter` MUST carry the address and name
+  last read from that device. If none was read, the address MUST be
+  `00:00:00:00:00:00` and the name empty. They MUST be dropped when the device
+  detaches.
+- **A8.5.6** While a power change runs, every request other than `get_state`
+  MUST be refused with `busy`.
+- **A8.5.7** A power change still running after 60 seconds MUST be killed
+  together with its process group, and its request answered with `timeout`.
+  It MUST count as running until its process has exited.
 
 ## A9. `/var/run/utx.active`
 
@@ -468,6 +486,17 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
   `busy`. The first four reload `hcsecd`, which A6.2 forbids; `set_power` tears
   the stack down per A8.5. `get_state`, `scan`, `connect`, `disconnect` and
   `set_discoverable` MUST remain available.
+- **B4.8** The reply to a `scan` start MUST follow the controller's
+  `Command_Status` for `Inquiry`: `ok` for status 0, `busy` for Command
+  Disallowed, `io_error` for any other status, and `timeout` if none arrives.
+  `scanning` MUST NOT become true before status 0 is seen. A `scan` arriving
+  while a start awaits its status MUST be refused with `busy`. On `timeout` the
+  daemon MUST send `Inquiry_Cancel`.
+- **B4.9** The reply to a `scan` stop MUST follow the controller's
+  `Command_Complete` for `Inquiry_Cancel`: `ok` for status 0 or Command
+  Disallowed, `io_error` for any other status, and `timeout` if none arrives.
+  `scanning` MUST become false on `ok`. A `scan` arriving while a stop awaits
+  its status MUST be refused with `busy`.
 
 ## B5. State object *(provisional, expect churn)*
 
@@ -536,12 +565,16 @@ Daemon to client, unsolicited event, distinguished by having no `id`:
 | `hello` | Once, on connect (B2) |
 | `state` | In answer to `get_state`, and whenever anything changes (A5.4) |
 | `device_found` | During a scan, per inquiry result |
+| `scan_failed` | A scan ended with a controller error (B7.2) |
 | `device_added` / `device_removed` | Store changes |
 | `pairing_progress` | Stage transitions during A6 |
 
 - **B7.1** The daemon MUST coalesce. It MUST NOT emit a `state` event when
   nothing changed, which is the point of the reconcile timer being a fallback
   rather than the driver.
+- **B7.2** When the daemon's own scan ends with an `Inquiry_Complete` carrying
+  a non-zero status, the daemon MUST send `scan_failed` with a `detail` naming
+  the status. `scanning` MUST become false either way.
 
 ---
 
@@ -597,6 +630,18 @@ runs `service bluetooth quietstart` and `quietstop`.
 - **C3.2** Polling `bt_devenum()` on the reconcile timer is sufficient.
   `/var/run/devd.seqpacket.pipe` would give instant notification and MAY be
   added if the latency matters.
+- **C3.3** The reconcile timer MUST NOT send HCI commands. The adapter's name,
+  class and scan enable MUST be read from the controller once each time its
+  unit becomes ready, and again on the daemon's `SIGHUP`. Scan enable written
+  by the daemon MUST be recorded rather than read back. These reads MUST NOT
+  block the daemon: they MUST be sent without waiting and applied as their
+  replies arrive.
+- **C3.4** The daemon MUST watch `/var/run/devd.seqpacket.pipe` for `ubt`
+  attach and detach. On detach it MUST drop the adapter kept per A8.5.5. On
+  attach it MUST read the adapter's details again per C3.3. While the socket
+  is unavailable the daemon MUST retry it on each reconcile tick. Each time
+  the socket is opened, the daemon MUST drop the adapter kept per A8.5.5 and
+  read its details again.
 
 ## C4. The `bt_devenum()` callback socket cannot be written to
 

@@ -177,6 +177,8 @@ test_envelope(void)
 	    "a string id is missing_id, not coerced");
 	rejects("{\"id\":-1,\"cmd\":\"get_state\"}", "missing_id",
 	    "a negative id is refused");
+	rejects("{\"id\":4294967297,\"cmd\":\"get_state\"}", "missing_id",
+	    "an id past INT_MAX is refused, not narrowed to 1");
 	rejects("{\"id\":1}", "missing_cmd", "no cmd is missing_cmd");
 	rejects("{\"id\":1,\"cmd\":42}", "missing_cmd", "a non-string cmd too");
 
@@ -242,6 +244,9 @@ test_scalars(void)
 	    "bad_json", "a string timeout is not coerced");
 	rejects("{\"id\":3,\"cmd\":\"set_discoverable\",\"timeout\":1.5}",
 	    "bad_json", "nor is a fractional one");
+	rejects("{\"id\":3,\"cmd\":\"set_discoverable\","
+	    "\"timeout\":4294967296}", "bad_json",
+	    "a timeout past INT_MAX is refused, not narrowed to 0");
 	rejects("{\"id\":3,\"cmd\":\"set_discoverable\",\"on\":1}",
 	    "bad_json", "on must be a boolean, not 1");
 
@@ -253,6 +258,47 @@ test_scalars(void)
 	ok(parse("{\"id\":3,\"cmd\":\"set_discoverable\",\"timeout\":999999}",
 	    &cmd, code, sizeof(code)) == 0,
 	    "an out-of-range timeout parses; the handler range checks it");
+}
+
+static void
+test_scan(void)
+{
+	struct proto_cmd	 cmd;
+	char			 code[32];
+
+	printf("\nB4 scan\n");
+
+	ok(parse("{\"id\":4,\"cmd\":\"scan\",\"action\":\"start\"}", &cmd,
+	    code, sizeof(code)) == 0 && cmd.has_action &&
+	    cmd.action == PROTO_ACTION_START, "action start parses");
+	ok(!cmd.has_duration, "with duration absent");
+	ok(parse("{\"id\":4,\"cmd\":\"scan\",\"action\":\"stop\"}", &cmd,
+	    code, sizeof(code)) == 0 && cmd.has_action &&
+	    cmd.action == PROTO_ACTION_STOP, "action stop parses");
+	ok(parse("{\"id\":4,\"cmd\":\"scan\"}", &cmd, code,
+	    sizeof(code)) == 0 && !cmd.has_action,
+	    "an absent action is absent, for the handler to refuse");
+
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"action\":\"pause\"}", "bad_json",
+	    "an unknown action is bad_json");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"action\":1}", "bad_json",
+	    "a non-string action is bad_json");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"action\":null}", "bad_json",
+	    "an explicit null action is an error, not an omission");
+
+	ok(parse("{\"id\":4,\"cmd\":\"scan\",\"action\":\"start\","
+	    "\"duration\":20}", &cmd, code, sizeof(code)) == 0 &&
+	    cmd.has_duration && cmd.duration == 20, "a duration parses");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"duration\":\"20\"}", "bad_json",
+	    "a string duration is not coerced");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"duration\":2.5}", "bad_json",
+	    "nor is a fractional one");
+	rejects("{\"id\":4,\"cmd\":\"scan\",\"duration\":4294967306}",
+	    "bad_json",
+	    "a duration past INT_MAX is refused, not narrowed to 10");
+	ok(parse("{\"id\":4,\"cmd\":\"scan\",\"duration\":999}", &cmd, code,
+	    sizeof(code)) == 0,
+	    "an out-of-range duration parses; the handler range checks it");
 }
 
 /* B4 pair. The PIN is a secret, so it is never transliterated. */
@@ -389,6 +435,10 @@ round_trip(const struct proto_cmd *sent, const char *what)
 	    got.on == sent->on &&
 	    got.has_pin == sent->has_pin &&
 	    got.has_device_name == sent->has_device_name &&
+	    got.has_action == sent->has_action &&
+	    got.action == sent->action &&
+	    got.has_duration == sent->has_duration &&
+	    got.duration == sent->duration &&
 	    (!sent->has_addr ||
 	    memcmp(&got.addr, &sent->addr, sizeof(got.addr)) == 0) &&
 	    (!sent->has_pin || strcmp(got.pin, sent->pin) == 0) &&
@@ -524,6 +574,36 @@ test_encode(void)
 	cmd.has_device_name = 1;
 	(void)strlcpy(cmd.device_name, "a \" quote", sizeof(cmd.device_name));
 	round_trip(&cmd, "a device name containing a quote survives escaping");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 12;
+	(void)strlcpy(cmd.name, "scan", sizeof(cmd.name));
+	cmd.has_action = 1;
+	cmd.action = PROTO_ACTION_START;
+	cmd.has_duration = 1;
+	cmd.duration = 20;
+	round_trip(&cmd, "scan start with a duration");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 13;
+	(void)strlcpy(cmd.name, "scan", sizeof(cmd.name));
+	cmd.has_action = 1;
+	cmd.action = PROTO_ACTION_STOP;
+	round_trip(&cmd, "scan stop");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 14;
+	(void)strlcpy(cmd.name, "scan", sizeof(cmd.name));
+	cmd.has_duration = 1;
+	cmd.duration = 0;
+	round_trip(&cmd, "duration zero, not absent");
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.id = 15;
+	(void)strlcpy(cmd.name, "scan", sizeof(cmd.name));
+	cmd.has_action = 1;
+	ok(proto_encode_cmd(&cmd) == NULL,
+	    "an action that is neither start nor stop is not encodable");
 }
 
 /*
@@ -791,11 +871,83 @@ test_decode(void)
 	    "a message carrying both id and event is refused");
 
 	/* B7 will grow. An unknown event must decode, not fail. */
-	ok(decode("{\"event\":\"device_found\",\"addr\":\"1:2:3:4:5:6\"}",
+	ok(decode("{\"event\":\"pairing_progress\",\"stage\":3}",
 	    &msg) == 0, "an event this build does not know still decodes");
 	ok(msg.kind == PROTO_MSG_EVENT, "as an event");
-	eq(msg.event_name, "device_found", "with its name available");
+	eq(msg.event_name, "pairing_progress", "with its name available");
 	ok(msg.has_state == 0, "and no state claimed");
+}
+
+static void
+test_device_found(void)
+{
+	const uint8_t		 device_class[NG_HCI_CLASS_SIZE] =
+	    { 0x3c, 0x04, 0x28 };
+	struct proto_msg	 msg;
+	bdaddr_t		 address;
+	char			*line;
+
+	printf("\nB7 device_found\n");
+
+	(void)bt_aton("aa:bb:cc:11:22:03", &address);
+
+	line = proto_device_found_event(&address, device_class, "av");
+	ok(line != NULL, "a device_found event encodes");
+	if (line == NULL)
+		return;
+
+	eq(line, "{\"event\":\"device_found\",\"addr\":\"aa:bb:cc:11:22:03\","
+	    "\"class\":\"28:04:3c\",\"type\":\"av\"}\n",
+	    "with the class printed high byte first");
+
+	ok(decode_owned(line, &msg) == 0 && msg.kind == PROTO_MSG_EVENT,
+	    "and decodes as an event");
+	eq(msg.event_name, "device_found", "named device_found");
+	ok(msg.has_found_device, "with the device decoded");
+	ok(memcmp(&msg.found_device.addr, &address, sizeof(address)) == 0,
+	    "its address survives");
+	ok(memcmp(msg.found_device.device_class, device_class,
+	    sizeof(device_class)) == 0,
+	    "its class comes back low byte first, as it went in");
+	eq(msg.found_device.type, "av", "and its type");
+
+	rejects_msg("{\"event\":\"device_found\",\"class\":\"28:04:3c\","
+	    "\"type\":\"av\"}", "a device_found without addr is refused");
+	rejects_msg("{\"event\":\"device_found\","
+	    "\"addr\":\"aa:bb:cc:11:22:03\","
+	    "\"class\":\"28:04\",\"type\":\"av\"}",
+	    "a short class is refused");
+	rejects_msg("{\"event\":\"device_found\","
+	    "\"addr\":\"aa:bb:cc:11:22:03\","
+	    "\"class\":\"0x:04:3c\",\"type\":\"av\"}",
+	    "a class that is not hex is refused");
+}
+
+static void
+test_scan_failed(void)
+{
+	struct proto_msg	 msg;
+	char			*line;
+
+	printf("\nB7.2 scan_failed\n");
+
+	line = proto_scan_failed_event("controller reported status 0x0c");
+	ok(line != NULL, "a scan_failed event encodes");
+	if (line == NULL)
+		return;
+
+	eq(line, "{\"event\":\"scan_failed\","
+	    "\"detail\":\"controller reported status 0x0c\"}\n",
+	    "with its detail");
+
+	ok(decode_owned(line, &msg) == 0 && msg.kind == PROTO_MSG_EVENT,
+	    "and decodes as an event");
+	eq(msg.event_name, "scan_failed", "named scan_failed");
+	eq(msg.error_detail, "controller reported status 0x0c",
+	    "with its detail decoded");
+
+	rejects_msg("{\"event\":\"scan_failed\"}",
+	    "a scan_failed without detail is refused");
 }
 
 int
@@ -805,10 +957,13 @@ main(void)
 	test_envelope();
 	test_addr();
 	test_scalars();
+	test_scan();
 	test_pin();
 	test_name();
 	test_encode();
 	test_decode();
+	test_device_found();
+	test_scan_failed();
 
 	if (btmgr_mc_report() != 0) {
 		printf("memcheck: allocations still live\n");

@@ -38,7 +38,11 @@ static const uint8_t	watched[] = {
 	NG_HCI_EVENT_ENCRYPTION_CHANGE,
 	NG_HCI_EVENT_PIN_CODE_REQ,
 	NG_HCI_EVENT_LINK_KEY_REQ,
-	NG_HCI_EVENT_LINK_KEY_NOTIFICATION
+	NG_HCI_EVENT_LINK_KEY_NOTIFICATION,
+	NG_HCI_EVENT_INQUIRY_RESULT,
+	NG_HCI_EVENT_INQUIRY_COMPL,
+	NG_HCI_EVENT_COMMAND_STATUS,
+	NG_HCI_EVENT_COMMAND_COMPL
 };
 
 int
@@ -150,9 +154,9 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 			ep = (ng_hci_con_compl_ep *)(e + 1);
 
 			memset(&rep, 0, sizeof(rep));
-			rep.kind = LISTEN_CON_COMPL;
+			rep.kind = LISTEN_CONNECTION_COMPLETE;
 			rep.status = ep->status;
-			bdaddr_copy(&rep.addr, &ep->bdaddr);
+			bdaddr_copy(&rep.address, &ep->bdaddr);
 			rep.handle = le16toh(ep->con_handle);
 
 			syslog(LOG_DEBUG, "connection complete, status %u",
@@ -173,7 +177,7 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 			ep = (ng_hci_discon_compl_ep *)(e + 1);
 
 			memset(&rep, 0, sizeof(rep));
-			rep.kind = LISTEN_DISCON_COMPL;
+			rep.kind = LISTEN_DISCONNECTION_COMPLETE;
 			rep.status = ep->status;
 			rep.handle = le16toh(ep->con_handle);
 
@@ -200,7 +204,7 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 			ep = (ng_hci_auth_compl_ep *)(e + 1);
 
 			memset(&rep, 0, sizeof(rep));
-			rep.kind = LISTEN_AUTH_COMPL;
+			rep.kind = LISTEN_AUTHENTICATION_COMPLETE;
 			rep.status = ep->status;
 			rep.handle = le16toh(ep->con_handle);
 
@@ -250,9 +254,138 @@ listen_drain(int fd, void (*cb)(const struct listen_report *, void *),
 
 			memset(&rep, 0, sizeof(rep));
 			rep.kind = LISTEN_LINK_KEY;
-			bdaddr_copy(&rep.addr, &ep->bdaddr);
+			bdaddr_copy(&rep.address, &ep->bdaddr);
 
 			syslog(LOG_INFO, "link key notification received");
+
+			if (cb != NULL)
+				cb(&rep, arg);
+			break;
+		}
+
+		/* One packet can carry several devices. */
+		case NG_HCI_EVENT_INQUIRY_RESULT: {
+			ng_hci_inquiry_result_ep	*result;
+			ng_hci_inquiry_response		*response;
+			int				 i;
+
+			if ((size_t)n < sizeof(*e) + sizeof(*result))
+				break;
+
+			result = (ng_hci_inquiry_result_ep *)(e + 1);
+			response = (ng_hci_inquiry_response *)(result + 1);
+
+			if ((size_t)n < sizeof(*e) + sizeof(*result) +
+			    (size_t)result->num_responses * sizeof(*response))
+				break;
+
+			for (i = 0; i < result->num_responses; i++) {
+				memset(&rep, 0, sizeof(rep));
+				rep.kind = LISTEN_INQUIRY_RESULT;
+				bdaddr_copy(&rep.address, &response[i].bdaddr);
+				memcpy(rep.device_class, response[i].uclass,
+				    sizeof(rep.device_class));
+
+				if (cb != NULL)
+					cb(&rep, arg);
+			}
+			break;
+		}
+
+		case NG_HCI_EVENT_INQUIRY_COMPL: {
+			ng_hci_inquiry_compl_ep	*complete;
+
+			if ((size_t)n < sizeof(*e) + sizeof(*complete))
+				break;
+
+			complete = (ng_hci_inquiry_compl_ep *)(e + 1);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.kind = LISTEN_INQUIRY_COMPLETE;
+			rep.status = complete->status;
+
+			syslog(LOG_DEBUG, "inquiry complete, status %u",
+			    complete->status);
+
+			if (cb != NULL)
+				cb(&rep, arg);
+			break;
+		}
+
+		/* Every command's status; the daemon picks out Inquiry's. */
+		case NG_HCI_EVENT_COMMAND_STATUS: {
+			ng_hci_command_status_ep	*command_status;
+
+			if ((size_t)n < sizeof(*e) + sizeof(*command_status))
+				break;
+
+			command_status = (ng_hci_command_status_ep *)(e + 1);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.kind = LISTEN_COMMAND_STATUS;
+			rep.status = command_status->status;
+			rep.opcode = le16toh(command_status->opcode);
+
+			if (cb != NULL)
+				cb(&rep, arg);
+			break;
+		}
+
+		/* The status is the first return parameter. */
+		case NG_HCI_EVENT_COMMAND_COMPL: {
+			ng_hci_command_compl_ep		*command_complete;
+			ng_hci_read_local_name_rp	*name_reply;
+			ng_hci_read_scan_enable_rp	*scan_reply;
+			ng_hci_read_unit_class_rp	*class_reply;
+			uint8_t				*parameters;
+			size_t				 available;
+
+			if ((size_t)n < sizeof(*e) + sizeof(*command_complete) +
+			    1)
+				break;
+
+			command_complete = (ng_hci_command_compl_ep *)(e + 1);
+			parameters = (uint8_t *)(command_complete + 1);
+			available = (size_t)n - sizeof(*e) -
+			    sizeof(*command_complete);
+
+			memset(&rep, 0, sizeof(rep));
+			rep.kind = LISTEN_COMMAND_COMPLETE;
+			rep.status = parameters[0];
+			rep.opcode = le16toh(command_complete->opcode);
+
+			/* C3.3: the adapter reads carry their value as well. */
+			switch (rep.opcode) {
+			case NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+			    NG_HCI_OCF_READ_LOCAL_NAME):
+				if (available < sizeof(*name_reply))
+					continue;
+				name_reply = (ng_hci_read_local_name_rp *)
+				    parameters;
+				memcpy(rep.name, name_reply->name,
+				    NG_HCI_UNIT_NAME_SIZE);
+				rep.name[NG_HCI_UNIT_NAME_SIZE] = '\0';
+				break;
+			case NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+			    NG_HCI_OCF_READ_SCAN_ENABLE):
+				if (available < sizeof(*scan_reply))
+					continue;
+				scan_reply = (ng_hci_read_scan_enable_rp *)
+				    parameters;
+				rep.scan_enable = scan_reply->scan_enable;
+				break;
+			case NG_HCI_OPCODE(NG_HCI_OGF_HC_BASEBAND,
+			    NG_HCI_OCF_READ_UNIT_CLASS):
+				if (available < sizeof(*class_reply))
+					continue;
+				class_reply = (ng_hci_read_unit_class_rp *)
+				    parameters;
+				memcpy(rep.device_class, class_reply->uclass,
+				    sizeof(rep.device_class));
+				break;
+			default:
+				break;
+			}
 
 			if (cb != NULL)
 				cb(&rep, arg);
