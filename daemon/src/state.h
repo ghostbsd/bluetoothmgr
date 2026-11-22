@@ -11,7 +11,6 @@
 #include "sanitise.h"
 #include "store.h"
 
-#define	STATE_MAX_DEVICES	64
 #define	STATE_TYPE_SIZE		16
 
 /* One device from the A4 store, as B5's devices array reports it. */
@@ -46,7 +45,7 @@ struct state {
 	struct btmgr_conn	conns[BTMGR_MAX_CONNS];
 	int			nconns;
 
-	struct state_device	devices[STATE_MAX_DEVICES];
+	struct state_device	devices[BTMGR_MAX_DEVICES];
 	int			ndevices;
 };
 

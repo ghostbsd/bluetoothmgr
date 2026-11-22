@@ -930,6 +930,7 @@ test_state_devices(void)
 	static const uint8_t	 soundbar[BTMGR_ADDR_LEN] =
 	    { 0x03, 0x22, 0x11, 0xcc, 0xbb, 0xaa };
 	struct state		 st;
+	struct proto_msg	 msg;
 	char			*line;
 
 	printf("\nB5 devices\n");
@@ -951,6 +952,17 @@ test_state_devices(void)
 	    "\"name\":\"Soundbar X900\",\"alias\":\"soundbar\","
 	    "\"type\":\"speaker\"}]",
 	    "a stored device is listed with addr, name, alias and type");
+
+	ok(decode_owned(proto_state_event(&st), &msg) == 0 && msg.has_state &&
+	    msg.state.device_count == 1, "and decodes back as one device");
+	ok(memcmp(&msg.state.devices[0].addr, soundbar, sizeof(soundbar)) == 0,
+	    "with its address");
+	eq(msg.state.devices[0].name, "Soundbar X900", "its name");
+	eq(msg.state.devices[0].alias, "soundbar", "its alias");
+	eq(msg.state.devices[0].type, "speaker", "and its type");
+	rejects_msg(STATE_HEAD "\"connections\":[],\"devices\":["
+	    "{\"addr\":\"aa:bb:cc:11:22:03\",\"alias\":\"soundbar\","
+	    "\"type\":\"speaker\"}]}", "a device without a name is refused");
 
 	/* B1.4: a hand-edited store must not kill the whole event. */
 	st.devices[0].name[0] = 'Z';

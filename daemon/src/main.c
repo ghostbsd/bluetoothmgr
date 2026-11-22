@@ -97,6 +97,12 @@ static int	tag_hci;		/* the passive HCI event socket */
 static int	tag_power;		/* the service bluetooth child */
 static int	tag_devd;		/* devd's event socket */
 
+/* A device from one of our scans, so pairing it can record its type. */
+struct seen_device {
+	uint8_t		addr[BTMGR_ADDR_LEN];
+	uint8_t		device_class[NG_HCI_CLASS_SIZE];
+};
+
 /* A6.2 allows one at a time. client may die first, so use client_alive(). */
 struct parked_pairing {
 	struct pair_state	 state;
@@ -141,6 +147,9 @@ struct daemon {
 	int		 power_polled;
 	int		 details_pending;
 	time_t		 details_until;
+	struct seen_device seen[BTMGR_MAX_SCAN];
+	int		 seen_count;
+	int		 seen_next;
 	int		 devd;
 	volatile int	 quit;
 };
@@ -182,6 +191,9 @@ static int	power_change_running(const struct daemon *d);
 static void	poll_power_child(struct daemon *d);
 static void	apply_detail(struct daemon *d, const struct listen_report *r);
 static void	load_store(struct daemon *d);
+static void	remember_seen(struct daemon *d, const bdaddr_t *address,
+		    const uint8_t *device_class);
+static const char *seen_type(const struct daemon *d, const uint8_t *addr);
 static void	finish_scan_start(struct daemon *d, int status);
 static void	finish_scan_stop(struct daemon *d, int status);
 static void	remember_scan(struct daemon *d, int inquiry_scan,
@@ -563,7 +575,8 @@ finish_pairing(struct daemon *d, const bdaddr_t *addr)
 		return;			/* some other device's key */
 
 	r = pairing_complete(&d->paths, &ops, &d->pairing.state,
-	    d->pairing.name, NULL, (int64_t)time(NULL), &report);
+	    d->pairing.name, seen_type(d, d->pairing.state.addr),
+	    (int64_t)time(NULL), &report);
 
 	memset(&d->pairing, 0, sizeof(d->pairing));
 
@@ -657,6 +670,7 @@ on_completion(const struct listen_report *r, void *arg)
 
 		if (!d->scanning)
 			return;
+		remember_seen(d, &r->address, r->device_class);
 
 		line = proto_device_found_event(&r->address, r->device_class,
 		    btmgr_type_name(btmgr_class_type(r->device_class)));
@@ -1097,8 +1111,8 @@ load_store(struct daemon *d)
 		    d->paths.store);
 		return;
 	case STORE_LOAD_SET_ASIDE:
-		syslog(LOG_WARNING, "%s was malformed, moved to %s%s",
-		    d->paths.store, d->paths.store, STORE_BAD_SUFFIX);
+		syslog(LOG_WARNING, "%s was malformed, moved aside",
+		    d->paths.store);
 		break;
 	case STORE_LOAD_OK:
 		break;
@@ -1106,7 +1120,46 @@ load_store(struct daemon *d)
 
 	store_free(d->store);
 	d->store = store;
-	d->dirty = 1;
+	reconcile(d);
+}
+
+/* Full, it overwrites the oldest entry. */
+static void
+remember_seen(struct daemon *d, const bdaddr_t *address,
+    const uint8_t *device_class)
+{
+	struct seen_device	*entry;
+	int			 i;
+
+	for (i = 0; i < d->seen_count; i++) {
+		if (memcmp(d->seen[i].addr, address, BTMGR_ADDR_LEN) == 0) {
+			memcpy(d->seen[i].device_class, device_class,
+			    NG_HCI_CLASS_SIZE);
+			return;
+		}
+	}
+
+	entry = &d->seen[d->seen_next];
+	d->seen_next = (d->seen_next + 1) % BTMGR_MAX_SCAN;
+	if (d->seen_count < BTMGR_MAX_SCAN)
+		d->seen_count++;
+
+	memcpy(entry->addr, address, BTMGR_ADDR_LEN);
+	memcpy(entry->device_class, device_class, NG_HCI_CLASS_SIZE);
+}
+
+/* NULL for a device none of our scans has seen. */
+static const char *
+seen_type(const struct daemon *d, const uint8_t *addr)
+{
+	int	i;
+
+	for (i = 0; i < d->seen_count; i++)
+		if (memcmp(d->seen[i].addr, addr, BTMGR_ADDR_LEN) == 0)
+			return (btmgr_type_name(btmgr_class_type(
+			    d->seen[i].device_class)));
+
+	return (NULL);
 }
 
 /* B4.8. status is the controller's Command_Status, or -1 if none came. */

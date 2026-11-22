@@ -476,11 +476,12 @@ static void
 test_set_aside(const char *scratch)
 {
 	static const char	 garbage[] = "not json\n";
+	static const char	 second_garbage[] = "also not json\n";
 	struct btmgr_paths	 paths, dry;
 	struct store		*store;
-	char			 bad[PATH_MAX];
+	char			 bad[PATH_MAX], numbered[PATH_MAX];
 	char			 err[SAFEFILE_ERRLEN];
-	char			*text;
+	char			*store_text, *bad_text, *numbered_text;
 	enum store_load_result	 loaded;
 
 	printf("\nA4.3 a malformed devices.json is set aside\n");
@@ -502,18 +503,51 @@ test_set_aside(const char *scratch)
 	    "a dry run still reports the file as bad");
 	store_free(store);
 	ok(access(bad, F_OK) != 0, "but creates no devices.json.bad");
-	text = slurp(paths.store);
-	eq(text, garbage, "and leaves devices.json as it was");
-	free(text);
+	store_text = slurp(paths.store);
+	eq(store_text, garbage, "and leaves devices.json as it was");
+	free(store_text);
 
 	loaded = store_load(&paths, &store);
 	ok(loaded == STORE_LOAD_SET_ASIDE && store != NULL &&
 	    store_count(store) == 0, "it loads as an empty store");
 	store_free(store);
-	text = slurp(bad);
-	eq(text, garbage, "the bad file is kept as devices.json.bad");
-	free(text);
+	bad_text = slurp(bad);
+	eq(bad_text, garbage, "the bad file is kept as devices.json.bad");
+	free(bad_text);
 	ok(access(paths.store, F_OK) != 0, "and devices.json is gone");
+
+	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE,
+	    second_garbage, strlen(second_garbage), err, sizeof(err));
+	(void)store_load(&paths, &store);
+	store_free(store);
+	(void)snprintf(numbered, sizeof(numbered), "%s%s.1", paths.store,
+	    STORE_BAD_SUFFIX);
+	bad_text = slurp(bad);
+	eq(bad_text, garbage, "an earlier devices.json.bad is not replaced");
+	free(bad_text);
+	numbered_text = slurp(numbered);
+	eq(numbered_text, second_garbage,
+	    "the next one goes to devices.json.bad.1");
+	free(numbered_text);
+
+	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, "", 0,
+	    err, sizeof(err));
+	loaded = store_load(&paths, &store);
+	ok(loaded == STORE_LOAD_SET_ASIDE,
+	    "an empty devices.json is set aside");
+	store_free(store);
+
+	/* Root reads any file, so this only means something as a user. */
+	if (geteuid() == 0)
+		return;
+	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, garbage,
+	    strlen(garbage), err, sizeof(err));
+	(void)chmod(paths.store, 0);
+	loaded = store_load(&paths, &store);
+	ok(loaded == STORE_LOAD_ERROR && store == NULL,
+	    "an unreadable devices.json is an error, not an empty store");
+	ok(access(paths.store, F_OK) == 0, "and is left where it is");
+	(void)chmod(paths.store, BTMGR_MODE_STORE);
 }
 
 int

@@ -43,6 +43,9 @@ static int	 read_int(json_t *value, int *out);
 static int	 json_string_is(json_t *value, const char *want);
 static int	 read_adapter(json_t *obj, struct proto_adapter_state *out);
 static int	 read_connection(json_t *obj, struct proto_connection *out);
+static int	 read_text(json_t *obj, const char *key, char *out,
+		     size_t out_size);
+static int	 read_device(json_t *obj, struct proto_device *out);
 static int	 read_device_class(const char *text, uint8_t *device_class);
 static int	 read_found_device(json_t *obj, struct proto_found_device *out);
 static char	*render(json_t *root);
@@ -288,6 +291,40 @@ read_connection(json_t *obj, struct proto_connection *out)
 	return (read_boolean(obj, "encrypted", &out->encrypted));
 }
 
+static int
+read_text(json_t *obj, const char *key, char *out, size_t out_size)
+{
+	json_t	*value = json_object_get(obj, key);
+
+	if (!json_is_string(value) ||
+	    strlcpy(out, json_string_value(value), out_size) >= out_size)
+		return (-1);
+
+	return (0);
+}
+
+/* Every field is required, as in a connection. */
+static int
+read_device(json_t *obj, struct proto_device *out)
+{
+	json_t	*value;
+
+	if (!json_is_object(obj))
+		return (-1);
+
+	value = json_object_get(obj, "addr");
+	if (!json_is_string(value) ||
+	    !bt_aton(json_string_value(value), &out->addr))
+		return (-1);
+
+	if (read_text(obj, "name", out->name, sizeof(out->name)) != 0 ||
+	    read_text(obj, "alias", out->alias, sizeof(out->alias)) != 0 ||
+	    read_text(obj, "type", out->type, sizeof(out->type)) != 0)
+		return (-1);
+
+	return (0);
+}
+
 /* A missing or non-boolean key is a malformed message, not a false. */
 static int
 read_boolean(json_t *obj, const char *key, int *out)
@@ -488,6 +525,24 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 		}
 
 		out->state.connection_count = (int)n;
+
+		value = json_object_get(root, "devices");
+		if (!json_is_array(value)) {
+			json_decref(root);
+			return (-1);
+		}
+		n = json_array_size(value);
+		if (n > BTMGR_MAX_DEVICES)
+			n = BTMGR_MAX_DEVICES;
+		for (i = 0; i < n; i++) {
+			if (read_device(json_array_get(value, i),
+			    &out->state.devices[i]) != 0) {
+				json_decref(root);
+				return (-1);
+			}
+		}
+		out->state.device_count = (int)n;
+
 		out->has_state = 1;
 	}
 

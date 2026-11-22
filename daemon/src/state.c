@@ -150,7 +150,7 @@ copy_text(char *to, size_t to_size, const char *from)
 void
 state_add_devices(struct state *out, const struct store *store)
 {
-	uint8_t			 addrs[STATE_MAX_DEVICES][BTMGR_ADDR_LEN];
+	uint8_t			 addrs[BTMGR_MAX_DEVICES][BTMGR_ADDR_LEN];
 	struct state_device	*device;
 	size_t			 count, i;
 
@@ -159,9 +159,9 @@ state_add_devices(struct state *out, const struct store *store)
 		return;
 
 	/* The total, which can exceed what fits. */
-	count = store_addrs(store, addrs, STATE_MAX_DEVICES);
-	if (count > STATE_MAX_DEVICES)
-		count = STATE_MAX_DEVICES;
+	count = store_addrs(store, addrs, BTMGR_MAX_DEVICES);
+	if (count > BTMGR_MAX_DEVICES)
+		count = BTMGR_MAX_DEVICES;
 
 	for (i = 0; i < count; i++) {
 		device = &out->devices[i];
