@@ -45,6 +45,7 @@ static void	 eq(const char *got, const char *want, const char *what);
 static void	 rm_rf(const char *path);
 static void	 test_bare_root(const char *scratch);
 static char	*slurp(const char *path);
+static void	 file_is(const char *path, const char *want, const char *what);
 
 /* A documentation address, in bdaddr_t storage order. */
 static const uint8_t	 speaker_addr[6] = { 0x02, 0x22, 0x11, 0xcc, 0xbb, 0xaa };
@@ -151,6 +152,15 @@ slurp(const char *path)
 	}
 
 	return (text);
+}
+
+static void
+file_is(const char *path, const char *want, const char *what)
+{
+	char	*text = slurp(path);
+
+	eq(text, want, what);
+	free(text);
 }
 
 /*
@@ -481,7 +491,6 @@ test_set_aside(const char *scratch)
 	struct store		*store;
 	char			 bad[PATH_MAX], numbered[PATH_MAX];
 	char			 err[SAFEFILE_ERRLEN];
-	char			*store_text, *bad_text, *numbered_text;
 	enum store_load_result	 loaded;
 
 	printf("\nA4.3 a malformed devices.json is set aside\n");
@@ -503,17 +512,13 @@ test_set_aside(const char *scratch)
 	    "a dry run still reports the file as bad");
 	store_free(store);
 	ok(access(bad, F_OK) != 0, "but creates no devices.json.bad");
-	store_text = slurp(paths.store);
-	eq(store_text, garbage, "and leaves devices.json as it was");
-	free(store_text);
+	file_is(paths.store, garbage, "and leaves devices.json as it was");
 
 	loaded = store_load(&paths, &store);
 	ok(loaded == STORE_LOAD_SET_ASIDE && store != NULL &&
 	    store_count(store) == 0, "it loads as an empty store");
 	store_free(store);
-	bad_text = slurp(bad);
-	eq(bad_text, garbage, "the bad file is kept as devices.json.bad");
-	free(bad_text);
+	file_is(bad, garbage, "the bad file is kept as devices.json.bad");
 	ok(access(paths.store, F_OK) != 0, "and devices.json is gone");
 
 	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE,
@@ -522,13 +527,9 @@ test_set_aside(const char *scratch)
 	store_free(store);
 	(void)snprintf(numbered, sizeof(numbered), "%s%s.1", paths.store,
 	    STORE_BAD_SUFFIX);
-	bad_text = slurp(bad);
-	eq(bad_text, garbage, "an earlier devices.json.bad is not replaced");
-	free(bad_text);
-	numbered_text = slurp(numbered);
-	eq(numbered_text, second_garbage,
+	file_is(bad, garbage, "an earlier devices.json.bad is not replaced");
+	file_is(numbered, second_garbage,
 	    "the next one goes to devices.json.bad.1");
-	free(numbered_text);
 
 	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, "", 0,
 	    err, sizeof(err));
