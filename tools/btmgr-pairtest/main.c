@@ -18,7 +18,6 @@
 #include <sys/stat.h>
 
 #include <errno.h>
-#include <fcntl.h>
 #include <fts.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -46,7 +45,6 @@ static void	 eq(const char *got, const char *want, const char *what);
 static void	 rm_rf(const char *path);
 static void	 test_bare_root(const char *scratch);
 static char	*slurp(const char *path);
-static void	 file_is(const char *path, const char *want, const char *what);
 
 /* A documentation address, in bdaddr_t storage order. */
 static const uint8_t	 speaker_addr[6] = { 0x02, 0x22, 0x11, 0xcc, 0xbb, 0xaa };
@@ -153,15 +151,6 @@ slurp(const char *path)
 	}
 
 	return (text);
-}
-
-static void
-file_is(const char *path, const char *want, const char *what)
-{
-	char	*text = slurp(path);
-
-	eq(text, want, what);
-	free(text);
 }
 
 /*
@@ -482,107 +471,45 @@ test_repair(const char *scratch)
 	free(first);
 }
 
-/* A4.3: a malformed store is moved aside, not written over. */
 static void
-test_set_aside(const char *scratch)
+test_store_load(const char *scratch)
 {
-	static const char	 garbage[] = "not json\n";
-	static const char	 second_garbage[] = "also not json\n";
-	static const char	 one_bad_row[] = "{\"version\":1,\"devices\":"
-	    "[{\"addr\":\"nonsense\"},{\"addr\":\"aa:bb:cc:11:22:02\"}]}\n";
-	struct btmgr_paths	 paths, dry;
-	struct stat		 identity;
-	int			 attempt, fd;
+	static const char	 bad_name[] = "{\"version\":1,\"devices\":"
+	    "[{\"addr\":\"aa:bb:cc:11:22:02\",\"name\":5}]}\n";
+	static const uint8_t	 address[BTMGR_ADDR_LEN] =
+	    { 0x02, 0x22, 0x11, 0xcc, 0xbb, 0xaa };
+	struct btmgr_paths	 paths;
 	struct store		*store;
-	char			 bad[PATH_MAX], numbered[PATH_MAX];
 	char			 err[SAFEFILE_ERRLEN];
-	enum store_load_result	 loaded;
 
-	printf("\nA4.3 a malformed devices.json is set aside\n");
+	printf("\nA4 loading devices.json\n");
 
-	if (seed(scratch, "set-aside", &paths) != 0 ||
-	    safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, garbage,
-	    strlen(garbage), err, sizeof(err)) == SAFEFILE_ERROR) {
+	if (seed(scratch, "store-load", &paths) != 0) {
 		ok(0, "the sandbox could be built");
 		return;
 	}
-	(void)snprintf(bad, sizeof(bad), "%s%s", paths.store,
-	    STORE_BAD_SUFFIX);
+	(void)unlink(paths.store);
 
-	/* A dry run first: it must report the bad file and move nothing. */
-	dry = paths;
-	dry.sf.dry_run = 1;
-	loaded = store_load(&dry, &store);
-	ok(loaded == STORE_LOAD_SET_ASIDE && store != NULL,
-	    "a dry run still reports the file as bad");
-	store_free(store);
-	ok(access(bad, F_OK) != 0, "but creates no devices.json.bad");
-	file_is(paths.store, garbage, "and leaves devices.json as it was");
-
-	loaded = store_load(&paths, &store);
-	ok(loaded == STORE_LOAD_SET_ASIDE && store != NULL &&
-	    store_count(store) == 0, "it loads as an empty store");
-	store_free(store);
-	file_is(bad, garbage, "the bad file is kept as devices.json.bad");
-	file_is(paths.store, garbage, "and devices.json stays until replaced");
-
-	(void)snprintf(numbered, sizeof(numbered), "%s%s.1", paths.store,
-	    STORE_BAD_SUFFIX);
-	(void)store_load(&paths, &store);
-	store_free(store);
-	ok(access(numbered, F_OK) != 0,
-	    "loading the same file again keeps no second copy");
-
-	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE,
-	    second_garbage, strlen(second_garbage), err, sizeof(err));
-	(void)store_load(&paths, &store);
-	store_free(store);
-	file_is(bad, garbage, "an earlier devices.json.bad is not replaced");
-	file_is(numbered, second_garbage,
-	    "the next one goes to devices.json.bad.1");
-
-	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, "", 0,
-	    err, sizeof(err));
-	loaded = store_load(&paths, &store);
-	ok(loaded == STORE_LOAD_SET_ASIDE,
-	    "an empty devices.json is set aside");
+	store = store_load(&paths);
+	ok(store != NULL && store_count(store) == 0,
+	    "before the first pairing the store is empty");
 	store_free(store);
 
-	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE,
-	    one_bad_row, strlen(one_bad_row), err, sizeof(err));
-	loaded = store_load(&paths, &store);
-	ok(loaded == STORE_LOAD_SET_ASIDE && store != NULL &&
-	    store_count(store) == 1,
-	    "an unusable row is copied aside and the good row kept");
-	store_free(store);
-	ok(stat(paths.store, &identity) == 0 && identity.st_nlink == 2,
-	    "with the whole file linked aside");
-
-	for (attempt = 4; attempt <= 105; attempt++) {
-		(void)snprintf(numbered, sizeof(numbered), "%s%s.%d",
-		    paths.store, STORE_BAD_SUFFIX, attempt);
-		fd = open(numbered, O_WRONLY | O_CREAT, BTMGR_MODE_STORE);
-		if (fd >= 0)
-			(void)close(fd);
-	}
-	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, garbage,
-	    strlen(garbage), err, sizeof(err));
-	loaded = store_load(&paths, &store);
-	ok(loaded == STORE_LOAD_SET_ASIDE,
-	    "numbering goes past devices.json.bad.99");
-	store_free(store);
-
-	/* Root reads any file, so this only means something as a user. */
-	if (geteuid() == 0)
+	if (safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, bad_name,
+	    strlen(bad_name), err, sizeof(err)) == SAFEFILE_ERROR) {
+		ok(0, "devices.json could be written");
 		return;
-	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, garbage,
-	    strlen(garbage), err, sizeof(err));
-	(void)chmod(paths.store, 0);
-	loaded = store_load(&paths, &store);
-	ok(loaded == STORE_LOAD_ERROR && store == NULL,
-	    "an unreadable devices.json is an error, not an empty store");
-	ok(access(paths.store, F_OK) == 0, "and is left where it is");
-	(void)chmod(paths.store, BTMGR_MODE_STORE);
+	}
+	store = store_load(&paths);
+	ok(store != NULL && store_has(store, address) &&
+	    store_name(store, address) == NULL,
+	    "a device with a bad name is kept without it");
+	ok(store != NULL &&
+	    store_set(store, address, "Soundbar", NULL, NULL, 0) ==
+	    STORE_CHANGED &&
+	    strcmp(store_name(store, address), "Soundbar") == 0,
+	    "and the next update replaces it");
+	store_free(store);
 }
 
 int
@@ -617,7 +544,7 @@ main(int argc, char *argv[])
 	test_default_entry(scratch);
 	test_abort(scratch);
 	test_repair(scratch);
-	test_set_aside(scratch);
+	test_store_load(scratch);
 
 	printf("\n%d checks, %d failures\n", checks, failures);
 

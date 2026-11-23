@@ -14,10 +14,8 @@
  * "key" field found in the file on disk is dropped on the next write rather
  * than carried forward.
  *
- * A4.3: a parse failure is not fatal. The authoritative state lives in the
- * kernel and in hcsecd.conf, so this file is a cache of niceties. A malformed
- * one yields an empty store with *malformed set, and the caller renames the bad
- * file aside and carries on.
+ * A4.3: a file that does not parse loads as an empty store, and the next write
+ * replaces it.
  *
  * Times are seconds since the epoch, as int64_t rather than time_t so the
  * on-disk format does not change shape with the platform. 0 means never.
@@ -43,7 +41,7 @@ enum store_result {
 	STORE_ABSENT	= 2	/* no such device */
 };
 
-/* An empty store, for a first run or after A4.3 rejects a file. */
+/* An empty store, for a first run. */
 struct store	*store_new(void);
 
 /*
@@ -51,14 +49,9 @@ struct store	*store_new(void);
  *
  * When the top level is unusable, meaning not an object, or without an integer
  * version, or a version newer than STORE_VERSION, or with a devices field that
- * is not an array, the result is an empty store and *malformed is set. The
- * caller then owes A4.3: rename the file aside, log, carry on. Renaming rather
- * than deleting matters most for the newer-version case, where the file is
- * someone else's future format and not garbage.
+ * is not an array, the result is an empty store and *malformed is set.
  *
- * An individual entry that is unusable is skipped and counted in *skipped,
- * keeping the entries that were fine. Losing one device's metadata is better
- * than discarding everyone's.
+ * An individual entry that is unusable is skipped and counted in *skipped.
  *
  * malformed and skipped may be NULL. Returns NULL only on allocation failure.
  */

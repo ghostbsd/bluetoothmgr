@@ -166,9 +166,8 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
   preference.
 - **A4.2** The top level MUST be an object with an integer `version` field, so
   the format can migrate.
-- **A4.3** A parse failure MUST NOT be fatal. The daemon MUST rename the bad
-  file aside, log, and continue with an empty store. The authoritative state
-  lives in the kernel and in `hcsecd.conf`; this file is a cache of niceties.
+- **A4.3** The daemon only adds, updates and removes devices in
+  `devices.json`.
 
 ## A5. `/var/run/bluetoothmgr.sock`
 

@@ -258,7 +258,6 @@ pairing_complete(const struct btmgr_paths *paths, const struct pair_ops *ops,
 	struct store		*store = NULL;
 	char			*text = NULL;
 	char			 alias_copy[BTMGR_ALIAS_BUFSZ];
-	enum store_load_result	 loaded;
 
 	if (report != NULL)
 		memset(report, 0, sizeof(*report));
@@ -284,16 +283,11 @@ pairing_complete(const struct btmgr_paths *paths, const struct pair_ops *ops,
 		trace_step(report, "flush");
 
 	/* Step 7. A4 metadata. The alias we chose is already in hosts. */
-	loaded = store_load(paths, &store);
-	if (loaded == STORE_LOAD_ERROR) {
-		set_detail(report, "devices.json could not be read or set "
-		    "aside; the pairing itself succeeded");
+	store = store_load(paths);
+	if (store == NULL) {
 		pairing_state_free(state);
 		return (PAIR_ERROR);
 	}
-	if (loaded == STORE_LOAD_SET_ASIDE)
-		set_detail(report, "devices.json was malformed and a copy was "
-		    "kept aside; the pairing itself succeeded");
 
 	/* Carry the alias across from hosts so both files agree. */
 	{

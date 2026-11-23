@@ -835,6 +835,8 @@ do_pair(struct daemon *d, struct client *c, const struct proto_cmd *cmd)
 	else
 		d->pairing.name[0] = '\0';
 	d->pairing.type = seen_type(d, (const uint8_t *)&cmd->addr);
+	if (d->pairing.type == NULL)
+		d->pairing.type = btmgr_type_name(BTMGR_TYPE_UNKNOWN);
 
 	/* Step 5. A6.1: only now, with the block on disk and hcsecd reloaded. */
 	if (btmgr_connect_start(d->last.adapter.node, &cmd->addr) < 0) {
@@ -1102,24 +1104,15 @@ apply_detail(struct daemon *d, const struct listen_report *r)
 	d->dirty = 1;
 }
 
-/* A4.3. On failure the store already loaded is kept. */
+/* Out of memory, the store already loaded is kept. */
 static void
 load_store(struct daemon *d)
 {
 	struct store	*store;
 
-	switch (store_load(&d->paths, &store)) {
-	case STORE_LOAD_ERROR:
-		syslog(LOG_ERR, "%s could not be loaded or set aside",
-		    d->paths.store);
+	store = store_load(&d->paths);
+	if (store == NULL)
 		return;
-	case STORE_LOAD_SET_ASIDE:
-		syslog(LOG_WARNING, "%s was malformed, a copy kept aside",
-		    d->paths.store);
-		break;
-	case STORE_LOAD_OK:
-		break;
-	}
 
 	store_free(d->store);
 	d->store = store;

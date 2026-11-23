@@ -230,7 +230,6 @@ bad:
 	if (malformed != NULL)
 		*malformed = 1;
 
-	/* A4.3: an empty store, so the daemon carries on. */
 	store_free(st);
 
 	return (store_new());

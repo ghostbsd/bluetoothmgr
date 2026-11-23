@@ -43,6 +43,7 @@ static int	 read_int(json_t *value, int *out);
 static int	 json_string_is(json_t *value, const char *want);
 static int	 read_adapter(json_t *obj, struct proto_adapter_state *out);
 static int	 read_connection(json_t *obj, struct proto_connection *out);
+static const char *string_without_nul(json_t *value);
 static int	 read_text(json_t *obj, const char *key, char *out,
 		     size_t out_size);
 static int	 read_device(json_t *obj, struct proto_device *out);
@@ -305,13 +306,23 @@ read_connection(json_t *obj, struct proto_connection *out)
 	return (read_boolean(obj, "encrypted", &out->encrypted));
 }
 
+static const char *
+string_without_nul(json_t *value)
+{
+
+	if (!json_is_string(value) ||
+	    strlen(json_string_value(value)) != json_string_length(value))
+		return (NULL);
+
+	return (json_string_value(value));
+}
+
 static int
 read_text(json_t *obj, const char *key, char *out, size_t out_size)
 {
-	json_t	*value = json_object_get(obj, key);
+	const char	*text = string_without_nul(json_object_get(obj, key));
 
-	if (!json_is_string(value) ||
-	    strlcpy(out, json_string_value(value), out_size) >= out_size)
+	if (text == NULL || strlcpy(out, text, out_size) >= out_size)
 		return (-1);
 
 	return (0);
@@ -321,14 +332,13 @@ read_text(json_t *obj, const char *key, char *out, size_t out_size)
 static int
 read_device(json_t *obj, struct proto_device *out)
 {
-	json_t	*value;
+	const char	*address;
 
 	if (!json_is_object(obj))
 		return (-1);
 
-	value = json_object_get(obj, "addr");
-	if (!json_is_string(value) ||
-	    !bt_aton(json_string_value(value), &out->addr))
+	address = string_without_nul(json_object_get(obj, "addr"));
+	if (address == NULL || !bt_aton(address, &out->addr))
 		return (-1);
 
 	if (read_text(obj, "name", out->name, sizeof(out->name)) != 0 ||

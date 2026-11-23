@@ -932,7 +932,6 @@ test_state_devices(void)
 	    { 0x03, 0x22, 0x11, 0xcc, 0xbb, 0xaa };
 	struct state		 st;
 	struct proto_msg	 msg;
-	char			*line;
 
 	printf("\nB5 devices\n");
 
@@ -969,9 +968,8 @@ test_state_devices(void)
 	st.devices[0].name[0] = 'Z';
 	st.devices[0].name[1] = (char)0xff;
 	st.devices[0].name[2] = '\0';
-	line = proto_state_event(&st);
-	ok(line != NULL, "a stored name with invalid UTF-8 still encodes");
-	free(line);
+	line_has(proto_state_event(&st), "\"name\":\"Z?\"",
+	    "a stored name with invalid UTF-8 has the bad byte replaced");
 
 	(void)strlcpy(st.devices[0].name, "a\x01" "b\x7f",
 	    sizeof(st.devices[0].name));
