@@ -48,6 +48,7 @@ static int	 parse(const char *line, struct proto_cmd *cmd, char *code,
 static void	 rejects(const char *line, const char *wantcode,
 		     const char *what);
 static void	 rejects_msg(const char *line, const char *what);
+static void	 test_state_line_fits(void);
 
 static void
 ok(int cond, const char *fmt, ...)
@@ -970,6 +971,59 @@ test_state_devices(void)
 	st.devices[0].name[2] = '\0';
 	line = proto_state_event(&st);
 	ok(line != NULL, "a stored name with invalid UTF-8 still encodes");
+	free(line);
+
+	(void)strlcpy(st.devices[0].name, "a\x01" "b\x7f",
+	    sizeof(st.devices[0].name));
+	line_has(proto_state_event(&st), "\"name\":\"a?b?\"",
+	    "control characters in a stored name are replaced");
+
+	ok(decode(STATE_HEAD "\"connections\":[]}", &msg) == 0 &&
+	    msg.has_state && msg.state.device_count == 0,
+	    "a state event from an older daemon, without devices, decodes");
+	rejects_msg(STATE_HEAD "\"connections\":[],\"devices\":\"none\"}",
+	    "a devices value that is not an array is refused");
+	rejects_msg(STATE_HEAD "\"connections\":[],\"devices\":["
+	    "{\"addr\":\"aa:bb:cc:11:22:03\",\"name\":\"a\\u0000b\","
+	    "\"alias\":\"soundbar\",\"type\":\"speaker\"}]}",
+	    "a NUL inside a device name is refused");
+	rejects_msg(STATE_HEAD "\"connections\":[],\"devices\":["
+	    "{\"addr\":\"aa:bb:cc:11:22:03\\u0000x\",\"name\":\"a\","
+	    "\"alias\":\"soundbar\",\"type\":\"speaker\"}]}",
+	    "a NUL inside a device address is refused");
+
+	test_state_line_fits();
+}
+
+/* B1.3. A quote costs two bytes on the line, the most any byte can now. */
+static void
+test_state_line_fits(void)
+{
+	struct state	 st;
+	char		*line;
+	int		 i;
+
+	memset(&st, 0, sizeof(st));
+	st.adapter_present = 1;
+	memset(st.adapter.name, '"', sizeof(st.adapter.name) - 1);
+	(void)strlcpy(st.adapter.node, "ubt0hci", sizeof(st.adapter.node));
+
+	st.nconns = BTMGR_MAX_CONNS;
+	for (i = 0; i < st.nconns; i++)
+		st.conns[i].handle = UINT16_MAX;
+
+	st.ndevices = BTMGR_MAX_DEVICES;
+	for (i = 0; i < st.ndevices; i++) {
+		memset(st.devices[i].name, '"', sizeof(st.devices[i].name) - 1);
+		memset(st.devices[i].alias, '"',
+		    sizeof(st.devices[i].alias) - 1);
+		memset(st.devices[i].type, '"', sizeof(st.devices[i].type) - 1);
+	}
+
+	line = proto_state_event(&st);
+	ok(line != NULL && strlen(line) <= BTMGR_LINE_MAX,
+	    "the largest possible state event fits in a B1.3 line (%zu bytes)",
+	    line == NULL ? 0 : strlen(line));
 	free(line);
 }
 

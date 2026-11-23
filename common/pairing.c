@@ -292,8 +292,8 @@ pairing_complete(const struct btmgr_paths *paths, const struct pair_ops *ops,
 		return (PAIR_ERROR);
 	}
 	if (loaded == STORE_LOAD_SET_ASIDE)
-		set_detail(report, "devices.json was malformed and was moved "
-		    "aside; the pairing itself succeeded");
+		set_detail(report, "devices.json was malformed and a copy was "
+		    "kept aside; the pairing itself succeeded");
 
 	/* Carry the alias across from hosts so both files agree. */
 	{

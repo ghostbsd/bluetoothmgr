@@ -51,6 +51,7 @@ static int	 read_found_device(json_t *obj, struct proto_found_device *out);
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
+static void	 replace_controls(char *text);
 static json_t	*device_json(const struct state_device *device);
 
 /*
@@ -170,6 +171,16 @@ conn_json(const struct btmgr_conn *c)
 	return (o);
 }
 
+/* Each would cost six bytes as \u00XX on the line. */
+static void
+replace_controls(char *text)
+{
+
+	for (; *text != '\0'; text++)
+		if ((unsigned char)*text < 0x20 || *text == 0x7f)
+			*text = '?';
+}
+
 /* B1.4 on every field: devices.json can be edited by hand. */
 static json_t *
 device_json(const struct state_device *device)
@@ -191,6 +202,9 @@ device_json(const struct state_device *device)
 		alias[0] = '\0';
 	if (btmgr_sanitise_utf8(device->type, type, sizeof(type)) != 0)
 		type[0] = '\0';
+	replace_controls(name);
+	replace_controls(alias);
+	replace_controls(type);
 
 	if (set_string(o, "addr", address) != 0 ||
 	    set_string(o, "name", name) != 0 ||
@@ -516,7 +530,7 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 				return (-1);
 			}
 		}
-	    
+
 		value = json_object_get(root, "adapter");
 		if (out->state.adapter_present &&
 		    read_adapter(value, &out->state) != 0) {
@@ -526,8 +540,9 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 
 		out->state.connection_count = (int)n;
 
+		/* An older daemon sends no devices at all. */
 		value = json_object_get(root, "devices");
-		if (!json_is_array(value)) {
+		if (value != NULL && !json_is_array(value)) {
 			json_decref(root);
 			return (-1);
 		}

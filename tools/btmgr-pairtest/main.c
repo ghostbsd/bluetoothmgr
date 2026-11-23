@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <fts.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -487,7 +488,11 @@ test_set_aside(const char *scratch)
 {
 	static const char	 garbage[] = "not json\n";
 	static const char	 second_garbage[] = "also not json\n";
+	static const char	 one_bad_row[] = "{\"version\":1,\"devices\":"
+	    "[{\"addr\":\"nonsense\"},{\"addr\":\"aa:bb:cc:11:22:02\"}]}\n";
 	struct btmgr_paths	 paths, dry;
+	struct stat		 identity;
+	int			 attempt, fd;
 	struct store		*store;
 	char			 bad[PATH_MAX], numbered[PATH_MAX];
 	char			 err[SAFEFILE_ERRLEN];
@@ -519,14 +524,19 @@ test_set_aside(const char *scratch)
 	    store_count(store) == 0, "it loads as an empty store");
 	store_free(store);
 	file_is(bad, garbage, "the bad file is kept as devices.json.bad");
-	ok(access(paths.store, F_OK) != 0, "and devices.json is gone");
+	file_is(paths.store, garbage, "and devices.json stays until replaced");
+
+	(void)snprintf(numbered, sizeof(numbered), "%s%s.1", paths.store,
+	    STORE_BAD_SUFFIX);
+	(void)store_load(&paths, &store);
+	store_free(store);
+	ok(access(numbered, F_OK) != 0,
+	    "loading the same file again keeps no second copy");
 
 	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE,
 	    second_garbage, strlen(second_garbage), err, sizeof(err));
 	(void)store_load(&paths, &store);
 	store_free(store);
-	(void)snprintf(numbered, sizeof(numbered), "%s%s.1", paths.store,
-	    STORE_BAD_SUFFIX);
 	file_is(bad, garbage, "an earlier devices.json.bad is not replaced");
 	file_is(numbered, second_garbage,
 	    "the next one goes to devices.json.bad.1");
@@ -536,6 +546,30 @@ test_set_aside(const char *scratch)
 	loaded = store_load(&paths, &store);
 	ok(loaded == STORE_LOAD_SET_ASIDE,
 	    "an empty devices.json is set aside");
+	store_free(store);
+
+	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE,
+	    one_bad_row, strlen(one_bad_row), err, sizeof(err));
+	loaded = store_load(&paths, &store);
+	ok(loaded == STORE_LOAD_SET_ASIDE && store != NULL &&
+	    store_count(store) == 1,
+	    "an unusable row is copied aside and the good row kept");
+	store_free(store);
+	ok(stat(paths.store, &identity) == 0 && identity.st_nlink == 2,
+	    "with the whole file linked aside");
+
+	for (attempt = 4; attempt <= 105; attempt++) {
+		(void)snprintf(numbered, sizeof(numbered), "%s%s.%d",
+		    paths.store, STORE_BAD_SUFFIX, attempt);
+		fd = open(numbered, O_WRONLY | O_CREAT, BTMGR_MODE_STORE);
+		if (fd >= 0)
+			(void)close(fd);
+	}
+	(void)safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, garbage,
+	    strlen(garbage), err, sizeof(err));
+	loaded = store_load(&paths, &store);
+	ok(loaded == STORE_LOAD_SET_ASIDE,
+	    "numbering goes past devices.json.bad.99");
 	store_free(store);
 
 	/* Root reads any file, so this only means something as a user. */

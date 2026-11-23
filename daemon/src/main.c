@@ -90,6 +90,7 @@
  * compared with INFLIGHT_TIMEOUT_SEC, which only waits on the controller.
  */
 #define	PAIRING_TIMEOUT_SEC	60
+#define	SEEN_MAX		256
 
 /* kqueue returns the pointer we registered, so an address names a source. */
 static int	tag_listen_sock;	/* the IPC listening socket */
@@ -111,6 +112,7 @@ struct parked_pairing {
 	uint16_t		 handle;	/* 0 until the link is up */
 	time_t			 deadline;
 	char			 name[BTMGR_NAME_SIZE];
+	const char		*type;
 };
 
 struct daemon {
@@ -147,7 +149,7 @@ struct daemon {
 	int		 power_polled;
 	int		 details_pending;
 	time_t		 details_until;
-	struct seen_device seen[BTMGR_MAX_SCAN];
+	struct seen_device seen[SEEN_MAX];
 	int		 seen_count;
 	int		 seen_next;
 	int		 devd;
@@ -575,7 +577,7 @@ finish_pairing(struct daemon *d, const bdaddr_t *addr)
 		return;			/* some other device's key */
 
 	r = pairing_complete(&d->paths, &ops, &d->pairing.state,
-	    d->pairing.name, seen_type(d, d->pairing.state.addr),
+	    d->pairing.name, d->pairing.type,
 	    (int64_t)time(NULL), &report);
 
 	memset(&d->pairing, 0, sizeof(d->pairing));
@@ -832,6 +834,7 @@ do_pair(struct daemon *d, struct client *c, const struct proto_cmd *cmd)
 		    sizeof(d->pairing.name));
 	else
 		d->pairing.name[0] = '\0';
+	d->pairing.type = seen_type(d, (const uint8_t *)&cmd->addr);
 
 	/* Step 5. A6.1: only now, with the block on disk and hcsecd reloaded. */
 	if (btmgr_connect_start(d->last.adapter.node, &cmd->addr) < 0) {
@@ -1111,7 +1114,7 @@ load_store(struct daemon *d)
 		    d->paths.store);
 		return;
 	case STORE_LOAD_SET_ASIDE:
-		syslog(LOG_WARNING, "%s was malformed, moved aside",
+		syslog(LOG_WARNING, "%s was malformed, a copy kept aside",
 		    d->paths.store);
 		break;
 	case STORE_LOAD_OK:
@@ -1140,8 +1143,8 @@ remember_seen(struct daemon *d, const bdaddr_t *address,
 	}
 
 	entry = &d->seen[d->seen_next];
-	d->seen_next = (d->seen_next + 1) % BTMGR_MAX_SCAN;
-	if (d->seen_count < BTMGR_MAX_SCAN)
+	d->seen_next = (d->seen_next + 1) % SEEN_MAX;
+	if (d->seen_count < SEEN_MAX)
 		d->seen_count++;
 
 	memcpy(entry->addr, address, BTMGR_ADDR_LEN);

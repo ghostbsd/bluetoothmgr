@@ -132,6 +132,10 @@ store_parse(const char *text, int *malformed, size_t *skipped)
 		return (st);
 
 	root = json_loads(text, 0, &err);
+	if (root == NULL && json_error_code(&err) == json_error_out_of_memory) {
+		store_free(st);
+		return (NULL);
+	}
 	if (root == NULL || !json_is_object(root))
 		goto bad;
 
