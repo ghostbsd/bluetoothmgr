@@ -16,6 +16,7 @@
 #include <stddef.h>
 
 #include "btmgr.h"
+#include "sanitise.h"
 
 /*
  * Only proto_state_event() needs it, and only by pointer, so a frontend
@@ -101,6 +102,16 @@ struct proto_connection {
 	int		master;		/* role "master", otherwise "slave" */
 };
 
+#define	BTMGR_TYPE_NAME_MAX	16
+
+/* One device from a state event's devices array. */
+struct proto_device {
+	bdaddr_t	addr;
+	char		name[BTMGR_NAME_SIZE];
+	char		alias[BTMGR_ALIAS_BUFSZ];
+	char		type[BTMGR_TYPE_NAME_MAX];
+};
+
 struct proto_adapter_state {
 	int	adapter_present;
 	int	powered;
@@ -121,9 +132,11 @@ struct proto_adapter_state {
 	 */
 	int	connection_count;
 	struct proto_connection connections[BTMGR_MAX_CONNS];
-};
 
-#define	BTMGR_TYPE_NAME_MAX	16
+	/* As connections: a longer array is cut at the cap, not refused. */
+	int	device_count;
+	struct proto_device devices[BTMGR_MAX_DEVICES];
+};
 
 /* A device_found event. device_class is low byte first, as HCI sends it. */
 struct proto_found_device {

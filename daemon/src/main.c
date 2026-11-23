@@ -41,6 +41,7 @@
 #include "proto.h"
 #include "session.h"
 #include "state.h"
+#include "storefile.h"
 
 /* After the system headers: it redefines malloc. */
 #include "memcheck.h"	/* IWYU pragma: keep */
@@ -89,12 +90,19 @@
  * compared with INFLIGHT_TIMEOUT_SEC, which only waits on the controller.
  */
 #define	PAIRING_TIMEOUT_SEC	60
+#define	SEEN_MAX		256
 
 /* kqueue returns the pointer we registered, so an address names a source. */
 static int	tag_listen_sock;	/* the IPC listening socket */
 static int	tag_hci;		/* the passive HCI event socket */
 static int	tag_power;		/* the service bluetooth child */
 static int	tag_devd;		/* devd's event socket */
+
+/* A device from one of our scans, so pairing it can record its type. */
+struct seen_device {
+	uint8_t		addr[BTMGR_ADDR_LEN];
+	uint8_t		device_class[NG_HCI_CLASS_SIZE];
+};
 
 /* A6.2 allows one at a time. client may die first, so use client_alive(). */
 struct parked_pairing {
@@ -104,6 +112,7 @@ struct parked_pairing {
 	uint16_t		 handle;	/* 0 until the link is up */
 	time_t			 deadline;
 	char			 name[BTMGR_NAME_SIZE];
+	const char		*type;
 };
 
 struct daemon {
@@ -115,6 +124,7 @@ struct daemon {
 	struct client	*clients;
 	struct state	 last;		/* last snapshot sent to clients */
 	struct adapter_cache adapter_cache;
+	struct store	*store;		/* A4, NULL until loaded */
 	int		 have_last;
 	int		 dirty;
 	struct btmgr_paths paths;	/* where the config files are */
@@ -139,6 +149,9 @@ struct daemon {
 	int		 power_polled;
 	int		 details_pending;
 	time_t		 details_until;
+	struct seen_device seen[SEEN_MAX];
+	int		 seen_count;
+	int		 seen_next;
 	int		 devd;
 	volatile int	 quit;
 };
@@ -179,6 +192,10 @@ static void	expire_power_change(struct daemon *d);
 static int	power_change_running(const struct daemon *d);
 static void	poll_power_child(struct daemon *d);
 static void	apply_detail(struct daemon *d, const struct listen_report *r);
+static void	load_store(struct daemon *d);
+static void	remember_seen(struct daemon *d, const bdaddr_t *address,
+		    const uint8_t *device_class);
+static const char *seen_type(const struct daemon *d, const uint8_t *addr);
 static void	finish_scan_start(struct daemon *d, int status);
 static void	finish_scan_stop(struct daemon *d, int status);
 static void	remember_scan(struct daemon *d, int inquiry_scan,
@@ -560,9 +577,14 @@ finish_pairing(struct daemon *d, const bdaddr_t *addr)
 		return;			/* some other device's key */
 
 	r = pairing_complete(&d->paths, &ops, &d->pairing.state,
-	    d->pairing.name, NULL, (int64_t)time(NULL), &report);
+	    d->pairing.name, d->pairing.type,
+	    (int64_t)time(NULL), &report);
 
 	memset(&d->pairing, 0, sizeof(d->pairing));
+
+	/* pairing_complete() wrote the new device to devices.json. */
+	if (r == PAIR_DONE)
+		load_store(d);
 
 	if (!client_alive(d, c))
 		return;
@@ -650,6 +672,7 @@ on_completion(const struct listen_report *r, void *arg)
 
 		if (!d->scanning)
 			return;
+		remember_seen(d, &r->address, r->device_class);
 
 		line = proto_device_found_event(&r->address, r->device_class,
 		    btmgr_type_name(btmgr_class_type(r->device_class)));
@@ -811,6 +834,9 @@ do_pair(struct daemon *d, struct client *c, const struct proto_cmd *cmd)
 		    sizeof(d->pairing.name));
 	else
 		d->pairing.name[0] = '\0';
+	d->pairing.type = seen_type(d, (const uint8_t *)&cmd->addr);
+	if (d->pairing.type == NULL)
+		d->pairing.type = btmgr_type_name(BTMGR_TYPE_UNKNOWN);
 
 	/* Step 5. A6.1: only now, with the block on disk and hcsecd reloaded. */
 	if (btmgr_connect_start(d->last.adapter.node, &cmd->addr) < 0) {
@@ -1076,6 +1102,60 @@ apply_detail(struct daemon *d, const struct listen_report *r)
 		    sizeof(adapter->devclass));
 
 	d->dirty = 1;
+}
+
+/* Out of memory, the store already loaded is kept. */
+static void
+load_store(struct daemon *d)
+{
+	struct store	*store;
+
+	store = store_load(&d->paths);
+	if (store == NULL)
+		return;
+
+	store_free(d->store);
+	d->store = store;
+	reconcile(d);
+}
+
+/* Full, it overwrites the oldest entry. */
+static void
+remember_seen(struct daemon *d, const bdaddr_t *address,
+    const uint8_t *device_class)
+{
+	struct seen_device	*entry;
+	int			 i;
+
+	for (i = 0; i < d->seen_count; i++) {
+		if (memcmp(d->seen[i].addr, address, BTMGR_ADDR_LEN) == 0) {
+			memcpy(d->seen[i].device_class, device_class,
+			    NG_HCI_CLASS_SIZE);
+			return;
+		}
+	}
+
+	entry = &d->seen[d->seen_next];
+	d->seen_next = (d->seen_next + 1) % SEEN_MAX;
+	if (d->seen_count < SEEN_MAX)
+		d->seen_count++;
+
+	memcpy(entry->addr, address, BTMGR_ADDR_LEN);
+	memcpy(entry->device_class, device_class, NG_HCI_CLASS_SIZE);
+}
+
+/* NULL for a device none of our scans has seen. */
+static const char *
+seen_type(const struct daemon *d, const uint8_t *addr)
+{
+	int	i;
+
+	for (i = 0; i < d->seen_count; i++)
+		if (memcmp(d->seen[i].addr, addr, BTMGR_ADDR_LEN) == 0)
+			return (btmgr_type_name(btmgr_class_type(
+			    d->seen[i].device_class)));
+
+	return (NULL);
 }
 
 /* B4.8. status is the controller's Command_Status, or -1 if none came. */
@@ -1609,6 +1689,7 @@ reconcile(struct daemon *d)
 	char		*line;
 
 	state_snapshot(&now, &d->adapter_cache);
+	state_add_devices(&now, d->store);
 	now.scanning = d->scanning && now.powered;
 
 	/* C3.3: once per power-up, without waiting for the replies. */
@@ -1789,6 +1870,7 @@ main(int argc, char *argv[])
 	syslog(LOG_INFO, "started, socket %s", d.sockpath);
 
 	/* Prime the state before the first client can ask for it. */
+	load_store(&d);
 	reconcile(&d);
 
 	last_tick = now_mono();
@@ -1842,6 +1924,7 @@ main(int argc, char *argv[])
 			if (ev->filter == EVFILT_SIGNAL) {
 				if (ev->ident == SIGHUP) {
 					syslog(LOG_INFO, "reload");
+					load_store(&d);
 					d.adapter_cache.details_read = 0;
 					d.dirty = 1;
 				} else {
@@ -1942,6 +2025,8 @@ main(int argc, char *argv[])
 		close(d.kq);
 
 	pidfile_remove(pfh);
+
+	store_free(d.store);
 
 	syslog(LOG_INFO, "stopped");
 	closelog();

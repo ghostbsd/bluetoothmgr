@@ -23,6 +23,7 @@
 
 #include <jansson.h>
 
+#include "btaddr.h"
 #include "btmgr.h"
 #include "proto.h"
 #include "sanitise.h"
@@ -42,12 +43,17 @@ static int	 read_int(json_t *value, int *out);
 static int	 json_string_is(json_t *value, const char *want);
 static int	 read_adapter(json_t *obj, struct proto_adapter_state *out);
 static int	 read_connection(json_t *obj, struct proto_connection *out);
-static int	 hex_value(char digit);
+static const char *string_without_nul(json_t *value);
+static int	 read_text(json_t *obj, const char *key, char *out,
+		     size_t out_size);
+static int	 read_device(json_t *obj, struct proto_device *out);
 static int	 read_device_class(const char *text, uint8_t *device_class);
 static int	 read_found_device(json_t *obj, struct proto_found_device *out);
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
+static void	 replace_controls(char *text);
+static json_t	*device_json(const struct state_device *device);
 
 /*
  * A name is cosmetic, so A7.1 transliterates it. A PIN is an exact secret and
@@ -166,6 +172,52 @@ conn_json(const struct btmgr_conn *c)
 	return (o);
 }
 
+/* Each would cost six bytes as \u00XX on the line. */
+static void
+replace_controls(char *text)
+{
+
+	for (; *text != '\0'; text++)
+		if ((unsigned char)*text < 0x20 || *text == 0x7f)
+			*text = '?';
+}
+
+/* B1.4 on every field: devices.json can be edited by hand. */
+static json_t *
+device_json(const struct state_device *device)
+{
+	char	 address[BTMGR_ADDR_BUFSZ];
+	char	 name[BTMGR_NAME_SIZE];
+	char	 alias[BTMGR_ALIAS_BUFSZ];
+	char	 type[STATE_TYPE_SIZE];
+	json_t	*o;
+
+	o = json_object();
+	if (o == NULL)
+		return (NULL);
+
+	btmgr_addr_format(device->addr, address, sizeof(address));
+	if (btmgr_sanitise_utf8(device->name, name, sizeof(name)) != 0)
+		name[0] = '\0';
+	if (btmgr_sanitise_utf8(device->alias, alias, sizeof(alias)) != 0)
+		alias[0] = '\0';
+	if (btmgr_sanitise_utf8(device->type, type, sizeof(type)) != 0)
+		type[0] = '\0';
+	replace_controls(name);
+	replace_controls(alias);
+	replace_controls(type);
+
+	if (set_string(o, "addr", address) != 0 ||
+	    set_string(o, "name", name) != 0 ||
+	    set_string(o, "alias", alias) != 0 ||
+	    set_string(o, "type", type) != 0) {
+		json_decref(o);
+		return (NULL);
+	}
+
+	return (o);
+}
+
 /* Length included, so a NUL inside the string cannot truncate the test. */
 static int
 json_string_is(json_t *value, const char *want)
@@ -254,6 +306,49 @@ read_connection(json_t *obj, struct proto_connection *out)
 	return (read_boolean(obj, "encrypted", &out->encrypted));
 }
 
+static const char *
+string_without_nul(json_t *value)
+{
+
+	if (!json_is_string(value) ||
+	    strlen(json_string_value(value)) != json_string_length(value))
+		return (NULL);
+
+	return (json_string_value(value));
+}
+
+static int
+read_text(json_t *obj, const char *key, char *out, size_t out_size)
+{
+	const char	*text = string_without_nul(json_object_get(obj, key));
+
+	if (text == NULL || strlcpy(out, text, out_size) >= out_size)
+		return (-1);
+
+	return (0);
+}
+
+/* Every field is required, as in a connection. */
+static int
+read_device(json_t *obj, struct proto_device *out)
+{
+	const char	*address;
+
+	if (!json_is_object(obj))
+		return (-1);
+
+	address = string_without_nul(json_object_get(obj, "addr"));
+	if (address == NULL || !bt_aton(address, &out->addr))
+		return (-1);
+
+	if (read_text(obj, "name", out->name, sizeof(out->name)) != 0 ||
+	    read_text(obj, "alias", out->alias, sizeof(out->alias)) != 0 ||
+	    read_text(obj, "type", out->type, sizeof(out->type)) != 0)
+		return (-1);
+
+	return (0);
+}
+
 /* A missing or non-boolean key is a malformed message, not a false. */
 static int
 read_boolean(json_t *obj, const char *key, int *out)
@@ -286,20 +381,6 @@ read_int(json_t *value, int *out)
 	return (0);
 }
 
-static int
-hex_value(char digit)
-{
-
-	if (digit >= '0' && digit <= '9')
-		return (digit - '0');
-	if (digit >= 'a' && digit <= 'f')
-		return (digit - 'a' + 10);
-	if (digit >= 'A' && digit <= 'F')
-		return (digit - 'A' + 10);
-
-	return (-1);
-}
-
 /* "28:04:3c" is printed high byte first; HCI order is low byte first. */
 static int
 read_device_class(const char *text, uint8_t *device_class)
@@ -312,8 +393,8 @@ read_device_class(const char *text, uint8_t *device_class)
 
 	for (byte = 0; byte < NG_HCI_CLASS_SIZE; byte++) {
 		position = byte * 3;
-		high = hex_value(text[position]);
-		low = hex_value(text[position + 1]);
+		high = btmgr_hex_digit(text[position]);
+		low = btmgr_hex_digit(text[position + 1]);
 		if (high < 0 || low < 0)
 			return (-1);
 		if (byte < NG_HCI_CLASS_SIZE - 1 && text[position + 2] != ':')
@@ -459,7 +540,7 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 				return (-1);
 			}
 		}
-	    
+
 		value = json_object_get(root, "adapter");
 		if (out->state.adapter_present &&
 		    read_adapter(value, &out->state) != 0) {
@@ -468,6 +549,25 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 		}
 
 		out->state.connection_count = (int)n;
+
+		/* An older daemon sends no devices at all. */
+		value = json_object_get(root, "devices");
+		if (value != NULL && !json_is_array(value)) {
+			json_decref(root);
+			return (-1);
+		}
+		n = json_array_size(value);
+		if (n > BTMGR_MAX_DEVICES)
+			n = BTMGR_MAX_DEVICES;
+		for (i = 0; i < n; i++) {
+			if (read_device(json_array_get(value, i),
+			    &out->state.devices[i]) != 0) {
+				json_decref(root);
+				return (-1);
+			}
+		}
+		out->state.device_count = (int)n;
+
 		out->has_state = 1;
 	}
 
@@ -588,13 +688,7 @@ proto_hello(void)
 	return (render(o));
 }
 
-/*
- * The state event. SPEC.md B5.
- *
- * The devices array is empty in M2 and grows in M3, when the daemon can read
- * hcsecd.conf and merge paired devices with live connections. Until then
- * config_readable tells clients why it is empty.
- */
+/* The state event. SPEC.md B5. devices comes from the A4 store. */
 char *
 proto_state_event(const struct state *st)
 {
@@ -637,6 +731,11 @@ proto_state_event(const struct state *st)
 	if (devices == NULL ||
 	    json_object_set_new(o, "devices", devices) != 0)
 		goto fail;
+	for (i = 0; i < st->ndevices; i++) {
+		one = device_json(&st->devices[i]);
+		if (one == NULL || json_array_append_new(devices, one) != 0)
+			goto fail;
+	}
 
 	return (render(o));
 

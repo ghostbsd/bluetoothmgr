@@ -31,6 +31,8 @@
 #include "pairing.h"
 #include "paths.h"
 #include "safefile.h"
+#include "store.h"
+#include "storefile.h"
 
 /* Must come after the system headers: it redefines malloc and friends. */
 #include "memcheck.h"	/* IWYU pragma: keep */
@@ -469,6 +471,47 @@ test_repair(const char *scratch)
 	free(first);
 }
 
+static void
+test_store_load(const char *scratch)
+{
+	static const char	 bad_name[] = "{\"version\":1,\"devices\":"
+	    "[{\"addr\":\"aa:bb:cc:11:22:02\",\"name\":5}]}\n";
+	static const uint8_t	 address[BTMGR_ADDR_LEN] =
+	    { 0x02, 0x22, 0x11, 0xcc, 0xbb, 0xaa };
+	struct btmgr_paths	 paths;
+	struct store		*store;
+	char			 err[SAFEFILE_ERRLEN];
+
+	printf("\nA4 loading devices.json\n");
+
+	if (seed(scratch, "store-load", &paths) != 0) {
+		ok(0, "the sandbox could be built");
+		return;
+	}
+	(void)unlink(paths.store);
+
+	store = store_load(&paths);
+	ok(store != NULL && store_count(store) == 0,
+	    "before the first pairing the store is empty");
+	store_free(store);
+
+	if (safefile_write(&paths.sf, paths.store, BTMGR_MODE_STORE, bad_name,
+	    strlen(bad_name), err, sizeof(err)) == SAFEFILE_ERROR) {
+		ok(0, "devices.json could be written");
+		return;
+	}
+	store = store_load(&paths);
+	ok(store != NULL && store_has(store, address) &&
+	    store_name(store, address) == NULL,
+	    "a device with a bad name is kept without it");
+	ok(store != NULL &&
+	    store_set(store, address, "Soundbar", NULL, NULL, 0) ==
+	    STORE_CHANGED &&
+	    strcmp(store_name(store, address), "Soundbar") == 0,
+	    "and the next update replaces it");
+	store_free(store);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -501,6 +544,7 @@ main(int argc, char *argv[])
 	test_default_entry(scratch);
 	test_abort(scratch);
 	test_repair(scratch);
+	test_store_load(scratch);
 
 	printf("\n%d checks, %d failures\n", checks, failures);
 

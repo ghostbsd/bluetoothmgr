@@ -15,6 +15,7 @@ MAN=
 SRCS=		main.c \
 		proto.c \
 		state.c \
+		store.c \
 		sanitise.c \
 		btaddr.c \
 		memcheck.c

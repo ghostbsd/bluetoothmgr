@@ -213,7 +213,6 @@ test_no_secrets(void)
 	store_free(st);
 }
 
-/* A4.3. A bad file must cost the cache, never the daemon. */
 static void
 test_malformed(void)
 {
@@ -221,7 +220,7 @@ test_malformed(void)
 	int		 bad;
 	size_t		 skip;
 
-	printf("\nA4.3 a parse failure is not fatal\n");
+	printf("\nA4.3 a file that does not parse loads as empty\n");
 
 	st = store_parse("this is not json at all", &bad, NULL);
 	ok(st != NULL && bad == 1 && store_count(st) == 0,
@@ -240,12 +239,8 @@ test_malformed(void)
 	ok(st != NULL && bad == 1, "a non-integer version is malformed");
 	store_free(st);
 
-	/*
-	 * A newer version is someone else's future format, not garbage, which
-	 * is why A4.3 says rename aside rather than delete.
-	 */
 	st = store_parse("{\"version\":99,\"devices\":[]}", &bad, NULL);
-	ok(st != NULL && bad == 1, "a newer version is refused, not rewritten");
+	ok(st != NULL && bad == 1, "a newer version is malformed");
 	store_free(st);
 
 	st = store_parse("{\"version\":1,\"devices\":{}}", &bad, NULL);

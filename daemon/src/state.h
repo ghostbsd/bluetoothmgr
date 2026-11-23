@@ -8,6 +8,18 @@
 #define	BTMGRD_STATE_H_
 
 #include "btmgr.h"
+#include "sanitise.h"
+#include "store.h"
+
+#define	STATE_TYPE_SIZE		16
+
+/* One device from the A4 store, as B5's devices array reports it. */
+struct state_device {
+	uint8_t			addr[BTMGR_ADDR_LEN];
+	char			name[BTMGR_NAME_SIZE];
+	char			alias[BTMGR_ALIAS_BUFSZ];
+	char			type[STATE_TYPE_SIZE];
+};
 
 /*
  * One complete snapshot. Small enough to copy by value, which is the whole
@@ -32,6 +44,9 @@ struct state {
 
 	struct btmgr_conn	conns[BTMGR_MAX_CONNS];
 	int			nconns;
+
+	struct state_device	devices[BTMGR_MAX_DEVICES];
+	int			ndevices;
 };
 
 #define	USB_LOCATION_SIZE	256
@@ -50,6 +65,9 @@ struct adapter_cache {
  * no adapter is an ordinary state, so this always leaves *out usable.
  */
 void	state_snapshot(struct state *out, struct adapter_cache *cache);
+
+/* Fill out->devices from the A4 store. A NULL store gives none. */
+void	state_add_devices(struct state *out, const struct store *store);
 
 /* Do two snapshots describe the same world? Non-zero if identical. */
 int	state_equal(const struct state *a, const struct state *b);
