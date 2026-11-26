@@ -12,7 +12,6 @@
 
 #include <errno.h>
 #include <signal.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
@@ -22,145 +21,90 @@
 /* Must come after the system headers: it redefines malloc and friends. */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
-static struct kinfo_proc	*read_proc_table(size_t *nprocs);
+static struct kinfo_proc	*read_proc_table(size_t *process_count);
+static int			 each_hcsecd(const struct hcsecd_ctl *control,
+				     int signal_number);
 
-/*
- * Snapshot the process table. The two-call sysctl idiom asks for the size and
- * then for the data, and the table can grow in between, so ask for extra room
- * and retry on ENOMEM rather than trusting the first answer.
- *
- * Returns a malloc'd array the caller frees, with *nprocs set.
- */
+/* A malloc'd snapshot of the process table, with *process_count set. */
 static struct kinfo_proc *
-read_proc_table(size_t *nprocs)
+read_proc_table(size_t *process_count)
 {
-	struct kinfo_proc	*procs;
-	size_t			 len;
-	int			 mib[3];
-	int			 tries;
+	struct kinfo_proc	*processes;
+	size_t			 table_size = 0;
+	int			 query[3] =
+	    { CTL_KERN, KERN_PROC, KERN_PROC_PROC };
 
-	mib[0] = CTL_KERN;
-	mib[1] = KERN_PROC;
-	mib[2] = KERN_PROC_PROC;
+	if (sysctl(query, 3, NULL, &table_size, NULL, 0) < 0)
+		return (NULL);
 
-	for (tries = 0; tries < 3; tries++) {
-		len = 0;
-		if (sysctl(mib, 3, NULL, &len, NULL, 0) < 0)
-			return (NULL);
-		if (len == 0 || len > SIZE_MAX / 2) {
-			errno = ENOMEM;
-			return (NULL);
-		}
+	/* Room for processes that start between the two calls. */
+	table_size += table_size / 8 + sizeof(*processes) * 8;
 
-		/* Room for processes that start between the two calls. */
-		len += len / 8 + sizeof(*procs) * 8;
+	processes = malloc(table_size);
+	if (processes == NULL)
+		return (NULL);
 
-		procs = malloc(len);
-		if (procs == NULL)
-			return (NULL);
-
-		if (sysctl(mib, 3, procs, &len, NULL, 0) == 0) {
-			*nprocs = len / sizeof(*procs);
-			return (procs);
-		}
-
-		free(procs);
-		if (errno != ENOMEM)
-			return (NULL);
+	if (sysctl(query, 3, processes, &table_size, NULL, 0) < 0) {
+		free(processes);
+		return (NULL);
 	}
 
-	errno = ENOMEM;
+	*process_count = table_size / sizeof(*processes);
 
-	return (NULL);
+	return (processes);
+}
+
+/* Send signal_number to every running hcsecd, or count them for 0. */
+static int
+each_hcsecd(const struct hcsecd_ctl *control, int signal_number)
+{
+	struct kinfo_proc	*processes, *process;
+	size_t			 process_count, index;
+	int			 matched = 0;
+
+	processes = read_proc_table(&process_count);
+	if (processes == NULL)
+		return (-1);
+
+	for (index = 0; index < process_count; index++) {
+		process = &processes[index];
+
+		/* A8.1.3: kill(2) reads pid 0 as our whole process group. */
+		if (process->ki_stat == SZOMB || process->ki_pid <= 1 ||
+		    process->ki_uid != control->uid ||
+		    strncmp(process->ki_comm, control->procname,
+		    sizeof(process->ki_comm)) != 0)
+			continue;
+
+		if (signal_number != 0 &&
+		    kill(process->ki_pid, signal_number) != 0) {
+			syslog(LOG_ERR, "hcsecd reload: SIGHUP pid %d: %m",
+			    (int)process->ki_pid);
+			continue;
+		}
+		matched++;
+	}
+
+	free(processes);
+
+	return (matched);
 }
 
 int
-hcsecd_ctl_init(struct hcsecd_ctl *ctl, const char *procname, uid_t uid,
+hcsecd_ctl_init(struct hcsecd_ctl *control, const char *procname, uid_t uid,
     int dry_run)
 {
 
-	if (ctl == NULL) {
-		errno = EINVAL;
-		return (-1);
-	}
-
-	memset(ctl, 0, sizeof(*ctl));
-	ctl->uid = uid;
-	ctl->dry_run = dry_run;
+	memset(control, 0, sizeof(*control));
+	control->uid = uid;
+	control->dry_run = dry_run;
 
 	if (procname == NULL)
 		procname = HCSECD_PROCNAME;
 
-	/*
-	 * An empty name would match every process whose ki_comm is empty, so
-	 * refuse it rather than hand a wildcard to kill().
-	 */
-	if (procname[0] == '\0') {
-		errno = EINVAL;
-		return (-1);
-	}
-
-	if (strlcpy(ctl->procname, procname, sizeof(ctl->procname)) >=
-	    sizeof(ctl->procname)) {
+	if (strlcpy(control->procname, procname, sizeof(control->procname)) >=
+	    sizeof(control->procname)) {
 		errno = ENAMETOOLONG;
-		return (-1);
-	}
-
-	return (0);
-}
-
-int
-hcsecd_ctl_find(const struct hcsecd_ctl *ctl, pid_t *pids, size_t maxpids,
-    size_t *found)
-{
-	struct kinfo_proc	*procs;
-	size_t			 nprocs, i, n;
-
-	if (ctl == NULL || pids == NULL || maxpids == 0 || found == NULL) {
-		errno = EINVAL;
-		return (-1);
-	}
-
-	*found = 0;
-
-	procs = read_proc_table(&nprocs);
-	if (procs == NULL)
-		return (-1);
-
-	n = 0;
-	for (i = 0; i < nprocs && n < maxpids; i++) {
-		/*
-		 * A zombie keeps its name but cannot act on a signal, so
-		 * counting one as "hcsecd is running" would park a pairing
-		 * against a process that has already gone.
-		 */
-		if (procs[i].ki_stat == SZOMB)
-			continue;
-
-		/*
-		 * kill(2) reads 0 as "my whole process group" and a negative
-		 * pid as a process group too, so a pid that could mean either
-		 * must never reach it. 1 is init.
-		 */
-		if (procs[i].ki_pid <= 1)
-			continue;
-
-		/* A real hcsecd is root: the raw HCI socket is privileged. */
-		if (procs[i].ki_uid != ctl->uid)
-			continue;
-
-		if (strncmp(procs[i].ki_comm, ctl->procname,
-		    sizeof(procs[i].ki_comm)) != 0)
-			continue;
-
-		pids[n++] = procs[i].ki_pid;
-	}
-
-	free(procs);
-
-	*found = n;
-	if (n == 0) {
-		errno = ESRCH;
 		return (-1);
 	}
 
@@ -170,38 +114,18 @@ hcsecd_ctl_find(const struct hcsecd_ctl *ctl, pid_t *pids, size_t maxpids,
 int
 hcsecd_ctl_reload(void *context)
 {
-	struct hcsecd_ctl	*ctl = context;
-	pid_t			 pids[HCSECD_MAX_PIDS];
-	size_t			 found, i, sent;
+	struct hcsecd_ctl	*control = context;
 
-	if (hcsecd_ctl_find(ctl, pids, HCSECD_MAX_PIDS, &found) != 0) {
-		syslog(LOG_ERR, "hcsecd reload: no running %s: %m",
-		    ctl->procname);
+	/* A dry run still looks, so it fails the same way with no hcsecd. */
+	if (each_hcsecd(control, control->dry_run ? 0 : SIGHUP) <= 0) {
+		syslog(LOG_ERR, "hcsecd reload: no running %s was signalled",
+		    control->procname);
 		return (-1);
 	}
 
-	if (found > 1)
-		syslog(LOG_WARNING, "hcsecd reload: %zu processes named %s, "
-		    "signalling all of them", found, ctl->procname);
-
-	/* The lookup is a read, so it happens even in a dry run. The signal. */
-	if (ctl->dry_run) {
-		syslog(LOG_INFO, "dry run: would SIGHUP %s, pid %d",
-		    ctl->procname, (int)pids[0]);
-		return (0);
-	}
-
-	sent = 0;
-	for (i = 0; i < found; i++) {
-		if (kill(pids[i], SIGHUP) == 0)
-			sent++;
-		else
-			syslog(LOG_ERR, "hcsecd reload: SIGHUP pid %d: %m",
-			    (int)pids[i]);
-	}
-
-	if (sent == 0)
-		return (-1);
+	if (control->dry_run)
+		syslog(LOG_INFO, "dry run: would SIGHUP %s",
+		    control->procname);
 
 	return (0);
 }
@@ -209,8 +133,6 @@ hcsecd_ctl_reload(void *context)
 int
 hcsecd_ctl_running(void *context)
 {
-	pid_t	 pids[HCSECD_MAX_PIDS];
-	size_t	 found;
 
-	return (hcsecd_ctl_find(context, pids, HCSECD_MAX_PIDS, &found) == 0);
+	return (each_hcsecd(context, 0) > 0);
 }

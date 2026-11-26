@@ -14,41 +14,24 @@
 #include "paths.h"
 #include "safefile.h"
 
-static int	 join(char *out, size_t outlen, const char *root,
+static int	 join(char *path, size_t path_size, const char *root,
 		     const char *tail);
 static int	 mkpath(const char *path, mode_t mode);
 static int	 mkparent(const char *file, mode_t mode);
 
-/*
- * root + tail, or just tail when root is NULL. A trailing slash on root is
- * tolerated so that "/tmp/x" and "/tmp/x/" behave the same.
- */
+/* root + tail. Trailing slashes go, so a root of "/" is no root at all. */
 static int
-join(char *out, size_t outlen, const char *root, const char *tail)
+join(char *path, size_t path_size, const char *root, const char *tail)
 {
-	int	 n;
+	size_t	 root_length = root == NULL ? 0 : strlen(root);
+	int	 written;
 
-	{
-		size_t	 rootlen = root == NULL ? 0 : strlen(root);
+	while (root_length > 0 && root[root_length - 1] == '/')
+		root_length--;
 
-		/* Trailing slashes are noise: "/tmp/x", "/tmp/x/" and
-		 * "/tmp/x///" all name the same directory. */
-		while (rootlen > 0 && root[rootlen - 1] == '/')
-			rootlen--;
-
-		/*
-		 * Nothing left means no root, which covers NULL, "" and "/".
-		 * A root of "/" is the real system root, so it must produce
-		 * "/etc/bluetooth/hosts" and not "//etc/bluetooth/hosts".
-		 */
-		if (rootlen == 0)
-			n = snprintf(out, outlen, "%s", tail);
-		else
-			n = snprintf(out, outlen, "%.*s%s", (int)rootlen,
-			    root, tail);
-	}
-
-	if (n < 0 || (size_t)n >= outlen) {
+	written = snprintf(path, path_size, "%.*s%s", (int)root_length,
+	    root_length == 0 ? "" : root, tail);
+	if (written < 0 || (size_t)written >= path_size) {
 		errno = ENAMETOOLONG;
 		return (-1);
 	}

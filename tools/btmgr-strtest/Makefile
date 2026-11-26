@@ -26,7 +26,6 @@ CFLAGS+=	${BTMGR_CFLAGS}
 LDADD=		-L/usr/local/lib -ljansson
 
 # A test harness, not something to install.
-BINDIR?=	/usr/local/bin
-NO_INSTALL=
+INTERNALPROG=
 
 .include <bsd.prog.mk>

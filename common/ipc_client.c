@@ -9,7 +9,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -45,51 +44,24 @@ struct btmgr_ipc {
 };
 
 static time_t			 now_mono(void);
-static int			 await_connect(int fd);
-static struct pending_request	*claim_slot(struct btmgr_ipc *conn);
+static struct pending_request	*claim_slot(struct btmgr_ipc *connection);
 static void			 fail_slot(struct pending_request *slot,
 				     const char *code, const char *detail);
-static void			 fail_all_pending(struct btmgr_ipc *conn);
-static void			 deliver_reply(struct btmgr_ipc *conn,
+static void			 fail_all_pending(struct btmgr_ipc *connection);
+static void			 deliver_reply(struct btmgr_ipc *connection,
 				     const struct proto_msg *reply);
 
-/*
- * A free slot with an id no other slot is using. The counter alone is not
- * enough: it wraps, and a long-lived frontend could reach an id still
- * outstanding, which B3.1 forbids.
- */
 static struct pending_request *
-claim_slot(struct btmgr_ipc *conn)
+claim_slot(struct btmgr_ipc *connection)
 {
-	struct pending_request	*slot = NULL;
-	int			 candidate, taken, i, tries;
+	int	 index;
 
-	for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
-		if (!conn->pending[i].in_use) {
-			slot = &conn->pending[i];
-			break;
-		}
-	}
-	if (slot == NULL) {
-		errno = EBUSY;
-		return (NULL);
-	}
-
-	for (tries = 0; tries <= BTMGR_MAX_PENDING_REQUESTS; tries++) {
-		/* Keep it positive: the parser refuses a negative id. */
-		candidate = (int)(conn->next_request_id++ & 0x7fffffff);
-
-		taken = 0;
-		for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
-			if (conn->pending[i].in_use &&
-			    conn->pending[i].request_id == candidate) {
-				taken = 1;
-				break;
-			}
-		}
-		if (!taken) {
-			slot->request_id = candidate;
-			return (slot);
+	for (index = 0; index < BTMGR_MAX_PENDING_REQUESTS; index++) {
+		if (!connection->pending[index].in_use) {
+			/* Positive: the parser refuses a negative id. */
+			connection->pending[index].request_id =
+			    (int)(connection->next_request_id++ & 0x7fffffff);
+			return (&connection->pending[index]);
 		}
 	}
 
@@ -102,12 +74,11 @@ claim_slot(struct btmgr_ipc *conn)
 static time_t
 now_mono(void)
 {
-	struct timespec	 ts;
+	struct timespec	 now;
 
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-		return (time(NULL));
+	(void)clock_gettime(CLOCK_MONOTONIC, &now);
 
-	return (ts.tv_sec);
+	return (now.tv_sec);
 }
 
 /* Release the slot, then report the failure to whoever registered it. */
@@ -136,36 +107,36 @@ fail_slot(struct pending_request *slot, const char *code, const char *detail)
 }
 
 static void
-fail_all_pending(struct btmgr_ipc *conn)
+fail_all_pending(struct btmgr_ipc *connection)
 {
 	int	 i;
 
 	for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
-		if (conn->pending[i].in_use)
-			fail_slot(&conn->pending[i], "io_error",
+		if (connection->pending[i].in_use)
+			fail_slot(&connection->pending[i], "io_error",
 			    "the daemon connection closed");
 	}
 }
 
 void
-btmgr_ipc_set_request_timeout(struct btmgr_ipc *conn, int seconds)
+btmgr_ipc_set_request_timeout(struct btmgr_ipc *connection, int seconds)
 {
-	if (conn != NULL && seconds > 0)
-		conn->request_timeout = seconds;
+	if (connection!= NULL && seconds > 0)
+		connection->request_timeout = seconds;
 }
 
 int
-btmgr_ipc_expire_requests(struct btmgr_ipc *conn)
+btmgr_ipc_expire_requests(struct btmgr_ipc *connection)
 {
 	time_t	 now;
 	int	 expired = 0, i;
 
-	if (conn == NULL)
+	if (connection== NULL)
 		return (0);
 
 	now = now_mono();
 	for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
-		struct pending_request	*slot = &conn->pending[i];
+		struct pending_request	*slot = &connection->pending[i];
 
 		if (!slot->in_use || slot->deadline > now)
 			continue;
@@ -178,12 +149,12 @@ btmgr_ipc_expire_requests(struct btmgr_ipc *conn)
 }
 
 static void
-deliver_reply(struct btmgr_ipc *conn, const struct proto_msg *reply)
+deliver_reply(struct btmgr_ipc *connection, const struct proto_msg *reply)
 {
 	int	 i;
 
 	for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
-		struct pending_request	*slot = &conn->pending[i];
+		struct pending_request	*slot = &connection->pending[i];
 		btmgr_reply_fn		 callback;
 		void			*user_data;
 
@@ -203,44 +174,6 @@ deliver_reply(struct btmgr_ipc *conn, const struct proto_msg *reply)
 	/* A reply to nothing: a late duplicate, or a daemon bug. Ignore it. */
 }
 
-/*
- * Wait out an in-progress connect, up to BTMGR_CONNECT_TIMEOUT_MS. Returns 0
- * once writable and error-free, -1 with errno set otherwise.
- */
-static int
-await_connect(int fd)
-{
-	struct pollfd	 pfd;
-	socklen_t	 len;
-	int		 err, ready;
-
-	pfd.fd = fd;
-	pfd.events = POLLOUT;
-	pfd.revents = 0;
-
-	do {
-		ready = poll(&pfd, 1, BTMGR_CONNECT_TIMEOUT_MS);
-	} while (ready < 0 && errno == EINTR);
-
-	if (ready == 0) {
-		errno = ETIMEDOUT;
-		return (-1);
-	}
-	if (ready < 0)
-		return (-1);
-
-	/* Writable does not mean connected: the error lands in SO_ERROR. */
-	len = sizeof(err);
-	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0)
-		return (-1);
-	if (err != 0) {
-		errno = err;
-		return (-1);
-	}
-
-	return (0);
-}
-
 const char *
 btmgr_ipc_default_path(void)
 {
@@ -258,151 +191,121 @@ btmgr_ipc_default_path(void)
 struct btmgr_ipc *
 btmgr_ipc_open(const char *path)
 {
-	struct btmgr_ipc	*conn;
-	struct sockaddr_un	 sa;
-	int			 fd, saved;
+	struct btmgr_ipc	*connection;
+	struct sockaddr_un	 address;
+	int			 socket_fd = -1, enabled = 1, saved_errno;
 
 	if (path == NULL)
 		path = btmgr_ipc_default_path();
 
-	if (strlen(path) >= sizeof(sa.sun_path)) {
+	if (strlen(path) >= sizeof(address.sun_path)) {
 		errno = ENAMETOOLONG;
 		return (NULL);
 	}
 
-	conn = calloc(1, sizeof(*conn));
-	if (conn == NULL)
+	connection= calloc(1, sizeof(*connection));
+	if (connection== NULL)
 		return (NULL);
 
 	/* A frontend that execs anything must not leak the daemon channel. */
-	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-	if (fd < 0) {
-		saved = errno;
-		free(conn);
-		errno = saved;
-		return (NULL);
-	}
+	socket_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (socket_fd < 0)
+		goto fail;
 
-	/*
-	 * Without this, writing to a daemon that has exited kills the whole
-	 * frontend with SIGPIPE. The daemon ignores SIGPIPE process-wide, but
-	 * a library cannot assume its caller did, and a panel applet dying
-	 * because bluetoothmgrd restarted is not acceptable. Set on the socket
-	 * rather than via MSG_NOSIGNAL so linebuf.c stays fd-generic.
-	 */
-	{
-		int	on = 1;
+	/* A daemon restart must not kill the frontend with SIGPIPE. */
+	if (setsockopt(socket_fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled,
+	    sizeof(enabled)) != 0)
+		goto fail;
 
-		if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on,
-		    sizeof(on)) != 0) {
-			saved = errno;
-			(void)close(fd);
-			free(conn);
-			errno = saved;
-			return (NULL);
-		}
-	}
+	memset(&address, 0, sizeof(address));
+	address.sun_family = AF_UNIX;
+	strlcpy(address.sun_path, path, sizeof(address.sun_path));
 
-	memset(&sa, 0, sizeof(sa));
-	sa.sun_family = AF_UNIX;
-	strlcpy(sa.sun_path, path, sizeof(sa.sun_path));
+	/* An AF_UNIX connect never waits, so it is done before O_NONBLOCK. */
+	if (connect(socket_fd, (struct sockaddr *)&address,
+	    sizeof(address)) != 0 ||
+	    fcntl(socket_fd, F_SETFL, O_NONBLOCK) != 0)
+		goto fail;
 
-	if (fcntl(fd, F_SETFL, O_NONBLOCK) != 0) {
-		saved = errno;
-		(void)close(fd);
-		free(conn);
-		errno = saved;
-		return (NULL);
-	}
+	connection->fd = socket_fd;
+	connection->request_timeout = BTMGR_REQUEST_TIMEOUT_SEC;
+	linebuf_init(&connection->buf);
 
-	/*
-	 * An AF_UNIX connect either completes in the kernel or fails at once,
-	 * even against a full accept queue, which refuses rather than waits.
-	 * EINPROGRESS is therefore not reached here, but the wait is bounded
-	 * anyway so that a frontend's startup can never hang on it.
-	 */
-	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-		if (errno != EINPROGRESS ||
-		    await_connect(fd) != 0) {
-			saved = errno;
-			(void)close(fd);
-			free(conn);
-			errno = saved;
-			return (NULL);
-		}
-	}
+	return (connection);
 
-	conn->fd = fd;
-	conn->request_timeout = BTMGR_REQUEST_TIMEOUT_SEC;
-	linebuf_init(&conn->buf);
-
-	return (conn);
+fail:
+	saved_errno = errno;
+	if (socket_fd >= 0)
+		(void)close(socket_fd);
+	free(connection);
+	errno = saved_errno;
+	return (NULL);
 }
 
 void
-btmgr_ipc_close(struct btmgr_ipc *conn)
+btmgr_ipc_close(struct btmgr_ipc *connection)
 {
 
-	if (conn == NULL)
+	if (connection== NULL)
 		return;
 
-	linebuf_free(&conn->buf);
-	if (conn->fd >= 0)
-		(void)close(conn->fd);
-	free(conn);
+	linebuf_free(&connection->buf);
+	if (connection->fd >= 0)
+		(void)close(connection->fd);
+	free(connection);
 }
 
 int
-btmgr_ipc_fd(const struct btmgr_ipc *conn)
+btmgr_ipc_fd(const struct btmgr_ipc *connection)
 {
 
-	return (conn->fd);
+	return (connection->fd);
 }
 
 int
-btmgr_ipc_has_unwritten(const struct btmgr_ipc *conn)
+btmgr_ipc_has_unwritten(const struct btmgr_ipc *connection)
 {
 
-	return (conn->buf.has_unwritten);
+	return (connection->buf.has_unwritten);
 }
 
 int
-btmgr_ipc_send(struct btmgr_ipc *conn, const char *line)
+btmgr_ipc_send(struct btmgr_ipc *connection, const char *line)
 {
 
-	return (linebuf_send(&conn->buf, conn->fd, line));
+	return (linebuf_send(&connection->buf, connection->fd, line));
 }
 
 int
-btmgr_ipc_flush(struct btmgr_ipc *conn)
+btmgr_ipc_flush(struct btmgr_ipc *connection)
 {
 
-	return (linebuf_flush(&conn->buf, conn->fd));
+	return (linebuf_flush(&connection->buf, connection->fd));
 }
 
 int
-btmgr_ipc_fill(struct btmgr_ipc *conn)
+btmgr_ipc_fill(struct btmgr_ipc *connection)
 {
 
-	return (linebuf_fill(&conn->buf, conn->fd));
+	return (linebuf_fill(&connection->buf, connection->fd));
 }
 
 int
-btmgr_ipc_next_line(struct btmgr_ipc *conn, char **line, size_t *len)
+btmgr_ipc_next_line(struct btmgr_ipc *connection, char **line, size_t *len)
 {
 
-	return (linebuf_next_line(&conn->buf, line, len));
+	return (linebuf_next_line(&connection->buf, line, len));
 }
 
 int
-btmgr_ipc_request(struct btmgr_ipc *conn, struct proto_cmd *cmd,
+btmgr_ipc_request(struct btmgr_ipc *connection, struct proto_cmd *cmd,
     btmgr_reply_fn on_reply, void *user_data)
 {
 	struct pending_request	*slot;
 	char			*line;
 	int			 saved;
 
-	if (conn == NULL || cmd == NULL) {
+	if (connection== NULL || cmd == NULL) {
 		errno = EINVAL;
 		return (-1);
 	}
@@ -411,13 +314,13 @@ btmgr_ipc_request(struct btmgr_ipc *conn, struct proto_cmd *cmd,
 	 * B2.1 again. Sending before the handshake would hand a PIN to a
 	 * daemon whose protocol we have not agreed on.
 	 */
-	if (conn->handshake != HANDSHAKE_AGREED) {
-		errno = conn->handshake == HANDSHAKE_REFUSED ?
+	if (connection->handshake != HANDSHAKE_AGREED) {
+		errno = connection->handshake == HANDSHAKE_REFUSED ?
 		    EPROTONOSUPPORT : ENOTCONN;
 		return (-1);
 	}
 
-	slot = claim_slot(conn);
+	slot = claim_slot(connection);
 	if (slot == NULL)
 		return (-1);
 
@@ -437,9 +340,9 @@ btmgr_ipc_request(struct btmgr_ipc *conn, struct proto_cmd *cmd,
 	slot->in_use = 1;
 	slot->on_reply = on_reply;
 	slot->user_data = user_data;
-	slot->deadline = now_mono() + conn->request_timeout;
+	slot->deadline = now_mono() + connection->request_timeout;
 
-	if (btmgr_ipc_send(conn, line) != 0) {
+	if (btmgr_ipc_send(connection, line) != 0) {
 		saved = errno;
 		free(line);
 
@@ -449,7 +352,7 @@ btmgr_ipc_request(struct btmgr_ipc *conn, struct proto_cmd *cmd,
 		 * waiting for a reply that cannot come.
 		 */
 		memset(slot, 0, sizeof(*slot));
-		fail_all_pending(conn);
+		fail_all_pending(connection);
 
 		errno = saved;
 		return (-1);
@@ -461,7 +364,7 @@ btmgr_ipc_request(struct btmgr_ipc *conn, struct proto_cmd *cmd,
 }
 
 int
-btmgr_ipc_dispatch(struct btmgr_ipc *conn, btmgr_event_fn on_event,
+btmgr_ipc_dispatch(struct btmgr_ipc *connection, btmgr_event_fn on_event,
     void *user_data)
 {
 	struct proto_msg	 msg;
@@ -469,21 +372,21 @@ btmgr_ipc_dispatch(struct btmgr_ipc *conn, btmgr_event_fn on_event,
 	size_t			 len;
 	int			 filled, saved;
 
-	if (conn == NULL) {
+	if (connection== NULL) {
 		errno = EINVAL;
 		return (-1);
 	}
 
-	(void)btmgr_ipc_expire_requests(conn);
+	(void)btmgr_ipc_expire_requests(connection);
 
-	filled = btmgr_ipc_fill(conn);
+	filled = btmgr_ipc_fill(connection);
 	saved = errno;
 
 	/*
 	 * Drain what did arrive before reporting the close. A daemon that
 	 * exits right after answering still gets its reply delivered.
 	 */
-	while (btmgr_ipc_next_line(conn, &line, &len) == 1) {
+	while (btmgr_ipc_next_line(connection, &line, &len) == 1) {
 		/*
 		 * A line that does not parse breaks B1.2, and the reply it may
 		 * have been has now been consumed. Skipping it would leave that
@@ -491,7 +394,7 @@ btmgr_ipc_dispatch(struct btmgr_ipc *conn, btmgr_event_fn on_event,
 		 * event still decodes, so this really is malformed.
 		 */
 		if (proto_parse_msg(line, len, &msg) != 0) {
-			fail_all_pending(conn);
+			fail_all_pending(connection);
 			errno = EPROTO;
 			return (-1);
 		}
@@ -505,25 +408,25 @@ btmgr_ipc_dispatch(struct btmgr_ipc *conn, btmgr_event_fn on_event,
 		    strcmp(msg.event_name, "hello") == 0) {
 			if (!msg.has_proto_version ||
 			    msg.proto_version != BTMGR_PROTO_VERSION)
-				conn->handshake = HANDSHAKE_REFUSED;
+				connection->handshake = HANDSHAKE_REFUSED;
 			else
-				conn->handshake = HANDSHAKE_AGREED;
+				connection->handshake = HANDSHAKE_AGREED;
 		}
 
 		if (msg.kind == PROTO_MSG_REPLY)
-			deliver_reply(conn, &msg);
+			deliver_reply(connection, &msg);
 		else if (on_event != NULL)
 			on_event(&msg, user_data);
 
-		if (conn->handshake == HANDSHAKE_REFUSED) {
-			fail_all_pending(conn);
+		if (connection->handshake == HANDSHAKE_REFUSED) {
+			fail_all_pending(connection);
 			errno = EPROTONOSUPPORT;
 			return (-1);
 		}
 	}
 
 	if (filled != 0) {
-		fail_all_pending(conn);
+		fail_all_pending(connection);
 		errno = saved;
 		return (-1);
 	}
@@ -532,12 +435,12 @@ btmgr_ipc_dispatch(struct btmgr_ipc *conn, btmgr_event_fn on_event,
 }
 
 int
-btmgr_ipc_pending_count(const struct btmgr_ipc *conn)
+btmgr_ipc_pending_count(const struct btmgr_ipc *connection)
 {
 	int	 count = 0, i;
 
 	for (i = 0; i < BTMGR_MAX_PENDING_REQUESTS; i++) {
-		if (conn->pending[i].in_use)
+		if (connection->pending[i].in_use)
 			count++;
 	}
 
@@ -545,7 +448,7 @@ btmgr_ipc_pending_count(const struct btmgr_ipc *conn)
 }
 
 int
-btmgr_ipc_is_ready(const struct btmgr_ipc *conn)
+btmgr_ipc_is_ready(const struct btmgr_ipc *connection)
 {
-	return (conn != NULL && conn->handshake == HANDSHAKE_AGREED);
+	return (connection!= NULL && connection->handshake == HANDSHAKE_AGREED);
 }

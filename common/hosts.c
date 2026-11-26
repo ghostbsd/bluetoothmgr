@@ -51,7 +51,6 @@ struct hosts_db {
 	int		 dirty;
 };
 
-static char	*dupn(const char *s, size_t n);
 static int	 split_record(const char *raw, struct line *out);
 static struct line *push_line(struct hosts_db *db);
 static struct line *find_addr(const struct hosts_db *db, const uint8_t *addr);
@@ -59,26 +58,6 @@ static int	 alias_taken(const struct hosts_db *db, const char *alias,
 		     const uint8_t *except);
 static int	 is_marker(const char *raw);
 static void	 free_line(struct line *l);
-
-/*
- * strndup() with malloc(), so that memcheck.h sees it. memcheck intercepts
- * malloc and strdup but not strndup, and an allocation it cannot see is an
- * allocation whose leak it cannot report.
- */
-static char *
-dupn(const char *s, size_t n)
-{
-	char	*p;
-
-	p = malloc(n + 1);
-	if (p == NULL)
-		return (NULL);
-
-	memcpy(p, s, n);
-	p[n] = '\0';
-
-	return (p);
-}
 
 /* Is this line our ownership marker? Leading whitespace is tolerated. */
 static int
@@ -132,7 +111,7 @@ split_record(const char *raw, struct line *out)
 	if (alias_len == 0)
 		return (-1);	/* an address with no name is not a record */
 
-	out->alias = dupn(alias_start, alias_len);
+	out->alias = strndup(alias_start, alias_len);
 	if (out->alias == NULL)
 		return (-1);
 
@@ -206,7 +185,7 @@ hosts_parse(const char *text)
 			return (NULL);
 		}
 
-		l->raw = nl == NULL ? strdup(p) : dupn(p, (size_t)(nl - p));
+		l->raw = nl == NULL ? strdup(p) : strndup(p,(size_t)(nl - p));
 		if (l->raw == NULL) {
 			hosts_free(db);
 			return (NULL);

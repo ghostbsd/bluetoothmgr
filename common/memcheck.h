@@ -35,6 +35,8 @@ void	*btmgr_mc_malloc(size_t, const char *, int);
 void	*btmgr_mc_calloc(size_t, size_t, const char *, int);
 void	*btmgr_mc_realloc(void *, size_t, const char *, int);
 char	*btmgr_mc_strdup(const char *, const char *, int);
+char	*btmgr_mc_strndup(const char *text, size_t max_length,
+	    const char *file, int line);
 void	 btmgr_mc_free(void *, const char *, int);
 
 /*
@@ -48,6 +50,8 @@ int	 btmgr_mc_report(void);
 #define	calloc(a, b)	btmgr_mc_calloc((a), (b), __FILE__, __LINE__)
 #define	realloc(p, n)	btmgr_mc_realloc((p), (n), __FILE__, __LINE__)
 #define	strdup(s)	btmgr_mc_strdup((s), __FILE__, __LINE__)
+#define	strndup(text, max_length) \
+	btmgr_mc_strndup((text), (max_length), __FILE__, __LINE__)
 #define	free(p)		btmgr_mc_free((p), __FILE__, __LINE__)
 
 #else /* !BTMGR_MEMCHECK */

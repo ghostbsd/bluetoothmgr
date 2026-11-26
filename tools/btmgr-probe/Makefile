@@ -12,4 +12,7 @@ CFLAGS+=	-Wall -Wextra
 LDADD=		${LIBBTMGR_DIR}/libbtmgr.a -lbluetooth
 DPADD=		${LIBBTMGR_DIR}/libbtmgr.a
 
+# A development tool, run from the tree, not something to install.
+INTERNALPROG=
+
 .include <bsd.prog.mk>

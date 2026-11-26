@@ -73,7 +73,6 @@ struct tok {
 
 static const uint8_t	 default_addr[6] = HCSECD_DEFAULT_ADDR;
 
-static char	*dupn(const char *s, size_t n);
 static int	 is_space(char c);
 static int	 is_word_byte(char c);
 static void	 next_tok(const char *s, size_t *pos, struct tok *t);
@@ -85,22 +84,6 @@ static int	 parse_block_body(const char *text, size_t body,
 static int	 split_marker(struct hcsecd_db *db);
 static void	 free_chunk(struct chunk *c);
 static char	*quoted_or_fallback(const char *in, const uint8_t *addr);
-
-/* strndup() with malloc(), so memcheck.h can see it. */
-static char *
-dupn(const char *s, size_t n)
-{
-	char	*p;
-
-	p = malloc(n + 1);
-	if (p == NULL)
-		return (NULL);
-
-	memcpy(p, s, n);
-	p[n] = '\0';
-
-	return (p);
-}
 
 static int
 is_space(char c)
@@ -263,7 +246,7 @@ parse_block_body(const char *text, size_t body, size_t end, struct chunk *bl)
 			if (val.kind != TOK_STRING)
 				return (-1);
 			free(bl->name);
-			bl->name = dupn(text + val.start + 1, val.len - 2);
+			bl->name = strndup(text + val.start + 1, val.len - 2);
 			if (bl->name == NULL)
 				return (-1);
 		} else if (kw.len == 3 &&
@@ -271,18 +254,19 @@ parse_block_body(const char *text, size_t body, size_t end, struct chunk *bl)
 			if (val.kind != TOK_WORD)
 				return (-1);
 			free(bl->key_tok);
-			bl->key_tok = dupn(text + val.start, val.len);
+			bl->key_tok = strndup(text + val.start, val.len);
 			if (bl->key_tok == NULL)
 				return (-1);
 		} else if (kw.len == 3 &&
 		    memcmp(text + kw.start, "pin", 3) == 0) {
 			free(bl->pin_tok);
 			if (val.kind == TOK_STRING) {
-				bl->pin_tok = dupn(text + val.start + 1,
+				bl->pin_tok = strndup(text + val.start + 1,
 				    val.len - 2);
 				bl->pin_quoted = 1;
 			} else if (val.kind == TOK_WORD) {
-				bl->pin_tok = dupn(text + val.start, val.len);
+				bl->pin_tok = strndup(text + val.start,
+				    val.len);
 				bl->pin_quoted = 0;
 			} else
 				return (-1);
@@ -365,8 +349,8 @@ split_marker(struct hcsecd_db *db)
 			struct chunk	*mk = &db->c[i];
 			char		*head, *marker;
 
-			head = dupn(txt->raw, line);
-			marker = dupn(txt->raw + line, mlen + 1);
+			head = strndup(txt->raw, line);
+			marker = strndup(txt->raw + line, mlen + 1);
 			if (head == NULL || marker == NULL) {
 				free(head);
 				free(marker);
@@ -478,7 +462,7 @@ hcsecd_parse(const char *text)
 			c = push_chunk(db, CHUNK_TEXT);
 			if (c == NULL)
 				goto fail;
-			c->raw = dupn(text + chunk_start,
+			c->raw = strndup(text + chunk_start,
 			    t.start - chunk_start);
 			if (c->raw == NULL)
 				goto fail;
@@ -487,7 +471,7 @@ hcsecd_parse(const char *text)
 		c = push_chunk(db, CHUNK_BLOCK);
 		if (c == NULL)
 			goto fail;
-		c->raw = dupn(text + t.start, scan - t.start);
+		c->raw = strndup(text + t.start, scan - t.start);
 		if (c->raw == NULL)
 			goto fail;
 

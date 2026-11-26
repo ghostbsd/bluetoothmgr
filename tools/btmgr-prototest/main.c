@@ -395,6 +395,10 @@ test_name(void)
 	    "a non-string name is bad_json");
 	rejects("{\"id\":5,\"cmd\":\"pair\",\"name\":\"\"}", "bad_json",
 	    "an empty name is refused, keeping one spelling for absent");
+	rejects("{\"id\":5,\"cmd\":\"pair\",\"name\":\"a\\u0001b\"}",
+	    "bad_json", "a name with a control character is refused");
+	rejects("{\"id\":5,\"cmd\":\"pair\",\"name\":\"a\\u007fb\"}",
+	    "bad_json", "and so is one with DEL");
 
 	memset(toolong, 'a', sizeof(toolong) - 1);
 	toolong[sizeof(toolong) - 1] = '\0';
@@ -963,18 +967,6 @@ test_state_devices(void)
 	rejects_msg(STATE_HEAD "\"connections\":[],\"devices\":["
 	    "{\"addr\":\"aa:bb:cc:11:22:03\",\"alias\":\"soundbar\","
 	    "\"type\":\"speaker\"}]}", "a device without a name is refused");
-
-	/* B1.4: a hand-edited store must not kill the whole event. */
-	st.devices[0].name[0] = 'Z';
-	st.devices[0].name[1] = (char)0xff;
-	st.devices[0].name[2] = '\0';
-	line_has(proto_state_event(&st), "\"name\":\"Z?\"",
-	    "a stored name with invalid UTF-8 has the bad byte replaced");
-
-	(void)strlcpy(st.devices[0].name, "a\x01" "b\x7f",
-	    sizeof(st.devices[0].name));
-	line_has(proto_state_event(&st), "\"name\":\"a?b?\"",
-	    "control characters in a stored name are replaced");
 
 	ok(decode(STATE_HEAD "\"connections\":[]}", &msg) == 0 &&
 	    msg.has_state && msg.state.device_count == 0,

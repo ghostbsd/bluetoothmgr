@@ -38,25 +38,8 @@ struct keys_db {
 	int		 dirty;
 };
 
-static char	*dupn(const char *s, size_t n);
 static struct line *push_line(struct keys_db *db);
 static int	 split_record(const char *raw, struct line *out);
-
-/* strndup() with malloc(), so memcheck.h can see it. */
-static char *
-dupn(const char *s, size_t n)
-{
-	char	*p;
-
-	p = malloc(n + 1);
-	if (p == NULL)
-		return (NULL);
-
-	memcpy(p, s, n);
-	p[n] = '\0';
-
-	return (p);
-}
 
 static struct line *
 push_line(struct keys_db *db)
@@ -123,7 +106,7 @@ keys_parse(const char *text)
 		if (l == NULL)
 			goto fail;
 
-		l->raw = nl == NULL ? strdup(p) : dupn(p, (size_t)(nl - p));
+		l->raw = nl == NULL ? strdup(p) : strndup(p,(size_t)(nl - p));
 		if (l->raw == NULL)
 			goto fail;
 
