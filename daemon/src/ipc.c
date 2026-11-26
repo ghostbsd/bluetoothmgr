@@ -17,7 +17,6 @@
  * while there is something to flush.
  */
 
-#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/ucred.h>
@@ -25,7 +24,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -167,64 +165,6 @@ read_sender(struct msghdr *msg, uid_t *uid)
 	return (-1);
 }
 
-/* Held for the life of the process, so the lock goes away when we do. */
-static int	path_lock = -1;
-
-/*
- * Own the path before touching it. 0, or -1 with EADDRINUSE if another daemon
- * holds it. A connect() probe cannot tell a full backlog from a dead socket.
- */
-static int
-claim_socket_path(const char *path)
-{
-	struct stat	sb, named;
-	char		lockpath[PATH_MAX];
-	int		fd, saved;
-
-	if (snprintf(lockpath, sizeof(lockpath), "%s.lock", path) >=
-	    (int)sizeof(lockpath)) {
-		errno = ENAMETOOLONG;
-		return (-1);
-	}
-
-	/*
-	 * O_NOFOLLOW and O_NONBLOCK because the socket directory may be
-	 * writable in a -r run: a symlink or a FIFO left at this name would
-	 * otherwise redirect us or block open() forever.
-	 */
-	fd = open(lockpath, O_CREAT | O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
-	    O_NONBLOCK, 0600);
-	if (fd < 0)
-		return (-1);
-
-	/* Someone else's file is not a lock we can trust, whatever it says. */
-	if (fstat(fd, &sb) < 0 || !S_ISREG(sb.st_mode) ||
-	    (sb.st_uid != geteuid() && sb.st_uid != 0)) {
-		(void)close(fd);
-		errno = EFTYPE;
-		return (-1);
-	}
-
-	if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
-		saved = errno;
-		(void)close(fd);
-		errno = (saved == EWOULDBLOCK) ? EADDRINUSE : saved;
-		return (-1);
-	}
-
-	/* The name must still be the inode we locked, or we locked nothing. */
-	if (stat(lockpath, &named) < 0 || named.st_dev != sb.st_dev ||
-	    named.st_ino != sb.st_ino) {
-		(void)close(fd);
-		errno = EADDRINUSE;
-		return (-1);
-	}
-
-	path_lock = fd;
-
-	return (0);
-}
-
 int
 ipc_listen(const char *path, mode_t mode)
 {
@@ -235,14 +175,6 @@ ipc_listen(const char *path, mode_t mode)
 		errno = ENAMETOOLONG;
 		return (-1);
 	}
-
-	/*
-	 * SOCK_CLOEXEC: nothing here spawns today, but a child inheriting the
-	 * listening socket would hold the channel that A5.3 authorizes on.
-	 */
-	/* A5.2 says stale, not live. The lock guards every unlink below. */
-	if (claim_socket_path(path) < 0)
-		return (-1);
 
 	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)

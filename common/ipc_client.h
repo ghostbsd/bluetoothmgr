@@ -31,13 +31,6 @@
 #define	BTMGR_SOCKET_ENV	"BTMGR_SOCKET"
 
 /*
- * A bound on connecting, so a frontend's startup cannot hang. An AF_UNIX
- * connect does not actually wait, even on a full accept queue, so this is a
- * backstop rather than an expected path.
- */
-#define	BTMGR_CONNECT_TIMEOUT_MS	2000
-
-/*
  * A frontend cannot usefully have many commands outstanding, and a bounded
  * table means a buggy one cannot grow this without limit.
  */
@@ -70,21 +63,21 @@ struct btmgr_ipc *btmgr_ipc_open(const char *path);
 const char	 *btmgr_ipc_default_path(void);
 
 /* NULL is accepted. */
-void		  btmgr_ipc_close(struct btmgr_ipc *conn);
+void		  btmgr_ipc_close(struct btmgr_ipc *connection);
 
-int		  btmgr_ipc_fd(const struct btmgr_ipc *conn);
-int		  btmgr_ipc_has_unwritten(const struct btmgr_ipc *conn);
+int		  btmgr_ipc_fd(const struct btmgr_ipc *connection);
+int		  btmgr_ipc_has_unwritten(const struct btmgr_ipc *connection);
 
 /* line must already end in '\n'. -1 means close and reopen. */
-int		  btmgr_ipc_send(struct btmgr_ipc *conn, const char *line);
+int		  btmgr_ipc_send(struct btmgr_ipc *connection, const char *line);
 
-int		  btmgr_ipc_flush(struct btmgr_ipc *conn);
+int		  btmgr_ipc_flush(struct btmgr_ipc *connection);
 
 /* -1 means close and reopen; errno 0 is the clean close of a daemon restart. */
-int		  btmgr_ipc_fill(struct btmgr_ipc *conn);
+int		  btmgr_ipc_fill(struct btmgr_ipc *connection);
 
 /* *line stays valid until the next call on this connection. */
-int		  btmgr_ipc_next_line(struct btmgr_ipc *conn, char **line,
+int		  btmgr_ipc_next_line(struct btmgr_ipc *connection, char **line,
 		      size_t *len);
 
 /*
@@ -93,7 +86,7 @@ int		  btmgr_ipc_next_line(struct btmgr_ipc *conn, char **line,
  * -1 with EBUSY when BTMGR_MAX_PENDING_REQUESTS are already outstanding, and
  * -1 otherwise for an unencodable command or a dead connection.
  */
-int		  btmgr_ipc_request(struct btmgr_ipc *conn,
+int		  btmgr_ipc_request(struct btmgr_ipc *connection,
 		      struct proto_cmd *cmd, btmgr_reply_fn on_reply,
 		      void *user_data);
 
@@ -103,7 +96,7 @@ int		  btmgr_ipc_request(struct btmgr_ipc *conn,
  * when the connection is finished, in which case every pending reply callback
  * has already been failed and the caller should close and reopen.
  */
-int		  btmgr_ipc_dispatch(struct btmgr_ipc *conn,
+int		  btmgr_ipc_dispatch(struct btmgr_ipc *connection,
 		      btmgr_event_fn on_event, void *user_data);
 
 /*
@@ -117,7 +110,7 @@ int		  btmgr_ipc_dispatch(struct btmgr_ipc *conn,
  * the daemon's own longest wait, or a legitimately slow pairing is cut off
  * before the daemon has answered. Affects requests made after the call.
  */
-void		  btmgr_ipc_set_request_timeout(struct btmgr_ipc *conn, int seconds);
+void		  btmgr_ipc_set_request_timeout(struct btmgr_ipc *connection, int seconds);
 
 /*
  * Fail any request whose reply never arrived, reporting "timeout". B3.2 says
@@ -128,16 +121,16 @@ void		  btmgr_ipc_set_request_timeout(struct btmgr_ipc *conn, int seconds);
  *
  * Returns how many were failed.
  */
-int		  btmgr_ipc_expire_requests(struct btmgr_ipc *conn);
+int		  btmgr_ipc_expire_requests(struct btmgr_ipc *connection);
 
 /*
  * Non-zero once the daemon's hello has arrived and its proto version matched.
  * btmgr_ipc_request() refuses until then, with ENOTCONN while waiting and
  * EPROTONOSUPPORT once a version mismatch has been seen. B2.1.
  */
-int		  btmgr_ipc_is_ready(const struct btmgr_ipc *conn);
+int		  btmgr_ipc_is_ready(const struct btmgr_ipc *connection);
 
 /* How many requests are waiting for a reply. */
-int		  btmgr_ipc_pending_count(const struct btmgr_ipc *conn);
+int		  btmgr_ipc_pending_count(const struct btmgr_ipc *connection);
 
 #endif

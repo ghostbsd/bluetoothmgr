@@ -68,7 +68,7 @@ struct safefile_ctx {
  * Initialise a context. Passing NULL for rundir selects SAFEFILE_RUNDIR.
  * Returns 0, or -1 with errno set to ENAMETOOLONG if rundir does not fit.
  */
-int	safefile_init(struct safefile_ctx *ctx, const char *rundir,
+int	safefile_init(struct safefile_ctx *context, const char *rundir,
 	    int dry_run);
 
 /*
@@ -96,7 +96,7 @@ int	safefile_init(struct safefile_ctx *ctx, const char *rundir,
  */
 #define	SAFEFILE_ERRLEN		256
 
-int	safefile_write(const struct safefile_ctx *ctx, const char *path,
+int	safefile_write(const struct safefile_ctx *context, const char *path,
 	    mode_t mode, const void *buf, size_t len, char *err, size_t errlen);
 
 /*

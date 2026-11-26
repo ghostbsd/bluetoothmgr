@@ -202,6 +202,28 @@ btmgr_mc_strdup(const char *s, const char *file, int line)
 	return (p);
 }
 
+char *
+btmgr_mc_strndup(const char *text, size_t max_length, const char *file,
+    int line)
+{
+	size_t	 length;
+	char	*copy;
+
+	if (text == NULL)
+		return (NULL);
+
+	length = strnlen(text, max_length);
+	copy = real_malloc(length + 1);
+	if (copy == NULL)
+		return (NULL);
+
+	memcpy(copy, text, length);
+	copy[length] = '\0';
+	mc_insert(copy, length + 1, file, line);
+
+	return (copy);
+}
+
 void
 btmgr_mc_free(void *p, const char *file, int line)
 {

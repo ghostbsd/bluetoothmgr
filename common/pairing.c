@@ -176,6 +176,9 @@ pairing_begin(const struct btmgr_paths *paths, const struct pair_ops *ops,
 		set_detail(report, "could not record the alias");
 		goto out;
 	}
+	/* The user's own record is kept, so take whichever alias is there. */
+	(void)strlcpy(state->alias, hosts_alias_for(hosts, addr),
+	    sizeof(state->alias));
 	hosts_text = hosts_emit(hosts, NULL);
 	if (hosts_text == NULL)
 		goto out;
@@ -257,7 +260,6 @@ pairing_complete(const struct btmgr_paths *paths, const struct pair_ops *ops,
 {
 	struct store		*store = NULL;
 	char			*text = NULL;
-	char			 alias_copy[BTMGR_ALIAS_BUFSZ];
 
 	if (report != NULL)
 		memset(report, 0, sizeof(*report));
@@ -282,59 +284,29 @@ pairing_complete(const struct btmgr_paths *paths, const struct pair_ops *ops,
 	} else
 		trace_step(report, "flush");
 
-	/* Step 7. A4 metadata. The alias we chose is already in hosts. */
+	/* Step 7. The device is paired: a failure here only loses metadata. */
 	store = store_load(paths);
-	if (store == NULL) {
-		pairing_state_free(state);
-		return (PAIR_ERROR);
-	}
-
-	/* Carry the alias across from hosts so both files agree. */
-	{
-		struct hosts_db	*hosts;
-		char		*hosts_text;
-		const char	*alias;
-
-		hosts_text = safefile_read(paths->hosts, NULL);
-		hosts = hosts_parse(hosts_text);
-		free(hosts_text);
-
-		alias_copy[0] = '\0';
-		if (hosts != NULL) {
-			alias = hosts_alias_for(hosts, state->addr);
-			if (alias != NULL)
-				(void)snprintf(alias_copy, sizeof(alias_copy),
-				    "%s", alias);
-			hosts_free(hosts);
-		}
-	}
-
-	if (store_set(store, state->addr, name,
-	    alias_copy[0] != '\0' ? alias_copy : NULL, type, now) ==
-	    STORE_ERROR) {
+	if (store == NULL || store_set(store, state->addr, name, state->alias,
+	    type, now) == STORE_ERROR) {
 		set_detail(report, "could not record the device");
-		store_free(store);
-		pairing_state_free(state);
-		return (PAIR_ERROR);
+		goto out;
 	}
-
 	text = store_emit(store, NULL);
-	store_free(store);
 	if (text == NULL) {
-		pairing_state_free(state);
-		return (PAIR_ERROR);
+		set_detail(report, "could not encode devices.json");
+		goto out;
 	}
+	if (btmgr_paths_mkdirs(paths) != 0) {
+		set_detail(report, "could not create the config directories");
+		goto out;
+	}
+	if (write_text(paths, paths->store, BTMGR_MODE_STORE, text,
+	    report) == 0)
+		trace_step(report, "store");
 
-	if (btmgr_paths_mkdirs(paths) != 0 ||
-	    write_text(paths, paths->store, BTMGR_MODE_STORE, text,
-	    report) != 0) {
-		free(text);
-		pairing_state_free(state);
-		return (PAIR_ERROR);
-	}
+out:
 	free(text);
-	trace_step(report, "store");
-
+	store_free(store);
 	pairing_state_free(state);
 
 	return (PAIR_DONE);

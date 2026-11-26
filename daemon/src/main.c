@@ -146,7 +146,6 @@ struct daemon {
 	int		 power_id;
 	time_t		 power_until;
 	pid_t		 power_reaping;
-	int		 power_polled;
 	int		 details_pending;
 	time_t		 details_until;
 	struct seen_device seen[SEEN_MAX];
@@ -190,7 +189,6 @@ static int	start_power_change(struct daemon *d, int on);
 static void	finish_power_change(struct daemon *d, int status);
 static void	expire_power_change(struct daemon *d);
 static int	power_change_running(const struct daemon *d);
-static void	poll_power_child(struct daemon *d);
 static void	apply_detail(struct daemon *d, const struct listen_report *r);
 static void	load_store(struct daemon *d);
 static void	remember_seen(struct daemon *d, const bdaddr_t *address,
@@ -374,7 +372,6 @@ tick(struct daemon *d, time_t now)
 			finish_scan_start(d, -1);
 	}
 
-	poll_power_child(d);
 	if (d->power_pid != 0 && now >= d->power_until)
 		expire_power_change(d);
 
@@ -394,12 +391,11 @@ tick(struct daemon *d, time_t now)
 static time_t
 now_mono(void)
 {
-	struct timespec	 ts;
+	struct timespec	 now;
 
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-		return (time(NULL));
+	(void)clock_gettime(CLOCK_MONOTONIC, &now);
 
-	return (ts.tv_sec);
+	return (now.tv_sec);
 }
 
 /* The earliest deadline to wake for, or 0. The tick alone is too coarse. */
@@ -581,6 +577,9 @@ finish_pairing(struct daemon *d, const bdaddr_t *addr)
 	    (int64_t)time(NULL), &report);
 
 	memset(&d->pairing, 0, sizeof(d->pairing));
+
+	if (r == PAIR_DONE && report.detail[0] != '\0')
+		syslog(LOG_WARNING, "paired, but %s", report.detail);
 
 	/* pairing_complete() wrote the new device to devices.json. */
 	if (r == PAIR_DONE)
@@ -985,10 +984,15 @@ start_power_change(struct daemon *d, int on)
 
 	EV_SET(&change, (uintptr_t)pid, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0,
 	    &tag_power);
+	/* NOTE_EXIT also catches a child that has already exited. */
 	if (kevent(d->kq, &change, 1, NULL, 0, NULL) < 0) {
-		/* Rare. tick() polls it instead; blocking here would stall. */
-		syslog(LOG_ERR, "kevent add power child: %m");
-		d->power_polled = 1;
+		error = errno;
+		(void)kill(-pid, SIGKILL);
+		(void)waitpid(pid, NULL, 0);
+		d->power_pid = 0;
+		d->power_until = 0;
+		errno = error;
+		return (-1);
 	}
 
 	return (0);
@@ -1011,7 +1015,6 @@ finish_power_change(struct daemon *d, int status)
 	d->power_pid = 0;
 	d->power_client = NULL;
 	d->power_until = 0;
-	d->power_polled = 0;
 
 	/* Now, not at the end of the pass: a later request reads powered. */
 	reconcile(d);
@@ -1041,27 +1044,6 @@ power_change_running(const struct daemon *d)
 {
 
 	return (d->power_pid != 0 || d->power_reaping != 0);
-}
-
-/* For a child kqueue would not watch; tick() calls this. */
-static void
-poll_power_child(struct daemon *d)
-{
-	pid_t	child;
-	int	status;
-
-	child = d->power_pid != 0 ? d->power_pid : d->power_reaping;
-	if (!d->power_polled || child == 0 ||
-	    waitpid(child, &status, WNOHANG) != child)
-		return;
-
-	if (child == d->power_pid)
-		finish_power_change(d, status);
-	else {
-		d->power_reaping = 0;
-		d->power_polled = 0;
-		reconcile(d);
-	}
 }
 
 /* C3.3. A failed read keeps the cached value. */
@@ -1889,7 +1871,7 @@ main(int argc, char *argv[])
 		 */
 		now = now_mono();
 		since = now - last_tick;
-		if (since < 0 || since >= RECONCILE_SEC) {
+		if (since >= RECONCILE_SEC) {
 			tick(&d, now);
 			last_tick = now;
 			since = 0;

@@ -33,6 +33,7 @@
 
 #include "btaddr.h"
 #include "paths.h"
+#include "sanitise.h"
 
 /*
  * What the sequencer cannot do for itself. A8.1 requires "service hcsecd
@@ -83,6 +84,7 @@ struct pair_report {
  */
 struct pair_state {
 	uint8_t	 addr[BTMGR_ADDR_LEN];
+	char	 alias[BTMGR_ALIAS_BUFSZ];
 	char	*hosts_before;		/* NULL when the file was absent */
 	char	*hcsecd_before;
 	int	 active;
@@ -111,6 +113,8 @@ enum pair_result pairing_begin(const struct btmgr_paths *paths,
  * Steps 6 and 7, on Link_Key_Notification. Reloads again so hcsecd's
  * dump_keys_file() flushes the new key to disk (A8.3), then records the device
  * in devices.json. type is the B5.3 vocabulary as a string, or NULL.
+ *
+ * PAIR_DONE once parked: a later failure only sets report->detail.
  *
  * Releases state on any return.
  */

@@ -36,7 +36,6 @@ LDADD=		${LIBBTMGR_DIR}/libbtmgr.a -L/usr/local/lib -ljansson -lbluetooth
 DPADD=		${LIBBTMGR_DIR}/libbtmgr.a
 
 # A test harness, not something to install.
-BINDIR?=	/usr/local/bin
-NO_INSTALL=
+INTERNALPROG=
 
 .include <bsd.prog.mk>

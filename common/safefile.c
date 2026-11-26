@@ -15,7 +15,6 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,9 +29,9 @@
  */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
-static int	 marker_path(const struct safefile_ctx *ctx, const char *path,
-		     char *out, size_t outlen);
-static int	 ensure_backup(const struct safefile_ctx *ctx,
+static int	 marker_path(const struct safefile_ctx *context, const char *path,
+		     char *marker, size_t marker_size);
+static int	 ensure_backup(const struct safefile_ctx *context,
 		     const char *path, char *err, size_t errlen);
 static int	 copy_preserving(const char *src, const char *dst,
 		     char *err, size_t errlen);
@@ -62,19 +61,19 @@ seterr(char *err, size_t errlen, const char *fmt, ...)
 }
 
 int
-safefile_init(struct safefile_ctx *ctx, const char *rundir, int dry_run)
+safefile_init(struct safefile_ctx *context, const char *rundir, int dry_run)
 {
 	const char	*dir;
 
-	memset(ctx, 0, sizeof(*ctx));
+	memset(context, 0, sizeof(*context));
 	dir = (rundir != NULL) ? rundir : SAFEFILE_RUNDIR;
 
-	if (strlcpy(ctx->rundir, dir, sizeof(ctx->rundir)) >=
-	    sizeof(ctx->rundir)) {
+	if (strlcpy(context->rundir, dir, sizeof(context->rundir)) >=
+	    sizeof(context->rundir)) {
 		errno = ENAMETOOLONG;
 		return (-1);
 	}
-	ctx->dry_run = dry_run;
+	context->dry_run = dry_run;
 	return (0);
 }
 
@@ -160,38 +159,18 @@ safefile_read(const char *path, size_t *lenp)
 	return (buf);
 }
 
-/*
- * Name the per-boot marker for a target path.
- *
- * basename plus a hash of the whole path: the basename is there so someone
- * looking in /var/run can tell what the marker is for, and the hash is there
- * because two directories can hold the same basename. FNV-1a, which is not a
- * security property here, only a spread.
- */
+/* The per-boot marker for a target: our targets all have distinct names. */
 static int
-marker_path(const struct safefile_ctx *ctx, const char *path, char *out,
-    size_t outlen)
+marker_path(const struct safefile_ctx *context, const char *path, char *marker,
+    size_t marker_size)
 {
-	const char	*base;
-	uint64_t	 h;
-	size_t		 i;
+	const char	*file_name;
 
-	h = 14695981039346656037ULL;
-	for (i = 0; path[i] != '\0'; i++) {
-		h ^= (unsigned char)path[i];
-		h *= 1099511628211ULL;
-	}
+	file_name = strrchr(path, '/');
+	file_name = file_name != NULL ? file_name + 1 : path;
 
-	base = strrchr(path, '/');
-	if (base != NULL)
-		base++;
-	else
-		base = path;
-	if (*base == '\0')
-		base = "unnamed";
-
-	if ((size_t)snprintf(out, outlen, "%s/%.64s.%016llx", ctx->rundir,
-	    base, (unsigned long long)h) >= outlen) {
+	if ((size_t)snprintf(marker, marker_size, "%s/%s", context->rundir,
+	    file_name) >= marker_size) {
 		errno = ENAMETOOLONG;
 		return (-1);
 	}
@@ -298,13 +277,13 @@ fail_in:
  * "back up" our own first write and call it the user's original.
  */
 static int
-ensure_backup(const struct safefile_ctx *ctx, const char *path, char *err,
+ensure_backup(const struct safefile_ctx *context, const char *path, char *err,
     size_t errlen)
 {
 	char	 marker[PATH_MAX], bak[PATH_MAX];
 	int	 fd;
 
-	if (marker_path(ctx, path, marker, sizeof(marker)) == -1) {
+	if (marker_path(context, path, marker, sizeof(marker)) == -1) {
 		seterr(err, errlen, "marker path for %s too long", path);
 		return (-1);
 	}
@@ -312,8 +291,8 @@ ensure_backup(const struct safefile_ctx *ctx, const char *path, char *err,
 	if (access(marker, F_OK) == 0)
 		return (0);		/* already backed up this boot */
 
-	if (mkdir(ctx->rundir, 0755) == -1 && errno != EEXIST) {
-		seterr(err, errlen, "mkdir %s: %s", ctx->rundir,
+	if (mkdir(context->rundir, 0755) == -1 && errno != EEXIST) {
+		seterr(err, errlen, "mkdir %s: %s", context->rundir,
 		    strerror(errno));
 		return (-1);
 	}
@@ -330,15 +309,8 @@ ensure_backup(const struct safefile_ctx *ctx, const char *path, char *err,
 			return (-1);
 	}
 
-	/*
-	 * O_EXCL so that two daemons racing here cannot both conclude they own
-	 * the backup. Losing the race means someone else just made it, which
-	 * is the result we wanted anyway.
-	 */
-	fd = open(marker, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+	fd = open(marker, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
 	if (fd == -1) {
-		if (errno == EEXIST)
-			return (0);
 		seterr(err, errlen, "create %s: %s", marker, strerror(errno));
 		return (-1);
 	}
@@ -405,7 +377,7 @@ sync_dir(const char *path)
 }
 
 int
-safefile_write(const struct safefile_ctx *ctx, const char *path,
+safefile_write(const struct safefile_ctx *context, const char *path,
     mode_t mode, const void *buf, size_t len, char *err, size_t errlen)
 {
 	struct stat	 sb;
@@ -450,10 +422,10 @@ safefile_write(const struct safefile_ctx *ctx, const char *path,
 		return (SAFEFILE_ERROR);
 	}
 
-	if (ctx->dry_run)
+	if (context->dry_run)
 		return (SAFEFILE_DRYRUN);
 
-	if (ensure_backup(ctx, path, err, errlen) == -1)
+	if (ensure_backup(context, path, err, errlen) == -1)
 		return (SAFEFILE_ERROR);
 
 	/*

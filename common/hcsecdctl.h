@@ -36,9 +36,6 @@
 
 #define	HCSECD_PROCNAME		"hcsecd"
 
-/* More than one hcsecd is odd but legal, for instance a debug one by hand. */
-#define	HCSECD_MAX_PIDS		8
-
 /*
  * procname and uid are overridable so the tests can match their own process.
  * That is the only way to check the signal is really delivered without a
@@ -64,8 +61,8 @@ struct hcsecd_ctl {
  * uid is the uid the process must run as. Pass 0 for the real hcsecd.
  * Returns 0, or -1 with ENAMETOOLONG if procname does not fit.
  */
-int	hcsecd_ctl_init(struct hcsecd_ctl *ctl, const char *procname, uid_t uid,
-	    int dry_run);
+int	hcsecd_ctl_init(struct hcsecd_ctl *control, const char *procname,
+	    uid_t uid, int dry_run);
 
 /*
  * A8.1. Send SIGHUP to every matching process. Returns 0 if at least one was
@@ -80,16 +77,5 @@ int	hcsecd_ctl_reload(void *context);
  * the direction in which pairing writes nothing.
  */
 int	hcsecd_ctl_running(void *context);
-
-/*
- * The shared lookup, exposed for the tests and for callers that want to report
- * the pid. Fills up to maxpids entries and sets *found to how many matched.
- *
- * Returns 0 when at least one matched, or -1 with errno: ESRCH for none,
- * ENOMEM if the process table could not be read, EINVAL for bad arguments.
- * A match beyond maxpids is dropped, and *found never exceeds maxpids.
- */
-int	hcsecd_ctl_find(const struct hcsecd_ctl *ctl, pid_t *pids,
-	    size_t maxpids, size_t *found);
 
 #endif /* !BTMGR_HCSECDCTL_H_ */

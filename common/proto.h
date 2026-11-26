@@ -80,8 +80,8 @@ struct proto_cmd {
  * is still filled in when it could be recovered, so the caller can address the
  * error reply to the right request.
  */
-int	proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
-	    char *code, size_t codelen);
+int	proto_parse_cmd(const char *line, size_t length,
+	    struct proto_cmd *command, char *code, size_t code_size);
 
 #define	BTMGR_ERROR_CODE_MAX	32
 #define	BTMGR_DETAIL_MAX	256

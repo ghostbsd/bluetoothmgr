@@ -161,6 +161,7 @@ Every frontend sits on this, so the backend finishes before any GUI starts.
 - [ ] `set_alias` command, with the `alias_too_long` refusal bounded by A2.3
 - [ ] The `stale_link_key` code and the A3.2 key delete, which needs `hcsecd` stopped
 - [ ] `remove` command
+- [ ] Call `hcsecd_dedupe()` when loading `hcsecd.conf` (A1.2.2)
 - [ ] Populate the `devices` array: `paired`, `has_key`, `type`, `class`, `connected`, `trusted` (B5.2, B5.3)
 - [ ] List every stored device, not only the first `BTMGR_MAX_DEVICES`, without a line past the B1.3 limit
 - [ ] `rssi`, null unless the device was seen in the current scan (B5.4)

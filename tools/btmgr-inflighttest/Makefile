@@ -20,7 +20,6 @@ CFLAGS+=	-Wall -Wextra
 CFLAGS+=	${BTMGR_CFLAGS}
 
 # A test harness, not something to install.
-BINDIR?=	/usr/local/bin
-NO_INSTALL=
+INTERNALPROG=
 
 .include <bsd.prog.mk>

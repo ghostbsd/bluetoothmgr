@@ -52,7 +52,7 @@ static int	 read_found_device(json_t *obj, struct proto_found_device *out);
 static char	*render(json_t *root);
 static json_t	*adapter_json(const struct btmgr_adapter *a);
 static json_t	*conn_json(const struct btmgr_conn *c);
-static void	 replace_controls(char *text);
+static int	 has_control(const char *text);
 static json_t	*device_json(const struct state_device *device);
 
 /*
@@ -172,50 +172,38 @@ conn_json(const struct btmgr_conn *c)
 	return (o);
 }
 
-/* Each would cost six bytes as \u00XX on the line. */
-static void
-replace_controls(char *text)
+static int
+has_control(const char *text)
 {
 
 	for (; *text != '\0'; text++)
 		if ((unsigned char)*text < 0x20 || *text == 0x7f)
-			*text = '?';
+			return (1);
+
+	return (0);
 }
 
-/* B1.4 on every field: devices.json can be edited by hand. */
 static json_t *
 device_json(const struct state_device *device)
 {
 	char	 address[BTMGR_ADDR_BUFSZ];
-	char	 name[BTMGR_NAME_SIZE];
-	char	 alias[BTMGR_ALIAS_BUFSZ];
-	char	 type[STATE_TYPE_SIZE];
-	json_t	*o;
+	json_t	*object;
 
-	o = json_object();
-	if (o == NULL)
+	object = json_object();
+	if (object == NULL)
 		return (NULL);
 
 	btmgr_addr_format(device->addr, address, sizeof(address));
-	if (btmgr_sanitise_utf8(device->name, name, sizeof(name)) != 0)
-		name[0] = '\0';
-	if (btmgr_sanitise_utf8(device->alias, alias, sizeof(alias)) != 0)
-		alias[0] = '\0';
-	if (btmgr_sanitise_utf8(device->type, type, sizeof(type)) != 0)
-		type[0] = '\0';
-	replace_controls(name);
-	replace_controls(alias);
-	replace_controls(type);
 
-	if (set_string(o, "addr", address) != 0 ||
-	    set_string(o, "name", name) != 0 ||
-	    set_string(o, "alias", alias) != 0 ||
-	    set_string(o, "type", type) != 0) {
-		json_decref(o);
+	if (set_string(object, "addr", address) != 0 ||
+	    set_string(object, "name", device->name) != 0 ||
+	    set_string(object, "alias", device->alias) != 0 ||
+	    set_string(object, "type", device->type) != 0) {
+		json_decref(object);
 		return (NULL);
 	}
 
-	return (o);
+	return (object);
 }
 
 /* Length included, so a NUL inside the string cannot truncate the test. */
@@ -828,180 +816,119 @@ proto_error(int id, const char *code, const char *detail)
 	return (render(o));
 }
 
-/*
- * Parse one line into a command.
- *
- * The line is not NUL terminated, so we use json_loadb() which takes a length.
- * That matters: the caller hands us a slice of its input buffer, and copying
- * it just to append a NUL would be wasted work on every command.
- */
+/* The line is a slice of the caller's buffer, not NUL terminated. */
 int
-proto_parse_cmd(const char *line, size_t len, struct proto_cmd *out,
-    char *code, size_t codelen)
+proto_parse_cmd(const char *line, size_t length, struct proto_cmd *command,
+    char *code, size_t code_size)
 {
-	json_error_t	 err;
-	json_t		*root, *v;
-	const char	*name;
+	json_error_t	 parse_error;
+	json_t		*root, *value;
+	const char	*failure = "bad_json";
+	const char	*text;
 
-	memset(out, 0, sizeof(*out));
-	out->id = -1;
+	memset(command, 0, sizeof(*command));
+	command->id = -1;
 
-	root = json_loadb(line, len, 0, &err);
-	if (root == NULL) {
-		strlcpy(code, "bad_json", codelen);
-		return (-1);
+	root = json_loadb(line, length, 0, &parse_error);
+	if (root == NULL || !json_is_object(root))
+		goto bad;
+
+	/* B3.1: the id first, so even an error reply can be matched. */
+	(void)read_int(json_object_get(root, "id"), &command->id);
+	if (command->id < 0) {
+		failure = "missing_id";
+		goto bad;
 	}
 
-	if (!json_is_object(root)) {
-		strlcpy(code, "bad_json", codelen);
-		json_decref(root);
-		return (-1);
+	value = json_object_get(root, "cmd");
+	if (!json_is_string(value)) {
+		failure = "missing_cmd";
+		goto bad;
+	}
+	if (strlcpy(command->name, json_string_value(value),
+	    sizeof(command->name)) >= sizeof(command->name)) {
+		failure = "not_found";
+		goto bad;
 	}
 
-	/*
-	 * Recover the id first, even if the rest is malformed, so the error
-	 * reply can be matched to the request that caused it. SPEC.md B3.1.
-	 */
-	(void)read_int(json_object_get(root, "id"), &out->id);
-
-	if (out->id < 0) {
-		strlcpy(code, "missing_id", codelen);
-		json_decref(root);
-		return (-1);
-	}
-
-	v = json_object_get(root, "cmd");
-	if (!json_is_string(v)) {
-		strlcpy(code, "missing_cmd", codelen);
-		json_decref(root);
-		return (-1);
-	}
-
-	name = json_string_value(v);
-	if (strlcpy(out->name, name, sizeof(out->name)) >=
-	    sizeof(out->name)) {
-		strlcpy(code, "not_found", codelen);
-		json_decref(root);
-		return (-1);
-	}
-
-	/*
-	 * Optional fields. A malformed one is an error rather than something
-	 * to ignore: silently treating {"addr": 42} as absent would connect
-	 * to whatever the caller last mentioned, or to nothing, with no
-	 * explanation.
-	 */
-	v = json_object_get(root, "addr");
-	if (v != NULL) {
-		if (!json_is_string(v) ||
-		    !bt_aton(json_string_value(v), &out->addr)) {
-			strlcpy(code, "bad_addr", codelen);
-			json_decref(root);
-			return (-1);
+	/* A malformed optional field is an error, never read as absent. */
+	value = json_object_get(root, "addr");
+	if (value != NULL) {
+		if (!json_is_string(value) ||
+		    !bt_aton(json_string_value(value), &command->addr)) {
+			failure = "bad_addr";
+			goto bad;
 		}
-		out->has_addr = 1;
+		command->has_addr = 1;
 	}
 
-	v = json_object_get(root, "timeout");
-	if (v != NULL) {
-		if (read_int(v, &out->timeout) != 0) {
-			strlcpy(code, "bad_json", codelen);
-			json_decref(root);
-			return (-1);
-		}
-		out->has_timeout = 1;
+	value = json_object_get(root, "timeout");
+	if (value != NULL) {
+		if (read_int(value, &command->timeout) != 0)
+			goto bad;
+		command->has_timeout = 1;
 	}
 
-	v = json_object_get(root, "on");
-	if (v != NULL) {
-		if (!json_is_boolean(v)) {
-			strlcpy(code, "bad_json", codelen);
-			json_decref(root);
-			return (-1);
-		}
-		out->on = json_is_true(v) ? 1 : 0;
-		out->has_on = 1;
+	value = json_object_get(root, "on");
+	if (value != NULL) {
+		if (!json_is_boolean(value))
+			goto bad;
+		command->on = json_is_true(value) ? 1 : 0;
+		command->has_on = 1;
 	}
 
-	v = json_object_get(root, "action");
-	if (v != NULL) {
-		if (json_string_is(v, "start"))
-			out->action = PROTO_ACTION_START;
-		else if (json_string_is(v, "stop"))
-			out->action = PROTO_ACTION_STOP;
-		else {
-			strlcpy(code, "bad_json", codelen);
-			json_decref(root);
-			return (-1);
-		}
-		out->has_action = 1;
+	value = json_object_get(root, "action");
+	if (value != NULL) {
+		if (json_string_is(value, "start"))
+			command->action = PROTO_ACTION_START;
+		else if (json_string_is(value, "stop"))
+			command->action = PROTO_ACTION_STOP;
+		else
+			goto bad;
+		command->has_action = 1;
 	}
 
-	v = json_object_get(root, "duration");
-	if (v != NULL) {
-		if (read_int(v, &out->duration) != 0) {
-			strlcpy(code, "bad_json", codelen);
-			json_decref(root);
-			return (-1);
-		}
-		out->has_duration = 1;
+	value = json_object_get(root, "duration");
+	if (value != NULL) {
+		if (read_int(value, &command->duration) != 0)
+			goto bad;
+		command->has_duration = 1;
 	}
 
-	/*
-	 * A name is cosmetic, so A7.1 transliterates it. A PIN is an exact
-	 * secret, and hcsecd_set() runs it through the same sanitiser, so
-	 * anything A7.1 would rewrite is refused here instead.
-	 */
-	v = json_object_get(root, "pin");
-	if (v != NULL) {
-		const char	*pin;
-		size_t		 len;
-
-		if (!json_is_string(v)) {
-			strlcpy(code, "bad_json", codelen);
-			json_decref(root);
-			return (-1);
-		}
-
-		pin = json_string_value(v);
-
-		/* Absent is how "this device needs no PIN" is spelled. */
-		if (!pin_is_sendable(pin)) {
-			strlcpy(code, "bad_json", codelen);
-			json_decref(root);
-			return (-1);
-		}
-
-		len = strlen(pin);
-		memcpy(out->pin, pin, len + 1);
-		out->has_pin = 1;
+	/* A PIN is exact, so anything A7.1 would rewrite is refused. */
+	value = json_object_get(root, "pin");
+	if (value != NULL) {
+		if (!json_is_string(value))
+			goto bad;
+		text = json_string_value(value);
+		if (!pin_is_sendable(text) ||
+		    strlcpy(command->pin, text, sizeof(command->pin)) >=
+		    sizeof(command->pin))
+			goto bad;
+		command->has_pin = 1;
 	}
 
-	/* jansson rejects invalid UTF-8, so B1.4 is settled before we see it. */
-	v = json_object_get(root, "name");
-	if (v != NULL) {
-		const char	*nm;
-
-		if (!json_is_string(v)) {
-			strlcpy(code, "bad_json", codelen);
-			json_decref(root);
-			return (-1);
-		}
-
-		nm = json_string_value(v);
-
-		/* Absent is how "no name" is spelled, as with pin. */
-		if (nm[0] == '\0' ||
-		    strlcpy(out->device_name, nm, sizeof(out->device_name)) >=
-		    sizeof(out->device_name)) {
-			strlcpy(code, "bad_json", codelen);
-			json_decref(root);
-			return (-1);
-		}
-		out->has_device_name = 1;
+	/* Absent is how "no name" is spelled, so an empty one is refused. */
+	value = json_object_get(root, "name");
+	if (value != NULL) {
+		if (!json_is_string(value))
+			goto bad;
+		text = json_string_value(value);
+		if (text[0] == '\0' || has_control(text) ||
+		    strlcpy(command->device_name, text,
+		    sizeof(command->device_name)) >=
+		    sizeof(command->device_name))
+			goto bad;
+		command->has_device_name = 1;
 	}
 
 	json_decref(root);
 
 	return (0);
+
+bad:
+	strlcpy(code, failure, code_size);
+	json_decref(root);
+
+	return (-1);
 }
