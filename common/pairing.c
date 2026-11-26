@@ -59,7 +59,8 @@ set_detail(struct pair_report *report, const char *fmt, ...)
 	va_list	 ap;
 	int	 saved;
 
-	if (report == NULL)
+	/* The first failure wins, so a key flush warning is never hidden. */
+	if (report == NULL || report->detail[0] != '\0')
 		return;
 
 	saved = errno;

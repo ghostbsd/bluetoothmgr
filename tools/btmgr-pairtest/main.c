@@ -512,6 +512,39 @@ test_store_load(const char *scratch)
 	store_free(store);
 }
 
+/* A later store failure must not hide that the key may not be on disk. */
+static void
+test_flush_warning_kept(const char *scratch)
+{
+	struct btmgr_paths	 paths;
+	struct pair_state	 state;
+	struct pair_report	 report;
+	struct fake		 fake = { 0, 0, 1 };
+	struct pair_ops		 ops = { fake_reload, fake_running, &fake };
+
+	printf("\nA8.3 a failed key flush stays in the report\n");
+
+	if (seed(scratch, "flush-warning", &paths) != 0) {
+		ok(0, "could not seed the sandbox");
+		return;
+	}
+	if (pairing_begin(&paths, &ops, speaker_addr, "Soundbar X900", "0000",
+	    &state, &report) != PAIR_PARKED) {
+		ok(0, "could not park the pairing");
+		return;
+	}
+
+	/* The flush reload fails, then devices.json cannot be written. */
+	fake.reload_fails = 1;
+	(void)mkdir(paths.store, 0700);
+
+	ok(pairing_complete(&paths, &ops, &state, "Soundbar X900", "speaker",
+	    1000, &report) == PAIR_DONE, "the pairing still completes");
+	ok(strstr(report.detail, "may not be on disk") != NULL,
+	    "and the detail is the flush warning, not the store failure (got \"%s\")",
+	    report.detail);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -545,6 +578,7 @@ main(int argc, char *argv[])
 	test_abort(scratch);
 	test_repair(scratch);
 	test_store_load(scratch);
+	test_flush_warning_kept(scratch);
 
 	printf("\n%d checks, %d failures\n", checks, failures);
 
