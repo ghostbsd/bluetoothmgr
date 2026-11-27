@@ -323,16 +323,12 @@ on_readable(gint fd, GIOCondition cond, gpointer data)
 
 	(void)fd;
 
-	if ((cond & (G_IO_HUP | G_IO_ERR)) != 0) {
+	/* Dispatch first, so a reply that arrived just before a close is read. */
+	if (btmgr_ipc_dispatch(ui->conn, on_event, ui) < 0 ||
+	    (cond & (G_IO_HUP | G_IO_ERR)) != 0) {
 		ui->watch = 0;			/* returning REMOVE frees it */
-		disconnect(ui, "Lost the BluetoothMgr daemon");
-		return (G_SOURCE_REMOVE);
-	}
-
-	if (btmgr_ipc_fill(ui->conn) < 0 ||
-	    btmgr_ipc_dispatch(ui->conn, on_event, ui) < 0) {
-		ui->watch = 0;
-		disconnect(ui, "Lost the BluetoothMgr daemon");
+		disconnect(ui, ui->probe_failed ? ui->failure :
+		    "Lost the BluetoothMgr daemon");
 		return (G_SOURCE_REMOVE);
 	}
 

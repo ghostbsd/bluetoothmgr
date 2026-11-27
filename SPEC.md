@@ -178,7 +178,8 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
 - **A5.3** Every command MUST be refused unless the peer is root, or the peer
   process belongs to an active GUI session as A9 defines one. This is a desktop
   application, so a peer that is not in a GUI session has no business on this
-  socket at all, read-only commands included.
+  socket at all, read-only commands included. After sending the refusal the
+  daemon MUST close the connection.
 
   Several GUI sessions MAY be active at once. A peer in any of them is allowed,
   with no further distinction between users.
@@ -345,8 +346,8 @@ strict grammars, plus syslog.
 ## A9. `/var/run/utx.active`
 
 The utmpx database of current logins, read with `getutxent(3)`. Mode `0644`,
-owner `root:wheel`, so only root can write it. Not ours: `login(1)`, `sshd` and
-the display manager write it. This file is the input to A5.3.
+owner `root:wheel`. Not ours: `login(1)`, `sshd`, the display manager and the
+setuid `ulog-helper` write it. This file is the input to A5.3.
 
 - **A9.1** GhostBSD writes two records for one graphical login: `lightdm` on
   line `:0`, and the session leader `mate-session` on line `ttyv8` with host
@@ -360,8 +361,9 @@ the display manager write it. This file is the input to A5.3.
   A leading `:` alone MUST NOT be accepted: `ut_host` carries the client
   address of an `ssh` login, and `::1` would read as a display. The test MUST
   be bounded by the field size, which carries no terminator when full.
-- **A9.3** A text console login, which has no host, is not a GUI session.
-  Neither is `ssh` on `pts/N`.
+- **A9.3** A text console login, which has no host, is not a GUI session. A
+  record whose `ut_line` begins with `pts/` MUST NOT be one, whatever its
+  `ut_host`.
 - **A9.4** The peer MUST belong to the session a GUI record names: walking its
   parent chain with `sysctl kern.proc.pid`, either a pid equals the record's
   `ut_pid` or a `ki_sid` does. This is what refuses `ssh` and console peers,

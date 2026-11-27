@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "paths.h"
 #include "safefile.h"
@@ -56,17 +57,13 @@ btmgr_paths_init(struct btmgr_paths *p, const char *root, int dry_run)
 		return (-1);
 	}
 
-	/*
-	 * Refuse a world-writable root. A sandbox holds copies of hcsecd.conf
-	 * and the key store, so PINs and link keys end up under it, and a
-	 * predictable name somewhere like /tmp also lets another user
-	 * pre-create a path component as a symlink. A root that does not exist
-	 * yet is fine: btmgr_paths_mkdirs() creates it.
-	 */
+	/* Root writes under it, so nobody else may own or write the sandbox. */
 	if (root != NULL && *root != '\0') {
-		struct stat	 sb;
+		struct stat	 status;
 
-		if (stat(root, &sb) == 0 && (sb.st_mode & S_IWOTH) != 0) {
+		if (lstat(root, &status) == 0 && (!S_ISDIR(status.st_mode) ||
+		    (status.st_uid != geteuid() && status.st_uid != 0) ||
+		    (status.st_mode & (S_IWGRP | S_IWOTH)) != 0)) {
 			errno = EPERM;
 			return (-1);
 		}

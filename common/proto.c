@@ -491,11 +491,8 @@ proto_parse_msg(const char *line, size_t len, struct proto_msg *out)
 	strlcpy(out->event_name, json_string_value(value),
 	    sizeof(out->event_name));
 
-	value = json_object_get(root, "proto");
-	if (json_is_integer(value)) {
+	if (read_int(json_object_get(root, "proto"), &out->proto_version) == 0)
 		out->has_proto_version = 1;
-		out->proto_version = (int)json_integer_value(value);
-	}
 
 	/*
 	 * Every field is required. Letting a missing adapter_present default

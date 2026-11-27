@@ -545,6 +545,37 @@ test_flush_warning_kept(const char *scratch)
 	    report.detail);
 }
 
+/* A file that exists but cannot be read is not an absent file. */
+static void
+test_unreadable_hosts(const char *scratch)
+{
+	struct btmgr_paths	 paths;
+	struct pair_state	 state;
+	struct pair_report	 report;
+	struct fake		 fake = { 0, 0, 1 };
+	struct pair_ops		 ops = { fake_reload, fake_running, &fake };
+	char			*text;
+
+	printf("\nan unreadable hosts file stops the pairing\n");
+
+	/* Root reads any file, so this only means something as a user. */
+	if (geteuid() == 0)
+		return;
+	if (seed(scratch, "unreadable", &paths) != 0) {
+		ok(0, "could not seed the sandbox");
+		return;
+	}
+
+	(void)chmod(paths.hosts, 0);
+	ok(pairing_begin(&paths, &ops, speaker_addr, "Soundbar X900", "0000",
+	    &state, &report) == PAIR_ERROR, "pairing fails");
+	(void)chmod(paths.hosts, BTMGR_MODE_HOSTS);
+
+	text = slurp(paths.hosts);
+	ok(text != NULL && strcmp(text, hosts_seed) == 0, "and hosts is left as it was");
+	free(text);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -579,6 +610,7 @@ main(int argc, char *argv[])
 	test_repair(scratch);
 	test_store_load(scratch);
 	test_flush_warning_kept(scratch);
+	test_unreadable_hosts(scratch);
 
 	printf("\n%d checks, %d failures\n", checks, failures);
 

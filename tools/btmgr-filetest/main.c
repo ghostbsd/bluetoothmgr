@@ -276,22 +276,28 @@ main(int argc, char **argv)
 	ok(mode_of(target) == 0600, "target kept mode 0600 (got %04o)",
 	    mode_of(target));
 
-	/*
-	 * An existing file keeps its own mode even when the caller names a
-	 * different one. /etc/bluetooth/hosts is 0644 and must stay readable.
-	 */
-	printf("\n-- an existing file keeps its own mode --\n");
+	/* An existing file keeps its mode, but never wider than asked for. */
+	printf("\n-- an existing file keeps its mode, never wider --\n");
 	{
-		char	hosts[PATH_MAX];
+		char	hosts[PATH_MAX], loosened[PATH_MAX], tightened[PATH_MAX];
 
 		(void)snprintf(hosts, sizeof(hosts), "%s/hosts", root);
 		put_file(hosts, "old\n", 0644);
-		rc = safefile_write(&ctx, hosts, 0600, "new\n", 4, err,
-		    sizeof(err));
+		rc = safefile_write(&ctx, hosts, 0644, "new\n", 4, err, sizeof(err));
 		ok(rc == SAFEFILE_WRITTEN, "wrote hosts (got %d, %s)", rc, err);
-		ok(mode_of(hosts) == 0644,
-		    "0644 preserved despite a 0600 argument (got %04o)",
-		    mode_of(hosts));
+		ok(mode_of(hosts) == 0644, "hosts stays 0644 (got %04o)", mode_of(hosts));
+
+		(void)snprintf(loosened, sizeof(loosened), "%s/loosened.conf", root);
+		put_file(loosened, "old\n", 0644);
+		rc = safefile_write(&ctx, loosened, 0600, "new\n", 4, err, sizeof(err));
+		ok(rc == SAFEFILE_WRITTEN && mode_of(loosened) == 0600,
+		    "a loosened 0644 file written as 0600 is tightened (got %04o)", mode_of(loosened));
+
+		(void)snprintf(tightened, sizeof(tightened), "%s/tightened", root);
+		put_file(tightened, "old\n", 0600);
+		rc = safefile_write(&ctx, tightened, 0644, "new\n", 4, err, sizeof(err));
+		ok(rc == SAFEFILE_WRITTEN && mode_of(tightened) == 0600,
+		    "and an admin's tighter 0600 survives a 0644 request (got %04o)", mode_of(tightened));
 	}
 
 	/*
@@ -333,6 +339,28 @@ main(int argc, char **argv)
 	ok(got != NULL && strcmp(got, "second\n") == 0,
 	    ".bak refreshed to the pre-boot content");
 	free(got);
+
+	/* A symlink planted as .bak must be replaced, never written through. */
+	printf("\n-- a symlink at .bak is not followed --\n");
+	{
+		char	victim[PATH_MAX];
+		struct stat	status;
+
+		(void)snprintf(victim, sizeof(victim), "%s/victim", root);
+		put_file(victim, "untouched\n", 0644);
+		(void)unlink(bak);
+		(void)symlink(victim, bak);
+		rm_rf(rundir);
+		rc = safefile_write(&ctx, target, 0600, "fourth\n", 7, err,
+		    sizeof(err));
+		ok(rc == SAFEFILE_WRITTEN, "write with a planted symlink (got %d, %s)", rc, err);
+		got = get_file(victim);
+		ok(got != NULL && strcmp(got, "untouched\n") == 0,
+		    "the symlink's target is untouched");
+		free(got);
+		ok(lstat(bak, &status) == 0 && S_ISREG(status.st_mode),
+		    "and .bak is now a regular file");
+	}
 
 	/* --dry-run. */
 	printf("\n-- dry run changes nothing --\n");

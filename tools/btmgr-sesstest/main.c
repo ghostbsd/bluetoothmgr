@@ -122,6 +122,9 @@ test_record(void)
 	gui_record(&ut, "pts/0", "");
 	ok(!btmgr_session_record_is_gui(&ut),
 	    "nor is a pts line with no host at all");
+	gui_record(&ut, "pts/3", ":0");
+	ok(!btmgr_session_record_is_gui(&ut),
+	    "nor a pts line with host \":0\", which ulog-helper lets any user write");
 
 	/*
 	 * A colon after the first character must not count. ut_host carries the

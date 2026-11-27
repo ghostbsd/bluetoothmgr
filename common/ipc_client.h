@@ -39,9 +39,9 @@
 struct btmgr_ipc;
 
 /*
- * Called once per request, which B3.2 guarantees. On a lost connection every
- * pending request is failed with error_code "io_error" so a frontend never
- * waits forever for a daemon that has gone.
+ * Called once per request, which B3.2 guarantees. When dispatch finds the
+ * daemon gone, every pending request is failed with error_code "io_error", so
+ * a frontend never waits forever. btmgr_ipc_close() calls no callback.
  *
  * A callback may issue new requests. It MUST NOT call btmgr_ipc_close(): the
  * dispatch loop is still walking this connection and would then use freed

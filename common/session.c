@@ -8,6 +8,7 @@
 #include <sys/sysctl.h>
 #include <sys/user.h>
 
+#include <string.h>
 #include <syslog.h>
 #include <utmpx.h>
 
@@ -124,6 +125,10 @@ btmgr_session_record_is_gui(const struct utmpx *ut)
 {
 
 	if (ut->ut_type != USER_PROCESS)
+		return (0);
+
+	/* A9.3: any user can write a pts record, with any host, via ulog-helper. */
+	if (strncmp(ut->ut_line, "pts/", 4) == 0)
 		return (0);
 
 	return (is_display_spec(ut->ut_line, sizeof(ut->ut_line)) ||

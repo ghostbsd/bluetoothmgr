@@ -178,92 +178,95 @@ marker_path(const struct safefile_ctx *context, const char *path, char *marker,
 }
 
 /*
- * Copy src to dst, preserving mode and, if we have the privilege, ownership.
- *
- * Not atomic, and deliberately so: dst is a .bak that nothing else reads, and
- * making this atomic too would mean a temp file whose own failure modes need
- * the same care. What matters is that we never get here twice per boot.
+ * Copy source to destination with its mode and, if we may, its owner. Written
+ * to a temporary file and renamed, so a symlink at destination is replaced.
  */
 static int
-copy_preserving(const char *src, const char *dst, char *err, size_t errlen)
+copy_preserving(const char *source, const char *destination, char *err,
+    size_t errlen)
 {
-	struct stat	 sb;
-	char		 buf[65536];
-	ssize_t		 n;
-	int		 in, out, saved;
+	struct stat	 status;
+	char		 buffer[65536], temporary[PATH_MAX];
+	ssize_t		 count;
+	int		 input, output = -1, created = 0, saved_errno;
 
-	in = open(src, O_RDONLY | O_CLOEXEC);
-	if (in == -1) {
-		seterr(err, errlen, "open %s: %s", src, strerror(errno));
+	if ((size_t)snprintf(temporary, sizeof(temporary), "%s.XXXXXX",
+	    destination) >= sizeof(temporary)) {
+		seterr(err, errlen, "temp path for %s too long", destination);
+		errno = ENAMETOOLONG;
 		return (-1);
 	}
-	if (fstat(in, &sb) == -1) {
-		seterr(err, errlen, "fstat %s: %s", src, strerror(errno));
-		goto fail_in;
+
+	input = open(source, O_RDONLY | O_CLOEXEC);
+	if (input == -1) {
+		seterr(err, errlen, "open %s: %s", source, strerror(errno));
+		return (-1);
+	}
+	if (fstat(input, &status) == -1) {
+		seterr(err, errlen, "fstat %s: %s", source, strerror(errno));
+		goto fail;
 	}
 
-	/* 0600 until the content is in place, then the source's real mode. */
-	out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-	if (out == -1) {
-		seterr(err, errlen, "open %s: %s", dst, strerror(errno));
-		goto fail_in;
+	output = mkstemp(temporary);
+	if (output == -1) {
+		seterr(err, errlen, "mkstemp %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
+	created = 1;
 
 	for (;;) {
-		n = read(in, buf, sizeof(buf));
-		if (n == -1) {
+		count = read(input, buffer, sizeof(buffer));
+		if (count == -1) {
 			if (errno == EINTR)
 				continue;
-			seterr(err, errlen, "read %s: %s", src,
-			    strerror(errno));
-			goto fail_out;
+			seterr(err, errlen, "read %s: %s", source, strerror(errno));
+			goto fail;
 		}
-		if (n == 0)
+		if (count == 0)
 			break;
-		if (write_all(out, buf, (size_t)n) == -1) {
-			seterr(err, errlen, "write %s: %s", dst,
-			    strerror(errno));
-			goto fail_out;
+		if (write_all(output, buffer, (size_t)count) == -1) {
+			seterr(err, errlen, "write %s: %s", temporary, strerror(errno));
+			goto fail;
 		}
 	}
 
-	/*
-	 * Ownership before mode: fchown(2) clears the setuid and setgid bits
-	 * on some systems, so setting the mode afterwards is what makes the
-	 * copy faithful. Not being root is normal here, since the test harness
-	 * runs unprivileged, and a .bak that we could not chown is still a
-	 * correct backup of the content.
-	 */
-	if (fchown(out, sb.st_uid, sb.st_gid) == -1 &&
-	    errno != EPERM && errno != EINVAL) {
-		seterr(err, errlen, "fchown %s: %s", dst, strerror(errno));
-		goto fail_out;
+	/* Owner before mode, since fchown(2) can clear setuid and setgid. */
+	if (fchown(output, status.st_uid, status.st_gid) == -1 && errno != EPERM && errno != EINVAL) {
+		seterr(err, errlen, "fchown %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
-	if (fchmod(out, sb.st_mode & ALLPERMS) == -1) {
-		seterr(err, errlen, "fchmod %s: %s", dst, strerror(errno));
-		goto fail_out;
+	if (fchmod(output, status.st_mode & ALLPERMS) == -1) {
+		seterr(err, errlen, "fchmod %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
-	if (fsync(out) == -1) {
-		seterr(err, errlen, "fsync %s: %s", dst, strerror(errno));
-		goto fail_out;
+	if (fsync(output) == -1) {
+		seterr(err, errlen, "fsync %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
-	if (close(out) == -1) {
-		seterr(err, errlen, "close %s: %s", dst, strerror(errno));
-		close(in);
-		return (-1);
+	if (close(output) == -1) {
+		output = -1;
+		seterr(err, errlen, "close %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
-	close(in);
+	output = -1;
+
+	if (rename(temporary, destination) == -1) {
+		seterr(err, errlen, "rename %s to %s: %s", temporary, destination, strerror(errno));
+		goto fail;
+	}
+	close(input);
+
 	return (0);
 
-fail_out:
-	saved = errno;
-	close(out);
-	unlink(dst);
-	errno = saved;
-fail_in:
-	saved = errno;
-	close(in);
-	errno = saved;
+fail:
+	saved_errno = errno;
+	if (output != -1)
+		close(output);
+	if (created)
+		unlink(temporary);
+	close(input);
+	errno = saved_errno;
+
 	return (-1);
 }
 
@@ -309,7 +312,7 @@ ensure_backup(const struct safefile_ctx *context, const char *path, char *err,
 			return (-1);
 	}
 
-	fd = open(marker, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+	fd = open(marker, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644);
 	if (fd == -1) {
 		seterr(err, errlen, "create %s: %s", marker, strerror(errno));
 		return (-1);
@@ -407,15 +410,12 @@ safefile_write(const struct safefile_ctx *context, const char *path,
 		free(cur);
 
 		/*
-		 * An existing file keeps its own mode and ownership, so we
-		 * need its stat. Only a successful stat sets have_old, because
-		 * have_old is what later licenses reading sb: treating a
-		 * failed stat as "the file is there" would hand fchown(2) an
-		 * uninitialised uid.
+		 * An existing file keeps its ownership and its mode, but never
+		 * wider than mode: a loosened hcsecd.conf must not expose PINs.
 		 */
 		if (stat(path, &sb) == 0) {
 			have_old = 1;
-			target_mode = sb.st_mode & ALLPERMS;
+			target_mode = sb.st_mode & ALLPERMS & mode;
 		}
 	} else if (errno != ENOENT) {
 		seterr(err, errlen, "read %s: %s", path, strerror(errno));

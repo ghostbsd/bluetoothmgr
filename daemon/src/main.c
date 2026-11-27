@@ -1231,6 +1231,9 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 	if (!btmgr_session_peer_allowed(c->send_uid, c->send_pid)) {
 		reply(d, c, proto_error(cmd.id, "not_permitted",
 		    "not root and not in a GUI session"));
+		/* A5.3. reply() drops the client itself when the write fails. */
+		if (client_alive(d, c))
+			drop_client(d, c);
 		return;
 	}
 
@@ -1965,9 +1968,9 @@ main(int argc, char *argv[])
 				continue;
 			}
 
-			/* Anything else is a client. */
+			/* Anything else is a client, unless this batch already dropped it. */
 			c = ev->udata;
-			if (c == NULL)
+			if (c == NULL || !client_alive(&d, c))
 				continue;
 
 			if (ev->filter == EVFILT_WRITE) {

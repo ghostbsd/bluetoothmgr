@@ -253,6 +253,29 @@ test_unsafe_root(const char *scratch)
 	ok(btmgr_paths_init(&paths, tightroot, 0) == 0,
 	    "while a 0700 root is accepted");
 
+	{
+		char	 group_root[PATH_MAX], linked_root[PATH_MAX];
+
+		(void)snprintf(group_root, sizeof(group_root), "%s/group",
+		    scratch);
+		(void)snprintf(linked_root, sizeof(linked_root), "%s/linked",
+		    scratch);
+		if (mkdir(group_root, 0770) != 0 ||
+		    chmod(group_root, 0770) != 0 ||
+		    symlink(tightroot, linked_root) != 0) {
+			ok(0, "could not set up the group and linked roots");
+			return;
+		}
+
+		errno = 0;
+		ok(btmgr_paths_init(&paths, group_root, 0) == -1 &&
+		    errno == EPERM, "a group-writable root is refused");
+		errno = 0;
+		ok(btmgr_paths_init(&paths, linked_root, 0) == -1 &&
+		    errno == EPERM,
+		    "and so is a symlink, even to an acceptable root");
+	}
+
 	/* A root that is not there yet is fine; mkdirs creates it. */
 	{
 		char	 absent[PATH_MAX];

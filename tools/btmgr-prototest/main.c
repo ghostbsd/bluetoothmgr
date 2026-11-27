@@ -646,6 +646,9 @@ test_decode(void)
 	eq(msg.event_name, "hello", "named hello");
 	ok(msg.has_proto_version && msg.proto_version == BTMGR_PROTO_VERSION,
 	    "exposing the proto version B2.1 makes the client check");
+	ok(decode("{\"event\":\"hello\",\"proto\":4294967296}", &msg) == 0 &&
+	    !msg.has_proto_version,
+	    "a proto past INT_MAX is no version, so it cannot wrap to 0");
 
 	printf("\nthe state event\n");
 

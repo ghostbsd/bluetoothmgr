@@ -121,7 +121,7 @@ fail_all_pending(struct btmgr_ipc *connection)
 void
 btmgr_ipc_set_request_timeout(struct btmgr_ipc *connection, int seconds)
 {
-	if (connection!= NULL && seconds > 0)
+	if (connection != NULL && seconds > 0)
 		connection->request_timeout = seconds;
 }
 
@@ -131,7 +131,7 @@ btmgr_ipc_expire_requests(struct btmgr_ipc *connection)
 	time_t	 now;
 	int	 expired = 0, i;
 
-	if (connection== NULL)
+	if (connection == NULL)
 		return (0);
 
 	now = now_mono();
@@ -204,7 +204,7 @@ btmgr_ipc_open(const char *path)
 	}
 
 	connection= calloc(1, sizeof(*connection));
-	if (connection== NULL)
+	if (connection == NULL)
 		return (NULL);
 
 	/* A frontend that execs anything must not leak the daemon channel. */
@@ -246,7 +246,7 @@ void
 btmgr_ipc_close(struct btmgr_ipc *connection)
 {
 
-	if (connection== NULL)
+	if (connection == NULL)
 		return;
 
 	linebuf_free(&connection->buf);
@@ -305,7 +305,7 @@ btmgr_ipc_request(struct btmgr_ipc *connection, struct proto_cmd *cmd,
 	char			*line;
 	int			 saved;
 
-	if (connection== NULL || cmd == NULL) {
+	if (connection == NULL || cmd == NULL) {
 		errno = EINVAL;
 		return (-1);
 	}
@@ -372,7 +372,7 @@ btmgr_ipc_dispatch(struct btmgr_ipc *connection, btmgr_event_fn on_event,
 	size_t			 len;
 	int			 filled, saved;
 
-	if (connection== NULL) {
+	if (connection == NULL) {
 		errno = EINVAL;
 		return (-1);
 	}
@@ -450,5 +450,5 @@ btmgr_ipc_pending_count(const struct btmgr_ipc *connection)
 int
 btmgr_ipc_is_ready(const struct btmgr_ipc *connection)
 {
-	return (connection!= NULL && connection->handshake == HANDSHAKE_AGREED);
+	return (connection != NULL && connection->handshake == HANDSHAKE_AGREED);
 }
