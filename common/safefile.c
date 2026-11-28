@@ -2,9 +2,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * safefile.c - the A0 write discipline. SPEC.md Part A, section A0.
- *
- * See safefile.h for which rule each piece implements and why the per-boot
- * marker is a file rather than a clock comparison.
  */
 
 #include <sys/cdefs.h>
@@ -29,10 +26,7 @@
  */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
-static int	 marker_path(const struct safefile_ctx *context, const char *path,
-		     char *marker, size_t marker_size);
-static int	 ensure_backup(const struct safefile_ctx *context,
-		     const char *path, char *err, size_t errlen);
+static int	 ensure_backup(const char *path, char *err, size_t errlen);
 static int	 copy_preserving(const char *src, const char *dst,
 		     char *err, size_t errlen);
 static int	 write_all(int fd, const void *buf, size_t len);
@@ -59,21 +53,12 @@ seterr(char *err, size_t errlen, const char *fmt, ...)
 	errno = saved;
 }
 
-int
-safefile_init(struct safefile_ctx *context, const char *rundir, int dry_run)
+void
+safefile_init(struct safefile_ctx *context, int dry_run)
 {
-	const char	*dir;
 
 	memset(context, 0, sizeof(*context));
-	dir = (rundir != NULL) ? rundir : SAFEFILE_RUNDIR;
-
-	if (strlcpy(context->rundir, dir, sizeof(context->rundir)) >=
-	    sizeof(context->rundir)) {
-		errno = ENAMETOOLONG;
-		return (-1);
-	}
 	context->dry_run = dry_run;
-	return (0);
 }
 
 char *
@@ -156,24 +141,6 @@ safefile_read(const char *path, size_t *lenp)
 	if (lenp != NULL)
 		*lenp = off;
 	return (buf);
-}
-
-/* The per-boot marker for a target: our targets all have distinct names. */
-static int
-marker_path(const struct safefile_ctx *context, const char *path, char *marker,
-    size_t marker_size)
-{
-	const char	*file_name;
-
-	file_name = strrchr(path, '/');
-	file_name = file_name != NULL ? file_name + 1 : path;
-
-	if ((size_t)snprintf(marker, marker_size, "%s/%s", context->rundir,
-	    file_name) >= marker_size) {
-		errno = ENAMETOOLONG;
-		return (-1);
-	}
-	return (0);
 }
 
 /*
@@ -269,55 +236,23 @@ fail:
 	return (-1);
 }
 
-/*
- * A0.2. Make sure this boot's backup of path exists, then record that we have
- * done it.
- *
- * The marker is written even when there was nothing to back up, because a file
- * that did not exist before we ran has no pre-BluetoothMgr state to preserve.
- * Without the marker, our second write of a file we created ourselves would
- * "back up" our own first write and call it the user's original.
- */
+/* A0.2: copy the file before its first change; an existing .bak is never touched. */
 static int
-ensure_backup(const struct safefile_ctx *context, const char *path, char *err,
-    size_t errlen)
+ensure_backup(const char *path, char *err, size_t errlen)
 {
-	char	 marker[PATH_MAX], bak[PATH_MAX];
-	int	 fd;
+	struct stat	 status;
+	char		 backup[PATH_MAX];
 
-	if (marker_path(context, path, marker, sizeof(marker)) == -1) {
-		seterr(err, errlen, "marker path for %s too long", path);
+	if ((size_t)snprintf(backup, sizeof(backup), "%s.bak", path) >= sizeof(backup)) {
+		seterr(err, errlen, "backup path for %s too long", path);
+		errno = ENAMETOOLONG;
 		return (-1);
 	}
 
-	if (access(marker, F_OK) == 0)
-		return (0);		/* already backed up this boot */
+	if (lstat(backup, &status) == 0 || access(path, F_OK) != 0)
+		return (0);
 
-	if (mkdir(context->rundir, 0755) == -1 && errno != EEXIST) {
-		seterr(err, errlen, "mkdir %s: %s", context->rundir,
-		    strerror(errno));
-		return (-1);
-	}
-
-	if (access(path, F_OK) == 0) {
-		if ((size_t)snprintf(bak, sizeof(bak), "%s.bak", path) >=
-		    sizeof(bak)) {
-			seterr(err, errlen, "backup path for %s too long",
-			    path);
-			errno = ENAMETOOLONG;
-			return (-1);
-		}
-		if (copy_preserving(path, bak, err, errlen) == -1)
-			return (-1);
-	}
-
-	fd = open(marker, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644);
-	if (fd == -1) {
-		seterr(err, errlen, "create %s: %s", marker, strerror(errno));
-		return (-1);
-	}
-	close(fd);
-	return (0);
+	return (copy_preserving(path, backup, err, errlen));
 }
 
 static int
@@ -350,7 +285,7 @@ safefile_write(const struct safefile_ctx *context, const char *path,
 	if (err != NULL && errlen > 0)
 		err[0] = '\0';
 
-	/* A0.5 before the backup, so an identical write does not use up this boot's .bak. */
+	/* A0.5 before the backup, so an identical write never makes a .bak. */
 	current = safefile_read(path, &current_length);
 	if (current != NULL) {
 		if (current_length == len && (len == 0 || memcmp(current, buf, len) == 0)) {
@@ -366,7 +301,7 @@ safefile_write(const struct safefile_ctx *context, const char *path,
 	if (context->dry_run)
 		return (SAFEFILE_DRYRUN);
 
-	if (ensure_backup(context, path, err, errlen) == -1)
+	if (ensure_backup(path, err, errlen) == -1)
 		return (SAFEFILE_ERROR);
 
 	/* A0.1, A0.6: edited in place, so an existing file keeps its owner and mode. */

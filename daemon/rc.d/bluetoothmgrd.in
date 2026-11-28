@@ -5,8 +5,6 @@
 # KEYWORD: nojail shutdown suspend resume
 #
 # bluetoothmgrd_enable="YES"
-# bluetoothmgrd_socket="/var/run/bluetoothmgr.sock"
-# bluetoothmgrd_pidfile="/var/run/bluetoothmgrd.pid"
 # bluetoothmgrd_flags=""
 
 . /etc/rc.subr
@@ -25,14 +23,9 @@ required_modules="ng_btsocket"
 load_rc_config $name
 
 : ${bluetoothmgrd_enable:="NO"}
-: ${bluetoothmgrd_socket:="/var/run/bluetoothmgr.sock"}
-: ${bluetoothmgrd_pidfile:="/var/run/${name}.pid"}
 
-# Passed to -p as well, or stop and status would look in the wrong place.
-pidfile="${bluetoothmgrd_pidfile}"
-
-# Moving the socket means exporting $BTMGR_SOCKET in the session too.
-command_args="-s ${bluetoothmgrd_socket} -p ${bluetoothmgrd_pidfile}"
+# The daemon's own fixed path, so stop and status find it.
+pidfile="/var/run/${name}.pid"
 
 # SIGHUP makes the daemon re-read state and push it to clients. It does not
 # re-exec, so reload is cheap and never drops a connection.

@@ -7,8 +7,8 @@
  * socket and signals. The tick is kevent()'s timeout, not an EVFILT_TIMER,
  * which stops firing across a suspend.
  *
- *	./bluetoothmgrd -f -s /tmp/btmgr.sock
- *	nc -U /tmp/btmgr.sock
+ *	bluetoothmgrd -f
+ *	nc -U /var/run/bluetoothmgr.sock
  */
 
 #include <sys/types.h>
@@ -46,8 +46,8 @@
 /* After the system headers: it redefines malloc. */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
-#define	DEFAULT_SOCKET	"/var/run/bluetoothmgr.sock"
-#define	DEFAULT_PIDFILE	"/var/run/bluetoothmgrd.pid"
+#define	SOCKET_PATH	"/var/run/bluetoothmgr.sock"
+#define	PIDFILE_PATH	"/var/run/bluetoothmgrd.pid"
 
 /* A5.1: the mode is not the boundary, A5.3 is. Narrower refuses a GUI user. */
 #define	SOCKET_MODE	0666
@@ -119,7 +119,6 @@ struct daemon {
 	int		 kq;
 	int		 lfd;		/* IPC listening socket */
 	int		 hci;		/* passive HCI event socket */
-	const char	*sockpath;
 	char		 node[HCI_DEVNAME_SIZE];
 	struct client	*clients;
 	struct client	*dropped;	/* freed at the end of each loop pass */
@@ -207,15 +206,9 @@ static void
 usage(void)
 {
 	(void)fprintf(stderr,
-	    "usage: bluetoothmgrd [-f] [-n] [-p pidfile] [-r root] "
-	    "[-s socket]\n"
-	    "\t-n\tdry run: report what would be written, write nothing\n"
-	    "\t-p\tpidfile, " DEFAULT_PIDFILE " by default. Its lock is what\n"
-	    "\t\tkeeps a second daemon from taking over the socket.\n"
-	    "\t-r\twrite the config files under root instead of /, for a\n"
-	    "\t\ttrial against copies. Use " BTMGR_SANDBOX ", never a\n"
-	    "\t\tworld-writable directory: a sandbox copy of hcsecd.conf\n"
-	    "\t\tcarries PINs and link keys.\n");
+	    "usage: bluetoothmgrd [-f] [-n]\n"
+	    "\t-f\tstay in the foreground\n"
+	    "\t-n\tdry run: report what would be written, write nothing\n");
 	exit(1);
 }
 
@@ -1736,8 +1729,6 @@ main(int argc, char *argv[])
 	struct kevent	 events[MAX_EVENTS];
 	struct client	*c;
 	struct pidfh	*pfh;
-	const char	*root = NULL;
-	const char	*pidpath = DEFAULT_PIDFILE;
 	pid_t		 other;
 	time_t		 last_tick;
 	int		 ch, foreground = 0, dry_run = 0, i, n;
@@ -1747,24 +1738,14 @@ main(int argc, char *argv[])
 	d.lfd = -1;
 	d.hci = -1;
 	d.devd = -1;
-	d.sockpath = DEFAULT_SOCKET;
 
-	while ((ch = getopt(argc, argv, "fnp:r:s:")) != -1) {
+	while ((ch = getopt(argc, argv, "fn")) != -1) {
 		switch (ch) {
 		case 'f':
 			foreground = 1;
 			break;
 		case 'n':
 			dry_run = 1;
-			break;
-		case 'p':
-			pidpath = optarg;
-			break;
-		case 'r':
-			root = optarg;
-			break;
-		case 's':
-			d.sockpath = optarg;
 			break;
 		default:
 			usage();
@@ -1773,20 +1754,7 @@ main(int argc, char *argv[])
 	if (optind != argc)
 		usage();
 
-	/* daemon(3) moves us to /, so a relative path binds out of reach. */
-	if (d.sockpath[0] != '/')
-		errx(1, "socket path must be absolute: %s", d.sockpath);
-
-	if (pidpath[0] != '/')
-		errx(1, "pidfile path must be absolute: %s", pidpath);
-
-	/*
-	 * Resolve the config paths before anything else, so a bad -r is a
-	 * startup error rather than a surprise at the first write. init()
-	 * refuses a relative root and a world-writable one.
-	 */
-	if (btmgr_paths_init(&d.paths, root, dry_run) < 0)
-		err(1, "config root '%s'", root != NULL ? root : "/");
+	btmgr_paths_init(&d.paths, dry_run);
 
 	/* A8.1. uid 0 because a real hcsecd must be root to open the socket. */
 	if (hcsecd_ctl_init(&d.hcsecd, NULL, 0, dry_run) < 0)
@@ -1817,11 +1785,11 @@ main(int argc, char *argv[])
 	 * Before the socket: the lock is what stops a second daemon from
 	 * unlinking the first one's socket on its way to binding its own.
 	 */
-	pfh = pidfile_open(pidpath, 0600, &other);
+	pfh = pidfile_open(PIDFILE_PATH, 0600, &other);
 	if (pfh == NULL) {
 		if (errno == EEXIST)
 			errx(1, "already running as pid %d", (int)other);
-		err(1, "pidfile %s", pidpath);
+		err(1, "pidfile %s", PIDFILE_PATH);
 	}
 
 	/*
@@ -1829,10 +1797,10 @@ main(int argc, char *argv[])
 	 * likeliest startup failure and err(3) still reaches the terminal
 	 * here. An ordinary descriptor survives the fork.
 	 */
-	d.lfd = ipc_listen(d.sockpath, SOCKET_MODE);
+	d.lfd = ipc_listen(SOCKET_PATH, SOCKET_MODE);
 	if (d.lfd < 0) {
 		pidfile_remove(pfh);
-		err(1, "ipc_listen %s", d.sockpath);
+		err(1, "ipc_listen %s", SOCKET_PATH);
 	}
 
 	if (!foreground && daemon(0, 0) < 0) {
@@ -1873,12 +1841,12 @@ main(int argc, char *argv[])
 	 * between.
 	 */
 	if (pidfile_write(pfh) < 0) {
-		syslog(LOG_ERR, "pidfile %s: %m", pidpath);
+		syslog(LOG_ERR, "pidfile %s: %m", PIDFILE_PATH);
 		pidfile_remove(pfh);
 		exit(1);
 	}
 
-	syslog(LOG_INFO, "started, socket %s", d.sockpath);
+	syslog(LOG_INFO, "started, socket %s", SOCKET_PATH);
 
 	/* Prime the state before the first client can ask for it. */
 	load_store(&d);
@@ -2036,7 +2004,7 @@ main(int argc, char *argv[])
 		listen_close(d.hci);
 	if (d.lfd >= 0)
 		close(d.lfd);
-	(void)unlink(d.sockpath);		/* SPEC.md A5.2 */
+	(void)unlink(SOCKET_PATH);		/* SPEC.md A5.2 */
 	if (d.kq >= 0)
 		close(d.kq);
 

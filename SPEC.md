@@ -30,10 +30,9 @@ loses pairing keys.
   content into it, truncate it to that length, then `fsync()` it. The file MUST
   NOT be replaced. A file that does not exist yet is created with the mode its
   section names.
-- **A0.2** Before the first modification of a file in a given boot, the daemon
-  MUST copy the existing file to `<path>.bak`, preserving mode and ownership.
-  It MUST NOT overwrite an existing `.bak` on subsequent writes in the same
-  boot, so the backup always represents the pre-BluetoothMgr state.
+- **A0.2** Before modifying an existing file, the daemon MUST copy it to
+  `<path>.bak`, preserving mode and ownership, unless `<path>.bak` already
+  exists. It MUST NOT modify or replace an existing `.bak`.
 - **A0.3** The daemon MUST NOT edit individual lines with line-oriented or
   regex editing. It MUST parse the file into a model, modify the model, and
   re-emit the file in full.

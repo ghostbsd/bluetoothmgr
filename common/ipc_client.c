@@ -174,20 +174,6 @@ deliver_reply(struct btmgr_ipc *connection, const struct proto_msg *reply)
 	/* A reply to nothing: a late duplicate, or a daemon bug. Ignore it. */
 }
 
-const char *
-btmgr_ipc_default_path(void)
-{
-	struct sockaddr_un	 sa;
-	const char		*env;
-
-	env = getenv(BTMGR_SOCKET_ENV);
-	if (env == NULL || env[0] != '/' ||
-	    strlen(env) >= sizeof(sa.sun_path))
-		return (BTMGR_SOCKET_PATH);
-
-	return (env);
-}
-
 struct btmgr_ipc *
 btmgr_ipc_open(const char *path)
 {
@@ -196,7 +182,7 @@ btmgr_ipc_open(const char *path)
 	int			 socket_fd = -1, enabled = 1, saved_errno;
 
 	if (path == NULL)
-		path = btmgr_ipc_default_path();
+		path = BTMGR_SOCKET_PATH;
 
 	if (strlen(path) >= sizeof(address.sun_path)) {
 		errno = ENAMETOOLONG;

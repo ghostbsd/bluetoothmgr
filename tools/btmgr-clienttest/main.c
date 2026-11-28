@@ -16,6 +16,7 @@
 #include <sys/un.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,8 +30,8 @@
 
 static int	 failures;
 static int	 checks;
-static char	 dir[64];
-static char	 sockpath[96];
+static char	 dir[PATH_MAX];
+static char	 sockpath[PATH_MAX];
 
 static void	 ok(int cond, const char *fmt, ...) __printflike(2, 3);
 static void	 eq(const char *got, const char *want, const char *what);
@@ -115,44 +116,6 @@ test_absent_daemon(void)
 	/* The header promises NULL is accepted. */
 	btmgr_ipc_close(NULL);
 	ok(1, "closing NULL is harmless");
-}
-
-static void
-test_default_path(void)
-{
-	char	 toolong[128];
-
-	printf("\nthe default socket path\n");
-
-	(void)unsetenv(BTMGR_SOCKET_ENV);
-	eq(btmgr_ipc_default_path(), BTMGR_SOCKET_PATH,
-	    "unset falls back to the compiled-in path");
-
-	(void)setenv(BTMGR_SOCKET_ENV, "/var/run/elsewhere.sock", 1);
-	eq(btmgr_ipc_default_path(), "/var/run/elsewhere.sock",
-	    "an absolute override is taken");
-
-	(void)setenv(BTMGR_SOCKET_ENV, "", 1);
-	eq(btmgr_ipc_default_path(), BTMGR_SOCKET_PATH,
-	    "empty is ignored rather than becoming a relative path");
-
-	(void)setenv(BTMGR_SOCKET_ENV, "relative/path.sock", 1);
-	eq(btmgr_ipc_default_path(), BTMGR_SOCKET_PATH,
-	    "a relative override is ignored");
-
-	/*
-	 * sun_path is 104 bytes on FreeBSD, and btmgr_ipc_open() would reject
-	 * an over-long path with ENAMETOOLONG anyway. Falling back here keeps
-	 * a typo in the session environment from disabling the applet.
-	 */
-	memset(toolong, 'x', sizeof(toolong) - 1);
-	toolong[0] = '/';
-	toolong[sizeof(toolong) - 1] = '\0';
-	(void)setenv(BTMGR_SOCKET_ENV, toolong, 1);
-	eq(btmgr_ipc_default_path(), BTMGR_SOCKET_PATH,
-	    "an override too long for sun_path is ignored");
-
-	(void)unsetenv(BTMGR_SOCKET_ENV);
 }
 
 static void
@@ -810,8 +773,19 @@ test_request_timeout(void)
 int
 main(void)
 {
+	struct sockaddr_un	 address;
+	char			 working[PATH_MAX];
 
-	(void)snprintf(dir, sizeof(dir), "/tmp/btmgr-ct.XXXXXX");
+	if (getcwd(working, sizeof(working)) == NULL) {
+		perror("getcwd");
+		return (2);
+	}
+	(void)snprintf(dir, sizeof(dir), "%s/btmgr-ct.XXXXXX", working);
+	if (strlen(dir) + sizeof("/s") > sizeof(address.sun_path)) {
+		(void)fprintf(stderr, "run from a shorter directory: the socket path must fit in %zu bytes\n",
+		    sizeof(address.sun_path));
+		return (2);
+	}
 	if (mkdtemp(dir) == NULL) {
 		perror("mkdtemp");
 		return (2);
@@ -821,7 +795,6 @@ main(void)
 	printf("btmgr-clienttest: %s\n", sockpath);
 
 	test_absent_daemon();
-	test_default_path();
 	test_roundtrip();
 	test_daemon_restart();
 

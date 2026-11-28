@@ -2,7 +2,8 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * safefile.h - every config file write, under SPEC.md A0: edited in place
- * (A0.1, A0.6), backed up once per boot (A0.2), skipped when identical (A0.5).
+ * (A0.1, A0.6), backed up before its first change (A0.2), skipped when identical
+ * (A0.5).
  * A0.3 and A0.4 are the callers' job. Tested by tools/btmgr-filetest.
  */
 
@@ -14,17 +15,6 @@
 #include <limits.h>
 #include <stddef.h>
 
-/*
- * Where the per-boot backup markers live. A0.2 is scoped to a boot, so we need
- * to know whether the .bak on disk was made during this one. We do not compare
- * the .bak's mtime against kern.boottime: an NTP step backwards would make a
- * backup we wrote look older than the boot, and we would then overwrite the
- * user's pristine pre-BluetoothMgr file with our own output. Losing that file
- * is the exact outcome A0.2 exists to prevent, so the marker is a file in a
- * directory the system clears at boot, which depends on no clock at all.
- */
-#define	SAFEFILE_RUNDIR		"/var/run/bluetoothmgr"
-
 /* Outcomes of a write. Negative is failure, zero and up are success. */
 enum safefile_result {
 	SAFEFILE_ERROR	 = -1,
@@ -33,21 +23,11 @@ enum safefile_result {
 	SAFEFILE_DRYRUN	 = 2	/* would have written, --dry-run is on */
 };
 
-/*
- * Caller-owned configuration, so that tests and --dry-run can redirect
- * everything away from /etc and /var/run without the generators knowing.
- */
 struct safefile_ctx {
-	char	rundir[PATH_MAX];	/* per-boot markers (A0.2) */
 	int	dry_run;		/* report, change nothing */
 };
 
-/*
- * Initialise a context. Passing NULL for rundir selects SAFEFILE_RUNDIR.
- * Returns 0, or -1 with errno set to ENAMETOOLONG if rundir does not fit.
- */
-int	safefile_init(struct safefile_ctx *context, const char *rundir,
-	    int dry_run);
+void	safefile_init(struct safefile_ctx *context, int dry_run);
 
 /*
  * Write buf to path in place. mode applies only to a file created here; an
