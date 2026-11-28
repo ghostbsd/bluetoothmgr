@@ -7,8 +7,8 @@
  * socket and signals. The tick is kevent()'s timeout, not an EVFILT_TIMER,
  * which stops firing across a suspend.
  *
- *	./bluetoothmgrd -f -s /tmp/btmgr.sock
- *	nc -U /tmp/btmgr.sock
+ *	bluetoothmgrd -f
+ *	nc -U /var/run/bluetoothmgr.sock
  */
 
 #include <sys/types.h>
@@ -46,8 +46,8 @@
 /* After the system headers: it redefines malloc. */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
-#define	DEFAULT_SOCKET	"/var/run/bluetoothmgr.sock"
-#define	DEFAULT_PIDFILE	"/var/run/bluetoothmgrd.pid"
+#define	SOCKET_PATH	"/var/run/bluetoothmgr.sock"
+#define	PIDFILE_PATH	"/var/run/bluetoothmgrd.pid"
 
 /* A5.1: the mode is not the boundary, A5.3 is. Narrower refuses a GUI user. */
 #define	SOCKET_MODE	0666
@@ -119,9 +119,9 @@ struct daemon {
 	int		 kq;
 	int		 lfd;		/* IPC listening socket */
 	int		 hci;		/* passive HCI event socket */
-	const char	*sockpath;
 	char		 node[HCI_DEVNAME_SIZE];
 	struct client	*clients;
+	struct client	*dropped;	/* freed at the end of each loop pass */
 	struct state	 last;		/* last snapshot sent to clients */
 	struct adapter_cache adapter_cache;
 	struct store	*store;		/* A4, NULL until loaded */
@@ -161,6 +161,7 @@ static int	kq_del(int kq, uintptr_t ident, short filter);
 static void	broadcast(struct daemon *d, const char *line);
 static int	client_alive(struct daemon *d, const struct client *c);
 static void	drop_client(struct daemon *d, struct client *c);
+static void	free_dropped_clients(struct daemon *d);
 static void	handle_line(struct daemon *d, struct client *c,
 		    const char *line, size_t len);
 static void	service_client(struct daemon *d, struct client *c);
@@ -205,15 +206,9 @@ static void
 usage(void)
 {
 	(void)fprintf(stderr,
-	    "usage: bluetoothmgrd [-f] [-n] [-p pidfile] [-r root] "
-	    "[-s socket]\n"
-	    "\t-n\tdry run: report what would be written, write nothing\n"
-	    "\t-p\tpidfile, " DEFAULT_PIDFILE " by default. Its lock is what\n"
-	    "\t\tkeeps a second daemon from taking over the socket.\n"
-	    "\t-r\twrite the config files under root instead of /, for a\n"
-	    "\t\ttrial against copies. Use " BTMGR_SANDBOX ", never a\n"
-	    "\t\tworld-writable directory: a sandbox copy of hcsecd.conf\n"
-	    "\t\tcarries PINs and link keys.\n");
+	    "usage: bluetoothmgrd [-f] [-n]\n"
+	    "\t-f\tstay in the foreground\n"
+	    "\t-n\tdry run: report what would be written, write nothing\n");
 	exit(1);
 }
 
@@ -499,7 +494,21 @@ drop_client(struct daemon *d, struct client *c)
 	if (d->scan_client == c)
 		d->scan_client = NULL;
 
-	ipc_client_free(c);
+	/* Freed later, so no new client can take this address within a batch. */
+	c->next = d->dropped;
+	d->dropped = c;
+}
+
+static void
+free_dropped_clients(struct daemon *d)
+{
+	struct client	*client, *next;
+
+	for (client = d->dropped; client != NULL; client = next) {
+		next = client->next;
+		ipc_client_free(client);
+	}
+	d->dropped = NULL;
 }
 
 /*
@@ -1231,6 +1240,16 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 	if (!btmgr_session_peer_allowed(c->send_uid, c->send_pid)) {
 		reply(d, c, proto_error(cmd.id, "not_permitted",
 		    "not root and not in a GUI session"));
+		/* A5.3. reply() drops the client itself when the write fails. */
+		if (!client_alive(d, c))
+			return;
+		if (!c->want_write) {
+			drop_client(d, c);
+			return;
+		}
+		/* Close once the refusal is written, reading nothing more. */
+		c->close_after_flush = 1;
+		(void)kq_del(d->kq, (uintptr_t)c->fd, EVFILT_READ);
 		return;
 	}
 
@@ -1495,6 +1514,9 @@ service_client(struct daemon *d, struct client *c)
 	char	*line;
 	size_t	 len;
 
+	if (c->close_after_flush)
+		return;
+
 	if (ipc_client_read(c) < 0) {
 		drop_client(d, c);
 		return;
@@ -1516,7 +1538,7 @@ service_client(struct daemon *d, struct client *c)
 		 * is freed and we must not touch it again. Re-find it in the
 		 * list to be sure it is still alive.
 		 */
-		if (!client_alive(d, c))
+		if (!client_alive(d, c) || c->close_after_flush)
 			return;
 	}
 }
@@ -1707,8 +1729,6 @@ main(int argc, char *argv[])
 	struct kevent	 events[MAX_EVENTS];
 	struct client	*c;
 	struct pidfh	*pfh;
-	const char	*root = NULL;
-	const char	*pidpath = DEFAULT_PIDFILE;
 	pid_t		 other;
 	time_t		 last_tick;
 	int		 ch, foreground = 0, dry_run = 0, i, n;
@@ -1718,24 +1738,14 @@ main(int argc, char *argv[])
 	d.lfd = -1;
 	d.hci = -1;
 	d.devd = -1;
-	d.sockpath = DEFAULT_SOCKET;
 
-	while ((ch = getopt(argc, argv, "fnp:r:s:")) != -1) {
+	while ((ch = getopt(argc, argv, "fn")) != -1) {
 		switch (ch) {
 		case 'f':
 			foreground = 1;
 			break;
 		case 'n':
 			dry_run = 1;
-			break;
-		case 'p':
-			pidpath = optarg;
-			break;
-		case 'r':
-			root = optarg;
-			break;
-		case 's':
-			d.sockpath = optarg;
 			break;
 		default:
 			usage();
@@ -1744,20 +1754,7 @@ main(int argc, char *argv[])
 	if (optind != argc)
 		usage();
 
-	/* daemon(3) moves us to /, so a relative path binds out of reach. */
-	if (d.sockpath[0] != '/')
-		errx(1, "socket path must be absolute: %s", d.sockpath);
-
-	if (pidpath[0] != '/')
-		errx(1, "pidfile path must be absolute: %s", pidpath);
-
-	/*
-	 * Resolve the config paths before anything else, so a bad -r is a
-	 * startup error rather than a surprise at the first write. init()
-	 * refuses a relative root and a world-writable one.
-	 */
-	if (btmgr_paths_init(&d.paths, root, dry_run) < 0)
-		err(1, "config root '%s'", root != NULL ? root : "/");
+	btmgr_paths_init(&d.paths, dry_run);
 
 	/* A8.1. uid 0 because a real hcsecd must be root to open the socket. */
 	if (hcsecd_ctl_init(&d.hcsecd, NULL, 0, dry_run) < 0)
@@ -1788,11 +1785,11 @@ main(int argc, char *argv[])
 	 * Before the socket: the lock is what stops a second daemon from
 	 * unlinking the first one's socket on its way to binding its own.
 	 */
-	pfh = pidfile_open(pidpath, 0600, &other);
+	pfh = pidfile_open(PIDFILE_PATH, 0600, &other);
 	if (pfh == NULL) {
 		if (errno == EEXIST)
 			errx(1, "already running as pid %d", (int)other);
-		err(1, "pidfile %s", pidpath);
+		err(1, "pidfile %s", PIDFILE_PATH);
 	}
 
 	/*
@@ -1800,10 +1797,10 @@ main(int argc, char *argv[])
 	 * likeliest startup failure and err(3) still reaches the terminal
 	 * here. An ordinary descriptor survives the fork.
 	 */
-	d.lfd = ipc_listen(d.sockpath, SOCKET_MODE);
+	d.lfd = ipc_listen(SOCKET_PATH, SOCKET_MODE);
 	if (d.lfd < 0) {
 		pidfile_remove(pfh);
-		err(1, "ipc_listen %s", d.sockpath);
+		err(1, "ipc_listen %s", SOCKET_PATH);
 	}
 
 	if (!foreground && daemon(0, 0) < 0) {
@@ -1844,12 +1841,12 @@ main(int argc, char *argv[])
 	 * between.
 	 */
 	if (pidfile_write(pfh) < 0) {
-		syslog(LOG_ERR, "pidfile %s: %m", pidpath);
+		syslog(LOG_ERR, "pidfile %s: %m", PIDFILE_PATH);
 		pidfile_remove(pfh);
 		exit(1);
 	}
 
-	syslog(LOG_INFO, "started, socket %s", d.sockpath);
+	syslog(LOG_INFO, "started, socket %s", SOCKET_PATH);
 
 	/* Prime the state before the first client can ask for it. */
 	load_store(&d);
@@ -1965,9 +1962,9 @@ main(int argc, char *argv[])
 				continue;
 			}
 
-			/* Anything else is a client. */
+			/* Anything else is a client, unless this batch already dropped it. */
 			c = ev->udata;
-			if (c == NULL)
+			if (c == NULL || !client_alive(&d, c))
 				continue;
 
 			if (ev->filter == EVFILT_WRITE) {
@@ -1975,9 +1972,11 @@ main(int argc, char *argv[])
 					drop_client(&d, c);
 					continue;
 				}
-				if (!c->want_write)
-					(void)kq_del(d.kq, (uintptr_t)c->fd,
-					    EVFILT_WRITE);
+				if (!c->want_write) {
+					(void)kq_del(d.kq, (uintptr_t)c->fd, EVFILT_WRITE);
+					if (c->close_after_flush)
+						drop_client(&d, c);
+				}
 				continue;
 			}
 
@@ -1993,16 +1992,19 @@ main(int argc, char *argv[])
 		 */
 		if (d.dirty)
 			reconcile(&d);
+
+		free_dropped_clients(&d);
 	}
 
 	while (d.clients != NULL)
 		drop_client(&d, d.clients);
+	free_dropped_clients(&d);
 
 	if (d.hci >= 0)
 		listen_close(d.hci);
 	if (d.lfd >= 0)
 		close(d.lfd);
-	(void)unlink(d.sockpath);		/* SPEC.md A5.2 */
+	(void)unlink(SOCKET_PATH);		/* SPEC.md A5.2 */
 	if (d.kq >= 0)
 		close(d.kq);
 

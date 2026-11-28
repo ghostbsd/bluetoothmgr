@@ -213,6 +213,7 @@ Treat as research: it displaces the pairing agent everything else depends on.
 
 - [ ] Pairing wizard driving the A6 sequence
 - [ ] Device list: rename, remove, trust
+- [ ] Strip bidi overrides and C1 controls from device names before displaying them
 - [ ] Alias editing in the UI
 - [ ] One-click stale key recovery, offering the M3c path
 - [ ] `.desktop` entry for the Administration menu

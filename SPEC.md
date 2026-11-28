@@ -26,24 +26,24 @@ loses pairing keys.
 
 ## A0. Rules that apply to every file we write
 
-- **A0.1** Every write MUST be atomic: write a temporary file in the same
-  directory, `fsync()` it, then `rename()` it over the target. A partial write
-  to `hcsecd.conf` leaves a daemon that will not start.
-- **A0.2** Before the first modification of a file in a given boot, the daemon
-  MUST copy the existing file to `<path>.bak`, preserving mode and ownership.
-  It MUST NOT overwrite an existing `.bak` on subsequent writes in the same
-  boot, so the backup always represents the pre-BluetoothMgr state.
-- **A0.3** The daemon MUST NOT perform line-oriented or regex in-place editing
-  of any configuration file. It MUST parse the file into a model, modify the
-  model, and re-emit the file in full.
+- **A0.1** Every write MUST update the existing file in place: write the new
+  content into it, truncate it to that length, then `fsync()` it. The file MUST
+  NOT be replaced. A file that does not exist yet is created with the mode its
+  section names.
+- **A0.2** Before modifying an existing file, the daemon MUST copy it to
+  `<path>.bak`, preserving mode and ownership, unless `<path>.bak` already
+  exists. It MUST NOT modify or replace an existing `.bak`.
+- **A0.3** The daemon MUST NOT edit individual lines with line-oriented or
+  regex editing. It MUST parse the file into a model, modify the model, and
+  re-emit the file in full.
 - **A0.4** Content the daemon did not author MUST be preserved. This includes
   comments, blank lines, ordering, and entire records for devices BluetoothMgr
   does not manage. "We do not recognise it" is never grounds to drop it.
 - **A0.5** The daemon MUST NOT write a file if the re-emitted content is
   byte-identical to what is already on disk. Unnecessary writes cause
   unnecessary reloads, and a reload during pairing is harmful (see A6).
-- **A0.6** Temporary files MUST be created with `O_EXCL` and mode `0600`, then
-  chmod'ed to the target's mode before the rename.
+- **A0.6** The daemon MUST NOT change the mode or ownership of an existing
+  file.
 
 ## A1. `/etc/bluetooth/hcsecd.conf`
 
@@ -178,7 +178,8 @@ Ours alone. Directory mode `0700`, file mode `0600`, owner root.
 - **A5.3** Every command MUST be refused unless the peer is root, or the peer
   process belongs to an active GUI session as A9 defines one. This is a desktop
   application, so a peer that is not in a GUI session has no business on this
-  socket at all, read-only commands included.
+  socket at all, read-only commands included. After sending the refusal the
+  daemon MUST close the connection.
 
   Several GUI sessions MAY be active at once. A peer in any of them is allowed,
   with no further distinction between users.
@@ -345,8 +346,8 @@ strict grammars, plus syslog.
 ## A9. `/var/run/utx.active`
 
 The utmpx database of current logins, read with `getutxent(3)`. Mode `0644`,
-owner `root:wheel`, so only root can write it. Not ours: `login(1)`, `sshd` and
-the display manager write it. This file is the input to A5.3.
+owner `root:wheel`. Not ours: `login(1)`, `sshd`, the display manager and the
+setuid `ulog-helper` write it. This file is the input to A5.3.
 
 - **A9.1** GhostBSD writes two records for one graphical login: `lightdm` on
   line `:0`, and the session leader `mate-session` on line `ttyv8` with host
@@ -360,8 +361,9 @@ the display manager write it. This file is the input to A5.3.
   A leading `:` alone MUST NOT be accepted: `ut_host` carries the client
   address of an `ssh` login, and `::1` would read as a display. The test MUST
   be bounded by the field size, which carries no terminator when full.
-- **A9.3** A text console login, which has no host, is not a GUI session.
-  Neither is `ssh` on `pts/N`.
+- **A9.3** A text console login, which has no host, is not a GUI session. A
+  record whose `ut_line` begins with `pts/` MUST NOT be one, whatever its
+  `ut_host`.
 - **A9.4** The peer MUST belong to the session a GUI record names: walking its
   parent chain with `sysctl kern.proc.pid`, either a pid equals the record's
   `ut_pid` or a `ki_sid` does. This is what refuses `ssh` and console peers,

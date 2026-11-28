@@ -20,15 +20,8 @@
 
 #include "proto.h"
 
-/* Must match the daemon's DEFAULT_SOCKET in daemon/src/main.c. */
+/* Must match the daemon's SOCKET_PATH in daemon/src/main.c. */
 #define	BTMGR_SOCKET_PATH	"/var/run/bluetoothmgr.sock"
-
-/*
- * The rc script passes -s $bluetoothmgrd_socket, so the daemon can listen
- * somewhere other than BTMGR_SOCKET_PATH and a client compiled against the
- * constant alone would never find it.
- */
-#define	BTMGR_SOCKET_ENV	"BTMGR_SOCKET"
 
 /*
  * A frontend cannot usefully have many commands outstanding, and a bounded
@@ -39,9 +32,9 @@
 struct btmgr_ipc;
 
 /*
- * Called once per request, which B3.2 guarantees. On a lost connection every
- * pending request is failed with error_code "io_error" so a frontend never
- * waits forever for a daemon that has gone.
+ * Called once per request, which B3.2 guarantees. When dispatch finds the
+ * daemon gone, every pending request is failed with error_code "io_error", so
+ * a frontend never waits forever. btmgr_ipc_close() calls no callback.
  *
  * A callback may issue new requests. It MUST NOT call btmgr_ipc_close(): the
  * dispatch loop is still walking this connection and would then use freed
@@ -53,14 +46,10 @@ typedef void (*btmgr_reply_fn)(const struct proto_msg *reply, void *user_data);
 typedef void (*btmgr_event_fn)(const struct proto_msg *event, void *user_data);
 
 /*
- * path NULL selects btmgr_ipc_default_path(). NULL with ENOENT or ECONNREFUSED
- * means the daemon is not running, which a frontend should treat as
- * retry-later rather than as an error to show the user.
+ * path NULL selects BTMGR_SOCKET_PATH. NULL with ENOENT or ECONNREFUSED means
+ * the daemon is not running: retry later rather than show an error.
  */
 struct btmgr_ipc *btmgr_ipc_open(const char *path);
-
-/* $BTMGR_SOCKET when it is set and usable, otherwise BTMGR_SOCKET_PATH. */
-const char	 *btmgr_ipc_default_path(void);
 
 /* NULL is accepted. */
 void		  btmgr_ipc_close(struct btmgr_ipc *connection);

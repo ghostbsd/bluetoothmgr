@@ -10,7 +10,6 @@ SUBDIR=		btmgr-clienttest \
 		btmgr-keystest \
 		btmgr-linetest \
 		btmgr-pairtest \
-		btmgr-pathtest \
 		btmgr-probe \
 		btmgr-prototest \
 		btmgr-secdtest \

@@ -44,6 +44,7 @@ static void	 ok(int cond, const char *fmt, ...) __printflike(2, 3);
 static void	 eq(const char *got, const char *want, const char *what);
 static void	 rm_rf(const char *path);
 static void	 test_bare_root(const char *scratch);
+static void	 scratch_paths(struct btmgr_paths *paths, const char *root);
 static char	*slurp(const char *path);
 
 /* A documentation address, in bdaddr_t storage order. */
@@ -170,6 +171,20 @@ static const char	 secd_seed[] =
 "\tpin\tnopin;\n"
 "}\n";
 
+/* The real layout under a scratch directory, so a test never touches /etc. */
+static void
+scratch_paths(struct btmgr_paths *paths, const char *root)
+{
+
+	memset(paths, 0, sizeof(*paths));
+	(void)snprintf(paths->hosts, sizeof(paths->hosts), "%s%s", root, BTMGR_HOSTS);
+	(void)snprintf(paths->hcsecd, sizeof(paths->hcsecd), "%s%s", root, BTMGR_HCSECD_CONF);
+	(void)snprintf(paths->keys, sizeof(paths->keys), "%s%s", root, BTMGR_HCSECD_KEYS);
+	(void)snprintf(paths->store, sizeof(paths->store), "%s%s", root, BTMGR_STORE);
+	(void)snprintf(paths->storedir, sizeof(paths->storedir), "%s%s", root, BTMGR_STOREDIR);
+	safefile_init(&paths->sf, 0);
+}
+
 static int
 seed(const char *scratch, const char *label, struct btmgr_paths *paths)
 {
@@ -178,8 +193,8 @@ seed(const char *scratch, const char *label, struct btmgr_paths *paths)
 
 	(void)snprintf(root, sizeof(root), "%s/%s", scratch, label);
 
-	if (btmgr_paths_init(paths, root, 0) != 0 ||
-	    btmgr_paths_mkdirs(paths) != 0)
+	scratch_paths(paths, root);
+	if (btmgr_paths_mkdirs(paths) != 0)
 		return (-1);
 
 	if (safefile_write(&paths->sf, paths->hosts, BTMGR_MODE_HOSTS,
@@ -250,12 +265,7 @@ test_order(const char *scratch)
 	free(text);
 }
 
-/*
- * pairing_begin() on a root where nothing exists yet. Every other case here
- * calls btmgr_paths_mkdirs() from seed(), which hid the fact that begin never
- * created its own directories: under -r the daemon failed on the first write
- * with "mkdir .../var/run/bluetoothmgr: No such file or directory".
- */
+/* pairing_begin() must create its own directories; seed() hides that elsewhere. */
 static void
 test_bare_root(const char *scratch)
 {
@@ -271,10 +281,7 @@ test_bare_root(const char *scratch)
 
 	(void)snprintf(root, sizeof(root), "%s/bare", scratch);
 
-	if (btmgr_paths_init(&paths, root, 0) != 0) {
-		ok(0, "could not init the paths");
-		return;
-	}
+	scratch_paths(&paths, root);
 
 	ok(pairing_begin(&paths, &ops, speaker_addr, "Soundbar X900", "0000",
 	    &state, &report) == PAIR_PARKED,
@@ -545,6 +552,37 @@ test_flush_warning_kept(const char *scratch)
 	    report.detail);
 }
 
+/* A file that exists but cannot be read is not an absent file. */
+static void
+test_unreadable_hosts(const char *scratch)
+{
+	struct btmgr_paths	 paths;
+	struct pair_state	 state;
+	struct pair_report	 report;
+	struct fake		 fake = { 0, 0, 1 };
+	struct pair_ops		 ops = { fake_reload, fake_running, &fake };
+	char			*text;
+
+	printf("\nan unreadable hosts file stops the pairing\n");
+
+	/* Root reads any file, so this only means something as a user. */
+	if (geteuid() == 0)
+		return;
+	if (seed(scratch, "unreadable", &paths) != 0) {
+		ok(0, "could not seed the sandbox");
+		return;
+	}
+
+	(void)chmod(paths.hosts, 0);
+	ok(pairing_begin(&paths, &ops, speaker_addr, "Soundbar X900", "0000",
+	    &state, &report) == PAIR_ERROR, "pairing fails");
+	(void)chmod(paths.hosts, BTMGR_MODE_HOSTS);
+
+	text = slurp(paths.hosts);
+	ok(text != NULL && strcmp(text, hosts_seed) == 0, "and hosts is left as it was");
+	free(text);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -559,10 +597,13 @@ main(int argc, char *argv[])
 	if (argc == 2)
 		(void)snprintf(scratch, sizeof(scratch), "%s", argv[1]);
 	else {
-		const char	*tmp = getenv("TMPDIR");
+		char	 working[PATH_MAX];
 
-		(void)snprintf(scratch, sizeof(scratch),
-		    "%s/btmgr-pairtest.XXXXXX", tmp != NULL ? tmp : "/tmp");
+		if (getcwd(working, sizeof(working)) == NULL) {
+			(void)fprintf(stderr, "getcwd: %s\n", strerror(errno));
+			return (1);
+		}
+		(void)snprintf(scratch, sizeof(scratch), "%s/btmgr-pairtest.XXXXXX", working);
 		if (mkdtemp(scratch) == NULL) {
 			(void)fprintf(stderr, "mkdtemp: %s\n", strerror(errno));
 			return (1);
@@ -579,6 +620,7 @@ main(int argc, char *argv[])
 	test_repair(scratch);
 	test_store_load(scratch);
 	test_flush_warning_kept(scratch);
+	test_unreadable_hosts(scratch);
 
 	printf("\n%d checks, %d failures\n", checks, failures);
 

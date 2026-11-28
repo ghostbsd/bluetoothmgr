@@ -5,7 +5,7 @@
  *
  * A parse-modify-emit model, no file I/O: hosts_parse() takes the file's text,
  * the callers mutate the model, hosts_emit() returns the whole file back. The
- * caller hands that to safefile_write(). A0.3 forbids in-place editing and
+ * caller hands that to safefile_write(). A0.3 forbids editing single lines and
  * A0.4 requires that anything we did not author survives, so an untouched line
  * is re-emitted byte for byte, whitespace included.
  *

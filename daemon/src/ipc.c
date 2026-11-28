@@ -43,6 +43,7 @@
 static int	set_nonblock(int fd);
 static void	read_peer_cred(struct client *c);
 static pid_t	read_sender(struct msghdr *msg, uid_t *uid);
+static void	close_passed_descriptors(struct msghdr *message);
 static int	buf_append(char **buf, size_t *len, size_t *cap,
 		    const char *data, size_t n, size_t limit);
 
@@ -163,6 +164,27 @@ read_sender(struct msghdr *msg, uid_t *uid)
 	}
 
 	return (-1);
+}
+
+/* A client can attach descriptors to any message; we never want them. */
+static void
+close_passed_descriptors(struct msghdr *message)
+{
+	struct cmsghdr	*header;
+	const int	*descriptors;
+	size_t		 count, index;
+
+	for (header = CMSG_FIRSTHDR(message); header != NULL;
+	    header = CMSG_NXTHDR(message, header)) {
+		if (header->cmsg_level != SOL_SOCKET ||
+		    header->cmsg_type != SCM_RIGHTS)
+			continue;
+
+		descriptors = (const int *)CMSG_DATA(header);
+		count = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+		for (index = 0; index < count; index++)
+			(void)close(descriptors[index]);
+	}
 }
 
 int
@@ -291,7 +313,7 @@ ipc_client_read(struct client *c)
 		msg.msg_control = control.buf;
 		msg.msg_controllen = sizeof(control.buf);
 
-		n = recvmsg(c->fd, &msg, 0);
+		n = recvmsg(c->fd, &msg, MSG_CMSG_CLOEXEC);
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
@@ -299,6 +321,7 @@ ipc_client_read(struct client *c)
 				return (0);	/* drained */
 			return (-1);
 		}
+		close_passed_descriptors(&msg);
 		if (n == 0)
 			return (-1);		/* peer closed */
 

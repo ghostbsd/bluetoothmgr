@@ -207,7 +207,7 @@ test_caps(void)
 		return;
 	}
 
-	big = malloc(8192);
+	big = malloc(8192 + 1);
 	if (big == NULL) {
 		ok(0, "out of memory");
 		(void)close(us);
@@ -215,6 +215,7 @@ test_caps(void)
 		return;
 	}
 	memset(big, 'a', 8192);
+	big[8192] = '\0';
 
 	/* Small caps, so the test need not push 64 KiB. */
 	linebuf_init(&buf);

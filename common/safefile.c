@@ -2,9 +2,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * safefile.c - the A0 write discipline. SPEC.md Part A, section A0.
- *
- * See safefile.h for which rule each piece implements and why the per-boot
- * marker is a file rather than a clock comparison.
  */
 
 #include <sys/cdefs.h>
@@ -29,14 +26,10 @@
  */
 #include "memcheck.h"	/* IWYU pragma: keep */
 
-static int	 marker_path(const struct safefile_ctx *context, const char *path,
-		     char *marker, size_t marker_size);
-static int	 ensure_backup(const struct safefile_ctx *context,
-		     const char *path, char *err, size_t errlen);
+static int	 ensure_backup(const char *path, char *err, size_t errlen);
 static int	 copy_preserving(const char *src, const char *dst,
 		     char *err, size_t errlen);
 static int	 write_all(int fd, const void *buf, size_t len);
-static int	 sync_dir(const char *path);
 static void	 seterr(char *err, size_t errlen, const char *fmt, ...)
 		     __printflike(3, 4);
 
@@ -60,21 +53,12 @@ seterr(char *err, size_t errlen, const char *fmt, ...)
 	errno = saved;
 }
 
-int
-safefile_init(struct safefile_ctx *context, const char *rundir, int dry_run)
+void
+safefile_init(struct safefile_ctx *context, int dry_run)
 {
-	const char	*dir;
 
 	memset(context, 0, sizeof(*context));
-	dir = (rundir != NULL) ? rundir : SAFEFILE_RUNDIR;
-
-	if (strlcpy(context->rundir, dir, sizeof(context->rundir)) >=
-	    sizeof(context->rundir)) {
-		errno = ENAMETOOLONG;
-		return (-1);
-	}
 	context->dry_run = dry_run;
-	return (0);
 }
 
 char *
@@ -159,163 +143,116 @@ safefile_read(const char *path, size_t *lenp)
 	return (buf);
 }
 
-/* The per-boot marker for a target: our targets all have distinct names. */
+/*
+ * Copy source to destination with its mode and, if we may, its owner. Written
+ * to a temporary file and renamed, so a symlink at destination is replaced.
+ */
 static int
-marker_path(const struct safefile_ctx *context, const char *path, char *marker,
-    size_t marker_size)
+copy_preserving(const char *source, const char *destination, char *err,
+    size_t errlen)
 {
-	const char	*file_name;
+	struct stat	 status;
+	char		 buffer[65536], temporary[PATH_MAX];
+	ssize_t		 count;
+	int		 input, output = -1, created = 0, saved_errno;
 
-	file_name = strrchr(path, '/');
-	file_name = file_name != NULL ? file_name + 1 : path;
-
-	if ((size_t)snprintf(marker, marker_size, "%s/%s", context->rundir,
-	    file_name) >= marker_size) {
+	if ((size_t)snprintf(temporary, sizeof(temporary), "%s.XXXXXX",
+	    destination) >= sizeof(temporary)) {
+		seterr(err, errlen, "temp path for %s too long", destination);
 		errno = ENAMETOOLONG;
 		return (-1);
 	}
-	return (0);
-}
 
-/*
- * Copy src to dst, preserving mode and, if we have the privilege, ownership.
- *
- * Not atomic, and deliberately so: dst is a .bak that nothing else reads, and
- * making this atomic too would mean a temp file whose own failure modes need
- * the same care. What matters is that we never get here twice per boot.
- */
-static int
-copy_preserving(const char *src, const char *dst, char *err, size_t errlen)
-{
-	struct stat	 sb;
-	char		 buf[65536];
-	ssize_t		 n;
-	int		 in, out, saved;
-
-	in = open(src, O_RDONLY | O_CLOEXEC);
-	if (in == -1) {
-		seterr(err, errlen, "open %s: %s", src, strerror(errno));
+	input = open(source, O_RDONLY | O_CLOEXEC);
+	if (input == -1) {
+		seterr(err, errlen, "open %s: %s", source, strerror(errno));
 		return (-1);
 	}
-	if (fstat(in, &sb) == -1) {
-		seterr(err, errlen, "fstat %s: %s", src, strerror(errno));
-		goto fail_in;
+	if (fstat(input, &status) == -1) {
+		seterr(err, errlen, "fstat %s: %s", source, strerror(errno));
+		goto fail;
 	}
 
-	/* 0600 until the content is in place, then the source's real mode. */
-	out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-	if (out == -1) {
-		seterr(err, errlen, "open %s: %s", dst, strerror(errno));
-		goto fail_in;
+	output = mkstemp(temporary);
+	if (output == -1) {
+		seterr(err, errlen, "mkstemp %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
+	created = 1;
 
 	for (;;) {
-		n = read(in, buf, sizeof(buf));
-		if (n == -1) {
+		count = read(input, buffer, sizeof(buffer));
+		if (count == -1) {
 			if (errno == EINTR)
 				continue;
-			seterr(err, errlen, "read %s: %s", src,
-			    strerror(errno));
-			goto fail_out;
+			seterr(err, errlen, "read %s: %s", source, strerror(errno));
+			goto fail;
 		}
-		if (n == 0)
+		if (count == 0)
 			break;
-		if (write_all(out, buf, (size_t)n) == -1) {
-			seterr(err, errlen, "write %s: %s", dst,
-			    strerror(errno));
-			goto fail_out;
+		if (write_all(output, buffer, (size_t)count) == -1) {
+			seterr(err, errlen, "write %s: %s", temporary, strerror(errno));
+			goto fail;
 		}
 	}
 
-	/*
-	 * Ownership before mode: fchown(2) clears the setuid and setgid bits
-	 * on some systems, so setting the mode afterwards is what makes the
-	 * copy faithful. Not being root is normal here, since the test harness
-	 * runs unprivileged, and a .bak that we could not chown is still a
-	 * correct backup of the content.
-	 */
-	if (fchown(out, sb.st_uid, sb.st_gid) == -1 &&
-	    errno != EPERM && errno != EINVAL) {
-		seterr(err, errlen, "fchown %s: %s", dst, strerror(errno));
-		goto fail_out;
+	/* Owner before mode, since fchown(2) can clear setuid and setgid. */
+	if (fchown(output, status.st_uid, status.st_gid) == -1 && errno != EPERM && errno != EINVAL) {
+		seterr(err, errlen, "fchown %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
-	if (fchmod(out, sb.st_mode & ALLPERMS) == -1) {
-		seterr(err, errlen, "fchmod %s: %s", dst, strerror(errno));
-		goto fail_out;
+	if (fchmod(output, status.st_mode & ALLPERMS) == -1) {
+		seterr(err, errlen, "fchmod %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
-	if (fsync(out) == -1) {
-		seterr(err, errlen, "fsync %s: %s", dst, strerror(errno));
-		goto fail_out;
+	if (fsync(output) == -1) {
+		seterr(err, errlen, "fsync %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
-	if (close(out) == -1) {
-		seterr(err, errlen, "close %s: %s", dst, strerror(errno));
-		close(in);
-		return (-1);
+	if (close(output) == -1) {
+		output = -1;
+		seterr(err, errlen, "close %s: %s", temporary, strerror(errno));
+		goto fail;
 	}
-	close(in);
+	output = -1;
+
+	if (rename(temporary, destination) == -1) {
+		seterr(err, errlen, "rename %s to %s: %s", temporary, destination, strerror(errno));
+		goto fail;
+	}
+	close(input);
+
 	return (0);
 
-fail_out:
-	saved = errno;
-	close(out);
-	unlink(dst);
-	errno = saved;
-fail_in:
-	saved = errno;
-	close(in);
-	errno = saved;
+fail:
+	saved_errno = errno;
+	if (output != -1)
+		close(output);
+	if (created)
+		unlink(temporary);
+	close(input);
+	errno = saved_errno;
+
 	return (-1);
 }
 
-/*
- * A0.2. Make sure this boot's backup of path exists, then record that we have
- * done it.
- *
- * The marker is written even when there was nothing to back up, because a file
- * that did not exist before we ran has no pre-BluetoothMgr state to preserve.
- * Without the marker, our second write of a file we created ourselves would
- * "back up" our own first write and call it the user's original.
- */
+/* A0.2: copy the file before its first change; an existing .bak is never touched. */
 static int
-ensure_backup(const struct safefile_ctx *context, const char *path, char *err,
-    size_t errlen)
+ensure_backup(const char *path, char *err, size_t errlen)
 {
-	char	 marker[PATH_MAX], bak[PATH_MAX];
-	int	 fd;
+	struct stat	 status;
+	char		 backup[PATH_MAX];
 
-	if (marker_path(context, path, marker, sizeof(marker)) == -1) {
-		seterr(err, errlen, "marker path for %s too long", path);
+	if ((size_t)snprintf(backup, sizeof(backup), "%s.bak", path) >= sizeof(backup)) {
+		seterr(err, errlen, "backup path for %s too long", path);
+		errno = ENAMETOOLONG;
 		return (-1);
 	}
 
-	if (access(marker, F_OK) == 0)
-		return (0);		/* already backed up this boot */
+	if (lstat(backup, &status) == 0 || access(path, F_OK) != 0)
+		return (0);
 
-	if (mkdir(context->rundir, 0755) == -1 && errno != EEXIST) {
-		seterr(err, errlen, "mkdir %s: %s", context->rundir,
-		    strerror(errno));
-		return (-1);
-	}
-
-	if (access(path, F_OK) == 0) {
-		if ((size_t)snprintf(bak, sizeof(bak), "%s.bak", path) >=
-		    sizeof(bak)) {
-			seterr(err, errlen, "backup path for %s too long",
-			    path);
-			errno = ENAMETOOLONG;
-			return (-1);
-		}
-		if (copy_preserving(path, bak, err, errlen) == -1)
-			return (-1);
-	}
-
-	fd = open(marker, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
-	if (fd == -1) {
-		seterr(err, errlen, "create %s: %s", marker, strerror(errno));
-		return (-1);
-	}
-	close(fd);
-	return (0);
+	return (copy_preserving(path, backup, err, errlen));
 }
 
 static int
@@ -337,86 +274,25 @@ write_all(int fd, const void *buf, size_t len)
 	return (0);
 }
 
-/*
- * fsync the directory holding path, so the rename itself is durable and not
- * just the bytes it points at. Without this a crash can leave the old name
- * intact on a filesystem that has already discarded the new file's blocks.
- */
-static int
-sync_dir(const char *path)
-{
-	char		 dir[PATH_MAX];
-	const char	*slash;
-	int		 fd, rc, saved;
-
-	slash = strrchr(path, '/');
-	if (slash == NULL) {
-		if (strlcpy(dir, ".", sizeof(dir)) >= sizeof(dir))
-			return (-1);
-	} else {
-		size_t	n = (size_t)(slash - path);
-
-		if (n == 0)
-			n = 1;		/* the file is directly in "/" */
-		if (n >= sizeof(dir)) {
-			errno = ENAMETOOLONG;
-			return (-1);
-		}
-		memcpy(dir, path, n);
-		dir[n] = '\0';
-	}
-
-	fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	if (fd == -1)
-		return (-1);
-	rc = fsync(fd);
-	saved = errno;
-	close(fd);
-	errno = saved;
-	return (rc);
-}
-
 int
 safefile_write(const struct safefile_ctx *context, const char *path,
     mode_t mode, const void *buf, size_t len, char *err, size_t errlen)
 {
-	struct stat	 sb;
-	char		 tmp[PATH_MAX];
-	char		*cur;
-	size_t		 curlen;
-	mode_t		 target_mode;
-	int		 fd, have_old, saved;
+	char	*current;
+	size_t	 current_length;
+	int	 descriptor, saved_errno;
 
 	if (err != NULL && errlen > 0)
 		err[0] = '\0';
 
-	/*
-	 * A0.5 first, before the backup: a write that changes nothing must not
-	 * consume this boot's one backup slot, or a daemon that starts, emits
-	 * an identical file and exits would replace the user's .bak with a
-	 * copy of a file we had already rewritten.
-	 */
-	have_old = 0;
-	target_mode = mode;
-	cur = safefile_read(path, &curlen);
-	if (cur != NULL) {
-		if (curlen == len && (len == 0 || memcmp(cur, buf, len) == 0)) {
-			free(cur);
+	/* A0.5 before the backup, so an identical write never makes a .bak. */
+	current = safefile_read(path, &current_length);
+	if (current != NULL) {
+		if (current_length == len && (len == 0 || memcmp(current, buf, len) == 0)) {
+			free(current);
 			return (SAFEFILE_UNCHANGED);
 		}
-		free(cur);
-
-		/*
-		 * An existing file keeps its own mode and ownership, so we
-		 * need its stat. Only a successful stat sets have_old, because
-		 * have_old is what later licenses reading sb: treating a
-		 * failed stat as "the file is there" would hand fchown(2) an
-		 * uninitialised uid.
-		 */
-		if (stat(path, &sb) == 0) {
-			have_old = 1;
-			target_mode = sb.st_mode & ALLPERMS;
-		}
+		free(current);
 	} else if (errno != ENOENT) {
 		seterr(err, errlen, "read %s: %s", path, strerror(errno));
 		return (SAFEFILE_ERROR);
@@ -425,85 +301,29 @@ safefile_write(const struct safefile_ctx *context, const char *path,
 	if (context->dry_run)
 		return (SAFEFILE_DRYRUN);
 
-	if (ensure_backup(context, path, err, errlen) == -1)
+	if (ensure_backup(path, err, errlen) == -1)
 		return (SAFEFILE_ERROR);
 
-	/*
-	 * A0.1: the temp file lives in the target's own directory, so that the
-	 * rename is within one filesystem and therefore atomic. /tmp would not
-	 * do: rename(2) across filesystems fails with EXDEV, and copying
-	 * instead would reintroduce the partial write we are here to avoid.
-	 */
-	if ((size_t)snprintf(tmp, sizeof(tmp), "%s.btmgr.XXXXXX", path) >=
-	    sizeof(tmp)) {
-		seterr(err, errlen, "temp path for %s too long", path);
-		errno = ENAMETOOLONG;
+	/* A0.1, A0.6: edited in place, so an existing file keeps its owner and mode. */
+	descriptor = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, mode);
+	if (descriptor == -1) {
+		seterr(err, errlen, "open %s: %s", path, strerror(errno));
 		return (SAFEFILE_ERROR);
 	}
 
-	/* A0.6: mkstemp creates O_EXCL, mode 0600. */
-	fd = mkstemp(tmp);
-	if (fd == -1) {
-		seterr(err, errlen, "mkstemp %s: %s", tmp, strerror(errno));
+	if (write_all(descriptor, buf, len) == -1 || ftruncate(descriptor, (off_t)len) == -1 ||
+	    fsync(descriptor) == -1) {
+		seterr(err, errlen, "write %s: %s", path, strerror(errno));
+		saved_errno = errno;
+		(void)close(descriptor);
+		errno = saved_errno;
 		return (SAFEFILE_ERROR);
 	}
 
-	if (write_all(fd, buf, len) == -1) {
-		seterr(err, errlen, "write %s: %s", tmp, strerror(errno));
-		goto fail;
-	}
-
-	/*
-	 * Ownership, then mode, then fsync, then rename. Each step has to land
-	 * before the file becomes visible under its real name, because after
-	 * the rename there is no moment at which a reader would tolerate the
-	 * file having the wrong permissions: hcsecd.conf holds link keys.
-	 */
-	if (have_old && fchown(fd, sb.st_uid, sb.st_gid) == -1 &&
-	    errno != EPERM && errno != EINVAL) {
-		seterr(err, errlen, "fchown %s: %s", tmp, strerror(errno));
-		goto fail;
-	}
-	if (fchmod(fd, target_mode) == -1) {
-		seterr(err, errlen, "fchmod %s: %s", tmp, strerror(errno));
-		goto fail;
-	}
-	if (fsync(fd) == -1) {
-		seterr(err, errlen, "fsync %s: %s", tmp, strerror(errno));
-		goto fail;
-	}
-	if (close(fd) == -1) {
-		seterr(err, errlen, "close %s: %s", tmp, strerror(errno));
-		saved = errno;
-		unlink(tmp);
-		errno = saved;
+	if (close(descriptor) == -1) {
+		seterr(err, errlen, "close %s: %s", path, strerror(errno));
 		return (SAFEFILE_ERROR);
 	}
-
-	if (rename(tmp, path) == -1) {
-		seterr(err, errlen, "rename %s to %s: %s", tmp, path,
-		    strerror(errno));
-		saved = errno;
-		unlink(tmp);
-		errno = saved;
-		return (SAFEFILE_ERROR);
-	}
-
-	/*
-	 * A failure to sync the directory is not worth undoing the write: the
-	 * new content is already the visible one, and unwinding would mean
-	 * restoring a file we no longer hold. Report it and carry on.
-	 */
-	if (sync_dir(path) == -1)
-		seterr(err, errlen, "fsync directory of %s: %s", path,
-		    strerror(errno));
 
 	return (SAFEFILE_WRITTEN);
-
-fail:
-	saved = errno;
-	close(fd);
-	unlink(tmp);
-	errno = saved;
-	return (SAFEFILE_ERROR);
 }

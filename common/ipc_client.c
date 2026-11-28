@@ -121,7 +121,7 @@ fail_all_pending(struct btmgr_ipc *connection)
 void
 btmgr_ipc_set_request_timeout(struct btmgr_ipc *connection, int seconds)
 {
-	if (connection!= NULL && seconds > 0)
+	if (connection != NULL && seconds > 0)
 		connection->request_timeout = seconds;
 }
 
@@ -131,7 +131,7 @@ btmgr_ipc_expire_requests(struct btmgr_ipc *connection)
 	time_t	 now;
 	int	 expired = 0, i;
 
-	if (connection== NULL)
+	if (connection == NULL)
 		return (0);
 
 	now = now_mono();
@@ -174,20 +174,6 @@ deliver_reply(struct btmgr_ipc *connection, const struct proto_msg *reply)
 	/* A reply to nothing: a late duplicate, or a daemon bug. Ignore it. */
 }
 
-const char *
-btmgr_ipc_default_path(void)
-{
-	struct sockaddr_un	 sa;
-	const char		*env;
-
-	env = getenv(BTMGR_SOCKET_ENV);
-	if (env == NULL || env[0] != '/' ||
-	    strlen(env) >= sizeof(sa.sun_path))
-		return (BTMGR_SOCKET_PATH);
-
-	return (env);
-}
-
 struct btmgr_ipc *
 btmgr_ipc_open(const char *path)
 {
@@ -196,7 +182,7 @@ btmgr_ipc_open(const char *path)
 	int			 socket_fd = -1, enabled = 1, saved_errno;
 
 	if (path == NULL)
-		path = btmgr_ipc_default_path();
+		path = BTMGR_SOCKET_PATH;
 
 	if (strlen(path) >= sizeof(address.sun_path)) {
 		errno = ENAMETOOLONG;
@@ -204,7 +190,7 @@ btmgr_ipc_open(const char *path)
 	}
 
 	connection= calloc(1, sizeof(*connection));
-	if (connection== NULL)
+	if (connection == NULL)
 		return (NULL);
 
 	/* A frontend that execs anything must not leak the daemon channel. */
@@ -246,7 +232,7 @@ void
 btmgr_ipc_close(struct btmgr_ipc *connection)
 {
 
-	if (connection== NULL)
+	if (connection == NULL)
 		return;
 
 	linebuf_free(&connection->buf);
@@ -305,7 +291,7 @@ btmgr_ipc_request(struct btmgr_ipc *connection, struct proto_cmd *cmd,
 	char			*line;
 	int			 saved;
 
-	if (connection== NULL || cmd == NULL) {
+	if (connection == NULL || cmd == NULL) {
 		errno = EINVAL;
 		return (-1);
 	}
@@ -372,7 +358,7 @@ btmgr_ipc_dispatch(struct btmgr_ipc *connection, btmgr_event_fn on_event,
 	size_t			 len;
 	int			 filled, saved;
 
-	if (connection== NULL) {
+	if (connection == NULL) {
 		errno = EINVAL;
 		return (-1);
 	}
@@ -450,5 +436,5 @@ btmgr_ipc_pending_count(const struct btmgr_ipc *connection)
 int
 btmgr_ipc_is_ready(const struct btmgr_ipc *connection)
 {
-	return (connection!= NULL && connection->handshake == HANDSHAKE_AGREED);
+	return (connection != NULL && connection->handshake == HANDSHAKE_AGREED);
 }

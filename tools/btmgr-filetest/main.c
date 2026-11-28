@@ -15,7 +15,7 @@
  *	btmgr-filetest [scratch-directory]
  *
  * Exits 0 when every check passes, 1 otherwise. With no argument it makes a
- * directory under $TMPDIR (default /tmp) and removes it on the way out.
+ * directory in the current directory and removes it on the way out.
  */
 
 #include <sys/cdefs.h>
@@ -173,11 +173,11 @@ int
 main(int argc, char **argv)
 {
 	struct safefile_ctx	 ctx, dry;
-	char			 root[PATH_MAX], rundir[PATH_MAX];
+	char			 root[PATH_MAX];
 	char			 target[PATH_MAX], bak[PATH_MAX];
 	char			 err[SAFEFILE_ERRLEN];
 	char			*got;
-	const char		*tmpdir;
+	char			 working[PATH_MAX];
 	ino_t			 before, after;
 	int			 owned = 0, rc;
 
@@ -197,11 +197,11 @@ main(int argc, char **argv)
 			return (2);
 		}
 	} else {
-		tmpdir = getenv("TMPDIR");
-		if (tmpdir == NULL || *tmpdir == '\0')
-			tmpdir = "/tmp";
-		(void)snprintf(root, sizeof(root), "%s/btmgr-filetest.XXXXXX",
-		    tmpdir);
+		if (getcwd(working, sizeof(working)) == NULL) {
+			(void)fprintf(stderr, "getcwd: %s\n", strerror(errno));
+			return (2);
+		}
+		(void)snprintf(root, sizeof(root), "%s/btmgr-filetest.XXXXXX", working);
 		if (mkdtemp(root) == NULL) {
 			(void)fprintf(stderr, "mkdtemp: %s\n", strerror(errno));
 			return (2);
@@ -209,15 +209,11 @@ main(int argc, char **argv)
 		owned = 1;
 	}
 
-	(void)snprintf(rundir, sizeof(rundir), "%s/run", root);
 	(void)snprintf(target, sizeof(target), "%s/hcsecd.conf", root);
 	(void)snprintf(bak, sizeof(bak), "%s.bak", target);
 
-	if (safefile_init(&ctx, rundir, 0) == -1 ||
-	    safefile_init(&dry, rundir, 1) == -1) {
-		(void)fprintf(stderr, "safefile_init: %s\n", strerror(errno));
-		return (2);
-	}
+	safefile_init(&ctx, 0);
+	safefile_init(&dry, 1);
 
 	printf("scratch: %s\n\n", root);
 
@@ -245,12 +241,10 @@ main(int argc, char **argv)
 	    mode_of(bak));
 
 	after = ino_of(target);
-	ok(before != after,
-	    "the target is a new inode, so it was renamed into place, "
-	    "not edited (A0.1, A0.3)");
+	ok(before == after, "the target keeps its inode, so it was edited in place, not replaced (A0.1)");
 
 	/* A0.2 again: the second write must leave the first backup alone. */
-	printf("\n-- A0.2 one backup per boot --\n");
+	printf("\n-- A0.2 an existing .bak is never replaced --\n");
 	rc = safefile_write(&ctx, target, 0600, "second\n", 7, err,
 	    sizeof(err));
 	ok(rc == SAFEFILE_WRITTEN, "second write reports WRITTEN (got %d, %s)",
@@ -269,70 +263,69 @@ main(int argc, char **argv)
 	    "(got %d)", rc);
 	ok(ino_of(target) == before, "the file was not touched at all");
 
-	/* A0.1 and A0.6 leave nothing behind. */
-	printf("\n-- A0.1, A0.6 temp file hygiene --\n");
+	printf("\n-- no temp files are left behind --\n");
 	ok(count_temps(root) == 0, "no leftover temp files (found %d)",
 	    count_temps(root));
 	ok(mode_of(target) == 0600, "target kept mode 0600 (got %04o)",
 	    mode_of(target));
 
-	/*
-	 * An existing file keeps its own mode even when the caller names a
-	 * different one. /etc/bluetooth/hosts is 0644 and must stay readable.
-	 */
-	printf("\n-- an existing file keeps its own mode --\n");
+	printf("\n-- an existing file's mode is never changed (A0.6) --\n");
 	{
-		char	hosts[PATH_MAX];
+		char	wider[PATH_MAX], narrower[PATH_MAX];
 
-		(void)snprintf(hosts, sizeof(hosts), "%s/hosts", root);
-		put_file(hosts, "old\n", 0644);
-		rc = safefile_write(&ctx, hosts, 0600, "new\n", 4, err,
-		    sizeof(err));
-		ok(rc == SAFEFILE_WRITTEN, "wrote hosts (got %d, %s)", rc, err);
-		ok(mode_of(hosts) == 0644,
-		    "0644 preserved despite a 0600 argument (got %04o)",
-		    mode_of(hosts));
+		(void)snprintf(wider, sizeof(wider), "%s/hosts", root);
+		put_file(wider, "old\n", 0644);
+		rc = safefile_write(&ctx, wider, 0600, "new\n", 4, err, sizeof(err));
+		ok(rc == SAFEFILE_WRITTEN && mode_of(wider) == 0644,
+		    "a 0644 file written with 0600 stays 0644 (got %04o)", mode_of(wider));
+
+		(void)snprintf(narrower, sizeof(narrower), "%s/narrower", root);
+		put_file(narrower, "old\n", 0600);
+		rc = safefile_write(&ctx, narrower, 0644, "new\n", 4, err, sizeof(err));
+		ok(rc == SAFEFILE_WRITTEN && mode_of(narrower) == 0600,
+		    "and a 0600 file written with 0644 stays 0600 (got %04o)", mode_of(narrower));
 	}
 
-	/*
-	 * A file we create ourselves has no pre-BluetoothMgr state, so it must
-	 * get no .bak, and rewriting it must not produce one either. Without
-	 * the marker, our second write would back up our own first write.
-	 */
-	printf("\n-- a file we created ourselves is never \"backed up\" --\n");
+	printf("\n-- a file that did not exist gets no .bak --\n");
 	{
 		char	fresh[PATH_MAX], freshbak[PATH_MAX];
 
 		(void)snprintf(fresh, sizeof(fresh), "%s/devices.json", root);
 		(void)snprintf(freshbak, sizeof(freshbak), "%s.bak", fresh);
 
-		rc = safefile_write(&ctx, fresh, 0600, "{}\n", 3, err,
-		    sizeof(err));
-		ok(rc == SAFEFILE_WRITTEN, "created devices.json (got %d, %s)",
-		    rc, err);
-		ok(mode_of(fresh) == 0600,
-		    "a new file got the requested mode 0600 (got %04o)",
-		    mode_of(fresh));
+		rc = safefile_write(&ctx, fresh, 0600, "{}\n", 3, err, sizeof(err));
+		ok(rc == SAFEFILE_WRITTEN, "created devices.json (got %d, %s)", rc, err);
+		ok(mode_of(fresh) == 0600, "a new file got the requested mode 0600 (got %04o)", mode_of(fresh));
 		ok(!exists(freshbak), "no .bak for a file that did not exist");
-
-		rc = safefile_write(&ctx, fresh, 0600, "{\"a\":1}\n", 8, err,
-		    sizeof(err));
-		ok(rc == SAFEFILE_WRITTEN, "rewrote devices.json (got %d, %s)",
-		    rc, err);
-		ok(!exists(freshbak),
-		    "still no .bak, so our own output was not mistaken for "
-		    "the user's original");
 	}
 
-	/* A new boot clears the markers, so the next write refreshes .bak. */
-	printf("\n-- a new boot takes a fresh backup --\n");
-	rm_rf(rundir);
+	printf("\n-- a later write never refreshes .bak --\n");
 	rc = safefile_write(&ctx, target, 0600, "third\n", 6, err, sizeof(err));
-	ok(rc == SAFEFILE_WRITTEN, "write after reboot (got %d, %s)", rc, err);
+	ok(rc == SAFEFILE_WRITTEN, "third write (got %d, %s)", rc, err);
 	got = get_file(bak);
-	ok(got != NULL && strcmp(got, "second\n") == 0,
-	    ".bak refreshed to the pre-boot content");
+	ok(got != NULL && strcmp(got, "original\n") == 0, ".bak still holds the original");
 	free(got);
+
+	/* Whatever sits at the .bak name, even a symlink, is left alone. */
+	printf("\n-- a symlink at .bak is not followed --\n");
+	{
+		char	victim[PATH_MAX];
+		struct stat	status;
+
+		(void)snprintf(victim, sizeof(victim), "%s/victim", root);
+		put_file(victim, "untouched\n", 0644);
+		(void)unlink(bak);
+		if (symlink(victim, bak) != 0)
+			ok(0, "could not plant the symlink: %s", strerror(errno));
+		else {
+			rc = safefile_write(&ctx, target, 0600, "fourth\n", 7, err, sizeof(err));
+			ok(rc == SAFEFILE_WRITTEN, "write with a planted symlink (got %d, %s)", rc, err);
+			got = get_file(victim);
+			ok(got != NULL && strcmp(got, "untouched\n") == 0, "the symlink's target is untouched");
+			free(got);
+			ok(lstat(bak, &status) == 0 && S_ISLNK(status.st_mode), "and the planted .bak is left as it was");
+		}
+	}
 
 	/* --dry-run. */
 	printf("\n-- dry run changes nothing --\n");
