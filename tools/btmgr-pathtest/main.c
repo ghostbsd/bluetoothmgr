@@ -274,6 +274,35 @@ test_unsafe_root(const char *scratch)
 		ok(btmgr_paths_init(&paths, linked_root, 0) == -1 &&
 		    errno == EPERM,
 		    "and so is a symlink, even to an acceptable root");
+
+		(void)strlcat(linked_root, "/", sizeof(linked_root));
+		errno = 0;
+		ok(btmgr_paths_init(&paths, linked_root, 0) == -1 && errno == EPERM,
+		    "even with a trailing slash, which lstat() would follow");
+	}
+
+	{
+		char	 inner_root[PATH_MAX], planted_root[PATH_MAX], planted_link[PATH_MAX];
+
+		(void)snprintf(inner_root, sizeof(inner_root), "%s/group/inner", scratch);
+		if (mkdir(inner_root, 0700) != 0) {
+			ok(0, "could not set up the inner root");
+			return;
+		}
+		errno = 0;
+		ok(btmgr_paths_init(&paths, inner_root, 0) == -1 && errno == EPERM,
+		    "a safe root inside a group-writable parent is refused");
+
+		(void)snprintf(planted_root, sizeof(planted_root), "%s/planted", scratch);
+		(void)snprintf(planted_link, sizeof(planted_link), "%s/planted/etc", scratch);
+		if (mkdir(planted_root, 0700) != 0 || symlink(tightroot, planted_link) != 0) {
+			ok(0, "could not set up the planted root");
+			return;
+		}
+		errno = 0;
+		ok(btmgr_paths_init(&paths, planted_root, 0) == 0 &&
+		    btmgr_paths_mkdirs(&paths) == -1 && errno == EPERM,
+		    "and mkdirs refuses a symlink planted inside the root");
 	}
 
 	/* A root that is not there yet is fine; mkdirs creates it. */

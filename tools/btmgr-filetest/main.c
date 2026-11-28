@@ -293,6 +293,12 @@ main(int argc, char **argv)
 		ok(rc == SAFEFILE_WRITTEN && mode_of(loosened) == 0600,
 		    "a loosened 0644 file written as 0600 is tightened (got %04o)", mode_of(loosened));
 
+		/* The same bytes again: nothing to write, but the mode still matters. */
+		(void)chmod(loosened, 0644);
+		rc = safefile_write(&ctx, loosened, 0600, "new\n", 4, err, sizeof(err));
+		ok(rc == SAFEFILE_UNCHANGED && mode_of(loosened) == 0600,
+		    "so is one whose content is already right (got %d, %04o)", rc, mode_of(loosened));
+
 		(void)snprintf(tightened, sizeof(tightened), "%s/tightened", root);
 		put_file(tightened, "old\n", 0600);
 		rc = safefile_write(&ctx, tightened, 0644, "new\n", 4, err, sizeof(err));
@@ -349,17 +355,17 @@ main(int argc, char **argv)
 		(void)snprintf(victim, sizeof(victim), "%s/victim", root);
 		put_file(victim, "untouched\n", 0644);
 		(void)unlink(bak);
-		(void)symlink(victim, bak);
-		rm_rf(rundir);
-		rc = safefile_write(&ctx, target, 0600, "fourth\n", 7, err,
-		    sizeof(err));
-		ok(rc == SAFEFILE_WRITTEN, "write with a planted symlink (got %d, %s)", rc, err);
-		got = get_file(victim);
-		ok(got != NULL && strcmp(got, "untouched\n") == 0,
-		    "the symlink's target is untouched");
-		free(got);
-		ok(lstat(bak, &status) == 0 && S_ISREG(status.st_mode),
-		    "and .bak is now a regular file");
+		if (symlink(victim, bak) != 0)
+			ok(0, "could not plant the symlink: %s", strerror(errno));
+		else {
+			rm_rf(rundir);
+			rc = safefile_write(&ctx, target, 0600, "fourth\n", 7, err, sizeof(err));
+			ok(rc == SAFEFILE_WRITTEN, "write with a planted symlink (got %d, %s)", rc, err);
+			got = get_file(victim);
+			ok(got != NULL && strcmp(got, "untouched\n") == 0, "the symlink's target is untouched");
+			free(got);
+			ok(lstat(bak, &status) == 0 && S_ISREG(status.st_mode), "and .bak is now a regular file");
+		}
 	}
 
 	/* --dry-run. */

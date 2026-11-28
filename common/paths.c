@@ -17,6 +17,8 @@
 
 static int	 join(char *path, size_t path_size, const char *root,
 		     const char *tail);
+static int	 directory_is_safe(const char *path, int allow_sticky);
+static int	 secure_root(const char *root);
 static int	 mkpath(const char *path, mode_t mode);
 static int	 mkparent(const char *file, mode_t mode);
 
@@ -40,6 +42,61 @@ join(char *path, size_t path_size, const char *root, const char *tail)
 	return (0);
 }
 
+/* Only we or root can change it: no symlink, and nobody else may write it. */
+static int
+directory_is_safe(const char *path, int allow_sticky)
+{
+	struct stat	 status;
+
+	if (lstat(path, &status) != 0)
+		return (-1);
+
+	if (!S_ISDIR(status.st_mode) ||
+	    (status.st_uid != geteuid() && status.st_uid != 0) ||
+	    ((status.st_mode & (S_IWGRP | S_IWOTH)) != 0 &&
+	    !(allow_sticky && (status.st_mode & S_ISVTX) != 0))) {
+		errno = EPERM;
+		return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Every directory from / down to root must be safe; root itself may not be
+ * sticky. A part not there yet, or not visible to us, is left to mkpath().
+ */
+static int
+secure_root(const char *root)
+{
+	char	 path[PATH_MAX];
+	char	*cursor, separator;
+	size_t	 length = strlen(root);
+
+	if (length >= sizeof(path)) {
+		errno = ENAMETOOLONG;
+		return (-1);
+	}
+	memcpy(path, root, length + 1);
+	while (length > 0 && path[length - 1] == '/')
+		path[--length] = '\0';
+
+	for (cursor = path + 1; length > 0; cursor++) {
+		if (*cursor != '/' && *cursor != '\0')
+			continue;
+
+		separator = *cursor;
+		*cursor = '\0';
+		if (directory_is_safe(path, separator != '\0') != 0)
+			return (errno == ENOENT || errno == EACCES ? 0 : -1);
+		if (separator == '\0')
+			break;
+		*cursor = separator;
+	}
+
+	return (0);
+}
+
 int
 btmgr_paths_init(struct btmgr_paths *p, const char *root, int dry_run)
 {
@@ -57,17 +114,8 @@ btmgr_paths_init(struct btmgr_paths *p, const char *root, int dry_run)
 		return (-1);
 	}
 
-	/* Root writes under it, so nobody else may own or write the sandbox. */
-	if (root != NULL && *root != '\0') {
-		struct stat	 status;
-
-		if (lstat(root, &status) == 0 && (!S_ISDIR(status.st_mode) ||
-		    (status.st_uid != geteuid() && status.st_uid != 0) ||
-		    (status.st_mode & (S_IWGRP | S_IWOTH)) != 0)) {
-			errno = EPERM;
-			return (-1);
-		}
-	}
+	if (root != NULL && *root != '\0' && secure_root(root) != 0)
+		return (-1);
 
 	if (join(p->hosts, sizeof(p->hosts), root, BTMGR_HOSTS) != 0 ||
 	    join(p->hcsecd, sizeof(p->hcsecd), root, BTMGR_HCSECD_CONF) != 0 ||
@@ -85,32 +133,33 @@ btmgr_paths_init(struct btmgr_paths *p, const char *root, int dry_run)
 	return (safefile_init(&p->sf, rundir, dry_run));
 }
 
-/* mkdir -p. An existing directory is success. */
+/* mkdir -p. Whatever already exists must be safe, not just present. */
 static int
 mkpath(const char *path, mode_t mode)
 {
-	char	 tmp[PATH_MAX];
-	char	*p;
-	size_t	 len;
+	char	 partial[PATH_MAX];
+	char	*cursor;
+	size_t	 length = strlen(path);
 
-	len = strlen(path);
-	if (len >= sizeof(tmp)) {
+	if (length >= sizeof(partial)) {
 		errno = ENAMETOOLONG;
 		return (-1);
 	}
-	memcpy(tmp, path, len + 1);
+	memcpy(partial, path, length + 1);
 
 	/* Intermediate directories get 0755; only the leaf gets mode. */
-	for (p = tmp + 1; *p != '\0'; p++) {
-		if (*p != '/')
+	for (cursor = partial + 1; *cursor != '\0'; cursor++) {
+		if (*cursor != '/')
 			continue;
-		*p = '\0';
-		if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
+		*cursor = '\0';
+		if ((mkdir(partial, 0755) != 0 && errno != EEXIST) ||
+		    directory_is_safe(partial, 1) != 0)
 			return (-1);
-		*p = '/';
+		*cursor = '/';
 	}
 
-	if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+	if ((mkdir(partial, mode) != 0 && errno != EEXIST) ||
+	    directory_is_safe(partial, 1) != 0)
 		return (-1);
 
 	return (0);

@@ -405,6 +405,13 @@ safefile_write(const struct safefile_ctx *context, const char *path,
 	if (cur != NULL) {
 		if (curlen == len && (len == 0 || memcmp(cur, buf, len) == 0)) {
 			free(cur);
+			/* Same bytes still need a loosened mode tightened. */
+			if (!context->dry_run && stat(path, &sb) == 0 &&
+			    (sb.st_mode & ALLPERMS & ~mode) != 0 &&
+			    chmod(path, sb.st_mode & ALLPERMS & mode) != 0) {
+				seterr(err, errlen, "chmod %s: %s", path, strerror(errno));
+				return (SAFEFILE_ERROR);
+			}
 			return (SAFEFILE_UNCHANGED);
 		}
 		free(cur);

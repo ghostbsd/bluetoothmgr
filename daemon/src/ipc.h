@@ -35,6 +35,7 @@ struct client {
 	size_t		 out_cap;
 
 	int		 want_write;	/* EVFILT_WRITE is currently enabled */
+	int		 close_after_flush;	/* A5.3: refused, reply queued */
 
 	/* Peer credentials, from LOCAL_PEERCRED. A5.3 needs the pid. */
 	uid_t		 uid;

@@ -122,6 +122,7 @@ struct daemon {
 	const char	*sockpath;
 	char		 node[HCI_DEVNAME_SIZE];
 	struct client	*clients;
+	struct client	*dropped;	/* freed at the end of each loop pass */
 	struct state	 last;		/* last snapshot sent to clients */
 	struct adapter_cache adapter_cache;
 	struct store	*store;		/* A4, NULL until loaded */
@@ -161,6 +162,7 @@ static int	kq_del(int kq, uintptr_t ident, short filter);
 static void	broadcast(struct daemon *d, const char *line);
 static int	client_alive(struct daemon *d, const struct client *c);
 static void	drop_client(struct daemon *d, struct client *c);
+static void	free_dropped_clients(struct daemon *d);
 static void	handle_line(struct daemon *d, struct client *c,
 		    const char *line, size_t len);
 static void	service_client(struct daemon *d, struct client *c);
@@ -499,7 +501,21 @@ drop_client(struct daemon *d, struct client *c)
 	if (d->scan_client == c)
 		d->scan_client = NULL;
 
-	ipc_client_free(c);
+	/* Freed later, so no new client can take this address within a batch. */
+	c->next = d->dropped;
+	d->dropped = c;
+}
+
+static void
+free_dropped_clients(struct daemon *d)
+{
+	struct client	*client, *next;
+
+	for (client = d->dropped; client != NULL; client = next) {
+		next = client->next;
+		ipc_client_free(client);
+	}
+	d->dropped = NULL;
 }
 
 /*
@@ -1232,8 +1248,15 @@ handle_line(struct daemon *d, struct client *c, const char *line, size_t len)
 		reply(d, c, proto_error(cmd.id, "not_permitted",
 		    "not root and not in a GUI session"));
 		/* A5.3. reply() drops the client itself when the write fails. */
-		if (client_alive(d, c))
+		if (!client_alive(d, c))
+			return;
+		if (!c->want_write) {
 			drop_client(d, c);
+			return;
+		}
+		/* Close once the refusal is written, reading nothing more. */
+		c->close_after_flush = 1;
+		(void)kq_del(d->kq, (uintptr_t)c->fd, EVFILT_READ);
 		return;
 	}
 
@@ -1498,6 +1521,9 @@ service_client(struct daemon *d, struct client *c)
 	char	*line;
 	size_t	 len;
 
+	if (c->close_after_flush)
+		return;
+
 	if (ipc_client_read(c) < 0) {
 		drop_client(d, c);
 		return;
@@ -1519,7 +1545,7 @@ service_client(struct daemon *d, struct client *c)
 		 * is freed and we must not touch it again. Re-find it in the
 		 * list to be sure it is still alive.
 		 */
-		if (!client_alive(d, c))
+		if (!client_alive(d, c) || c->close_after_flush)
 			return;
 	}
 }
@@ -1978,9 +2004,11 @@ main(int argc, char *argv[])
 					drop_client(&d, c);
 					continue;
 				}
-				if (!c->want_write)
-					(void)kq_del(d.kq, (uintptr_t)c->fd,
-					    EVFILT_WRITE);
+				if (!c->want_write) {
+					(void)kq_del(d.kq, (uintptr_t)c->fd, EVFILT_WRITE);
+					if (c->close_after_flush)
+						drop_client(&d, c);
+				}
 				continue;
 			}
 
@@ -1996,10 +2024,13 @@ main(int argc, char *argv[])
 		 */
 		if (d.dirty)
 			reconcile(&d);
+
+		free_dropped_clients(&d);
 	}
 
 	while (d.clients != NULL)
 		drop_client(&d, d.clients);
+	free_dropped_clients(&d);
 
 	if (d.hci >= 0)
 		listen_close(d.hci);
