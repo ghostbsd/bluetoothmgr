@@ -245,9 +245,7 @@ main(int argc, char **argv)
 	    mode_of(bak));
 
 	after = ino_of(target);
-	ok(before != after,
-	    "the target is a new inode, so it was renamed into place, "
-	    "not edited (A0.1, A0.3)");
+	ok(before == after, "the target keeps its inode, so it was edited in place, not replaced (A0.1)");
 
 	/* A0.2 again: the second write must leave the first backup alone. */
 	printf("\n-- A0.2 one backup per boot --\n");
@@ -277,33 +275,21 @@ main(int argc, char **argv)
 	    mode_of(target));
 
 	/* An existing file keeps its mode, but never wider than asked for. */
-	printf("\n-- an existing file keeps its mode, never wider --\n");
+	printf("\n-- an existing file's mode is never changed (A0.6) --\n");
 	{
-		char	hosts[PATH_MAX], loosened[PATH_MAX], tightened[PATH_MAX];
+		char	wider[PATH_MAX], narrower[PATH_MAX];
 
-		(void)snprintf(hosts, sizeof(hosts), "%s/hosts", root);
-		put_file(hosts, "old\n", 0644);
-		rc = safefile_write(&ctx, hosts, 0644, "new\n", 4, err, sizeof(err));
-		ok(rc == SAFEFILE_WRITTEN, "wrote hosts (got %d, %s)", rc, err);
-		ok(mode_of(hosts) == 0644, "hosts stays 0644 (got %04o)", mode_of(hosts));
+		(void)snprintf(wider, sizeof(wider), "%s/hosts", root);
+		put_file(wider, "old\n", 0644);
+		rc = safefile_write(&ctx, wider, 0600, "new\n", 4, err, sizeof(err));
+		ok(rc == SAFEFILE_WRITTEN && mode_of(wider) == 0644,
+		    "a 0644 file written with 0600 stays 0644 (got %04o)", mode_of(wider));
 
-		(void)snprintf(loosened, sizeof(loosened), "%s/loosened.conf", root);
-		put_file(loosened, "old\n", 0644);
-		rc = safefile_write(&ctx, loosened, 0600, "new\n", 4, err, sizeof(err));
-		ok(rc == SAFEFILE_WRITTEN && mode_of(loosened) == 0600,
-		    "a loosened 0644 file written as 0600 is tightened (got %04o)", mode_of(loosened));
-
-		/* The same bytes again: nothing to write, but the mode still matters. */
-		(void)chmod(loosened, 0644);
-		rc = safefile_write(&ctx, loosened, 0600, "new\n", 4, err, sizeof(err));
-		ok(rc == SAFEFILE_UNCHANGED && mode_of(loosened) == 0600,
-		    "so is one whose content is already right (got %d, %04o)", rc, mode_of(loosened));
-
-		(void)snprintf(tightened, sizeof(tightened), "%s/tightened", root);
-		put_file(tightened, "old\n", 0600);
-		rc = safefile_write(&ctx, tightened, 0644, "new\n", 4, err, sizeof(err));
-		ok(rc == SAFEFILE_WRITTEN && mode_of(tightened) == 0600,
-		    "and an admin's tighter 0600 survives a 0644 request (got %04o)", mode_of(tightened));
+		(void)snprintf(narrower, sizeof(narrower), "%s/narrower", root);
+		put_file(narrower, "old\n", 0600);
+		rc = safefile_write(&ctx, narrower, 0644, "new\n", 4, err, sizeof(err));
+		ok(rc == SAFEFILE_WRITTEN && mode_of(narrower) == 0600,
+		    "and a 0600 file written with 0644 stays 0600 (got %04o)", mode_of(narrower));
 	}
 
 	/*

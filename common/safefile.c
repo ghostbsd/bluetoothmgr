@@ -36,7 +36,6 @@ static int	 ensure_backup(const struct safefile_ctx *context,
 static int	 copy_preserving(const char *src, const char *dst,
 		     char *err, size_t errlen);
 static int	 write_all(int fd, const void *buf, size_t len);
-static int	 sync_dir(const char *path);
 static void	 seterr(char *err, size_t errlen, const char *fmt, ...)
 		     __printflike(3, 4);
 
@@ -340,90 +339,25 @@ write_all(int fd, const void *buf, size_t len)
 	return (0);
 }
 
-/*
- * fsync the directory holding path, so the rename itself is durable and not
- * just the bytes it points at. Without this a crash can leave the old name
- * intact on a filesystem that has already discarded the new file's blocks.
- */
-static int
-sync_dir(const char *path)
-{
-	char		 dir[PATH_MAX];
-	const char	*slash;
-	int		 fd, rc, saved;
-
-	slash = strrchr(path, '/');
-	if (slash == NULL) {
-		if (strlcpy(dir, ".", sizeof(dir)) >= sizeof(dir))
-			return (-1);
-	} else {
-		size_t	n = (size_t)(slash - path);
-
-		if (n == 0)
-			n = 1;		/* the file is directly in "/" */
-		if (n >= sizeof(dir)) {
-			errno = ENAMETOOLONG;
-			return (-1);
-		}
-		memcpy(dir, path, n);
-		dir[n] = '\0';
-	}
-
-	fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-	if (fd == -1)
-		return (-1);
-	rc = fsync(fd);
-	saved = errno;
-	close(fd);
-	errno = saved;
-	return (rc);
-}
-
 int
 safefile_write(const struct safefile_ctx *context, const char *path,
     mode_t mode, const void *buf, size_t len, char *err, size_t errlen)
 {
-	struct stat	 sb;
-	char		 tmp[PATH_MAX];
-	char		*cur;
-	size_t		 curlen;
-	mode_t		 target_mode;
-	int		 fd, have_old, saved;
+	char	*current;
+	size_t	 current_length;
+	int	 descriptor, saved_errno;
 
 	if (err != NULL && errlen > 0)
 		err[0] = '\0';
 
-	/*
-	 * A0.5 first, before the backup: a write that changes nothing must not
-	 * consume this boot's one backup slot, or a daemon that starts, emits
-	 * an identical file and exits would replace the user's .bak with a
-	 * copy of a file we had already rewritten.
-	 */
-	have_old = 0;
-	target_mode = mode;
-	cur = safefile_read(path, &curlen);
-	if (cur != NULL) {
-		if (curlen == len && (len == 0 || memcmp(cur, buf, len) == 0)) {
-			free(cur);
-			/* Same bytes still need a loosened mode tightened. */
-			if (!context->dry_run && stat(path, &sb) == 0 &&
-			    (sb.st_mode & ALLPERMS & ~mode) != 0 &&
-			    chmod(path, sb.st_mode & ALLPERMS & mode) != 0) {
-				seterr(err, errlen, "chmod %s: %s", path, strerror(errno));
-				return (SAFEFILE_ERROR);
-			}
+	/* A0.5 before the backup, so an identical write does not use up this boot's .bak. */
+	current = safefile_read(path, &current_length);
+	if (current != NULL) {
+		if (current_length == len && (len == 0 || memcmp(current, buf, len) == 0)) {
+			free(current);
 			return (SAFEFILE_UNCHANGED);
 		}
-		free(cur);
-
-		/*
-		 * An existing file keeps its ownership and its mode, but never
-		 * wider than mode: a loosened hcsecd.conf must not expose PINs.
-		 */
-		if (stat(path, &sb) == 0) {
-			have_old = 1;
-			target_mode = sb.st_mode & ALLPERMS & mode;
-		}
+		free(current);
 	} else if (errno != ENOENT) {
 		seterr(err, errlen, "read %s: %s", path, strerror(errno));
 		return (SAFEFILE_ERROR);
@@ -435,82 +369,26 @@ safefile_write(const struct safefile_ctx *context, const char *path,
 	if (ensure_backup(context, path, err, errlen) == -1)
 		return (SAFEFILE_ERROR);
 
-	/*
-	 * A0.1: the temp file lives in the target's own directory, so that the
-	 * rename is within one filesystem and therefore atomic. /tmp would not
-	 * do: rename(2) across filesystems fails with EXDEV, and copying
-	 * instead would reintroduce the partial write we are here to avoid.
-	 */
-	if ((size_t)snprintf(tmp, sizeof(tmp), "%s.btmgr.XXXXXX", path) >=
-	    sizeof(tmp)) {
-		seterr(err, errlen, "temp path for %s too long", path);
-		errno = ENAMETOOLONG;
+	/* A0.1, A0.6: edited in place, so an existing file keeps its owner and mode. */
+	descriptor = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, mode);
+	if (descriptor == -1) {
+		seterr(err, errlen, "open %s: %s", path, strerror(errno));
 		return (SAFEFILE_ERROR);
 	}
 
-	/* A0.6: mkstemp creates O_EXCL, mode 0600. */
-	fd = mkstemp(tmp);
-	if (fd == -1) {
-		seterr(err, errlen, "mkstemp %s: %s", tmp, strerror(errno));
+	if (write_all(descriptor, buf, len) == -1 || ftruncate(descriptor, (off_t)len) == -1 ||
+	    fsync(descriptor) == -1) {
+		seterr(err, errlen, "write %s: %s", path, strerror(errno));
+		saved_errno = errno;
+		(void)close(descriptor);
+		errno = saved_errno;
 		return (SAFEFILE_ERROR);
 	}
 
-	if (write_all(fd, buf, len) == -1) {
-		seterr(err, errlen, "write %s: %s", tmp, strerror(errno));
-		goto fail;
-	}
-
-	/*
-	 * Ownership, then mode, then fsync, then rename. Each step has to land
-	 * before the file becomes visible under its real name, because after
-	 * the rename there is no moment at which a reader would tolerate the
-	 * file having the wrong permissions: hcsecd.conf holds link keys.
-	 */
-	if (have_old && fchown(fd, sb.st_uid, sb.st_gid) == -1 &&
-	    errno != EPERM && errno != EINVAL) {
-		seterr(err, errlen, "fchown %s: %s", tmp, strerror(errno));
-		goto fail;
-	}
-	if (fchmod(fd, target_mode) == -1) {
-		seterr(err, errlen, "fchmod %s: %s", tmp, strerror(errno));
-		goto fail;
-	}
-	if (fsync(fd) == -1) {
-		seterr(err, errlen, "fsync %s: %s", tmp, strerror(errno));
-		goto fail;
-	}
-	if (close(fd) == -1) {
-		seterr(err, errlen, "close %s: %s", tmp, strerror(errno));
-		saved = errno;
-		unlink(tmp);
-		errno = saved;
+	if (close(descriptor) == -1) {
+		seterr(err, errlen, "close %s: %s", path, strerror(errno));
 		return (SAFEFILE_ERROR);
 	}
-
-	if (rename(tmp, path) == -1) {
-		seterr(err, errlen, "rename %s to %s: %s", tmp, path,
-		    strerror(errno));
-		saved = errno;
-		unlink(tmp);
-		errno = saved;
-		return (SAFEFILE_ERROR);
-	}
-
-	/*
-	 * A failure to sync the directory is not worth undoing the write: the
-	 * new content is already the visible one, and unwinding would mean
-	 * restoring a file we no longer hold. Report it and carry on.
-	 */
-	if (sync_dir(path) == -1)
-		seterr(err, errlen, "fsync directory of %s: %s", path,
-		    strerror(errno));
 
 	return (SAFEFILE_WRITTEN);
-
-fail:
-	saved = errno;
-	close(fd);
-	unlink(tmp);
-	errno = saved;
-	return (SAFEFILE_ERROR);
 }

@@ -26,24 +26,25 @@ loses pairing keys.
 
 ## A0. Rules that apply to every file we write
 
-- **A0.1** Every write MUST be atomic: write a temporary file in the same
-  directory, `fsync()` it, then `rename()` it over the target. A partial write
-  to `hcsecd.conf` leaves a daemon that will not start.
+- **A0.1** Every write MUST update the existing file in place: write the new
+  content into it, truncate it to that length, then `fsync()` it. The file MUST
+  NOT be replaced. A file that does not exist yet is created with the mode its
+  section names.
 - **A0.2** Before the first modification of a file in a given boot, the daemon
   MUST copy the existing file to `<path>.bak`, preserving mode and ownership.
   It MUST NOT overwrite an existing `.bak` on subsequent writes in the same
   boot, so the backup always represents the pre-BluetoothMgr state.
-- **A0.3** The daemon MUST NOT perform line-oriented or regex in-place editing
-  of any configuration file. It MUST parse the file into a model, modify the
-  model, and re-emit the file in full.
+- **A0.3** The daemon MUST NOT edit individual lines with line-oriented or
+  regex editing. It MUST parse the file into a model, modify the model, and
+  re-emit the file in full.
 - **A0.4** Content the daemon did not author MUST be preserved. This includes
   comments, blank lines, ordering, and entire records for devices BluetoothMgr
   does not manage. "We do not recognise it" is never grounds to drop it.
 - **A0.5** The daemon MUST NOT write a file if the re-emitted content is
   byte-identical to what is already on disk. Unnecessary writes cause
   unnecessary reloads, and a reload during pairing is harmful (see A6).
-- **A0.6** Temporary files MUST be created with `O_EXCL` and mode `0600`, then
-  chmod'ed to the target's mode before the rename.
+- **A0.6** The daemon MUST NOT change the mode or ownership of an existing
+  file.
 
 ## A1. `/etc/bluetooth/hcsecd.conf`
 
